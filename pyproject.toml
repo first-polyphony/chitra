@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chitra"
+version = "0.2.0"
+description = "Deterministic tmux relay/dedup daemons for AI-agent fleet monitoring"
+readme = "README.md"
+# license: pending an operator decision (see docs/DESIGN.md and LICENSE
+# placeholder) — do not set [project].license until that's resolved;
+# hatchling validates it against a real SPDX id / file at build time.
+requires-python = ">=3.12"
+authors = [
+    { name = "first-polyphony" },
+]
+dependencies = [
+    "structlog>=24.0.0",
+    "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8,<9.1",
+    "pytest-cov>=6",
+]
+
+[project.scripts]
+dispatchd = "chitra.dispatchd:main"
+triaged = "chitra.triaged:main"
+draft-scanner = "chitra.draft_scanner:main"
+
+[project.urls]
+Repository = "https://github.com/first-polyphony/chitra"
+Issues = "https://github.com/first-polyphony/chitra/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chitra"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
