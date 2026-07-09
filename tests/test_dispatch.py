@@ -22,6 +22,7 @@ from chitra.dispatch import (
     dispatch_to_tmux,
     ensure_pane_not_in_mode,
     find_recent_transcript,
+    liveness_check,
     pane_in_mode,
     paste_nudge_to_local_tmux,
     remote_tmux_paste_command,
@@ -210,6 +211,42 @@ def test_lane_lock_context_manager_releases_on_exit(tmp_path: Path) -> None:
     other2 = LaneLock(session_ref, lock_dir=lock_dir)
     assert other2.acquire(blocking=False) is True
     other2.release()
+
+
+# --- liveness_check: single-writer-rule guard -----------------------------
+
+
+def test_liveness_check_returns_false_for_malformed_session_ref() -> None:
+    runner = FakeRunner()
+    assert liveness_check("not-a-valid-ref", runner=runner) is False
+    assert runner.calls == []
+
+
+def test_liveness_check_assumes_remote_host_is_live() -> None:
+    runner = FakeRunner()
+    result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
+    assert result is True
+    # Remote path never shells out to inspect the (inaccessible) session.
+    assert runner.calls == []
+
+
+def test_liveness_check_true_when_local_session_has_attached_client() -> None:
+    runner = FakeRunner(default=fake_completed(0, "sess\n", ""))
+    result = liveness_check("localhost:sess:0.0", runner=runner, local_extra={"localhost"})
+    assert result is True
+    assert runner.calls == [["tmux", "list-clients", "-t", "sess", "-F", "#{session_name}"]]
+
+
+def test_liveness_check_false_when_local_session_has_no_attached_client() -> None:
+    runner = FakeRunner(default=fake_completed(0, "", ""))
+    result = liveness_check("localhost:sess:0.0", runner=runner, local_extra={"localhost"})
+    assert result is False
+
+
+def test_liveness_check_false_when_tmux_list_clients_fails() -> None:
+    runner = FakeRunner(default=fake_completed(1, "", "no such session"))
+    result = liveness_check("localhost:sess:0.0", runner=runner, local_extra={"localhost"})
+    assert result is False
 
 
 # --- tmux_pane_target ------------------------------------------------------
