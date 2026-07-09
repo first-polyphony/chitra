@@ -47,6 +47,8 @@ See `chitra.ledger.verify_delivery` for the check as a function call, or read `l
 
 ## Install
 
+Requires Python 3.12+ and `tmux` on the host (chitra shells out to the `tmux` binary; there is no Python tmux dependency to install).
+
 ```bash
 pip install git+https://github.com/first-polyphony/chitra.git@<tag>
 ```
@@ -84,7 +86,7 @@ All configuration is via CLI flags (see `--help` on each entrypoint) or a small 
 
 ## A note on the observer pattern
 
-Internally, chitra is paired with a read-only observer that consumes its event/state output for learning and reflection purposes — it never writes back into chitra's queues, locks, or state. That coupling is intentionally not shipped here: chitra exposes plain, documented file/queue formats (JSON orders/results, a line-oriented events log, a JSON triage log) precisely so that *any* read-only consumer — an internal tool, a dashboard, a future OSS project — can be built against them without chitra needing to know it exists. If you're building a read-only observer against chitra's output, the file formats above are the whole contract.
+Internally, chitra is paired with a read-only observer that consumes its event/state output for learning and reflection purposes — it never writes back into chitra's queues, locks, or state. That coupling is intentionally not shipped here: chitra exposes plain, documented file/queue formats (JSON orders/results in `chitra.dispatch`'s `DispatchOrder`/`DispatchResult` models, the `<ISO8601> <LANE_ID> <TEXT>` events-log line format documented in `chitra.triaged`'s module docstring, and the JSON triage log it emits) precisely so that *any* read-only consumer — an internal tool, a dashboard, a future OSS project — can be built against them without chitra needing to know it exists. If you're building a read-only observer against chitra's output, those module docstrings are the whole contract — nothing else to read.
 
 ## Roadmap
 
@@ -96,4 +98,4 @@ Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](http
 
 ## License
 
-See `LICENSE` (pending — see `docs/DESIGN.md`).
+Apache License 2.0 (see `LICENSE` and `NOTICE`). This is a default applied absent any historical project precedent — it has not yet been confirmed by the operator and may change.
