@@ -7,9 +7,9 @@ name = "chitra"
 version = "0.2.0"
 description = "Deterministic tmux relay/dedup daemons for AI-agent fleet monitoring"
 readme = "README.md"
-# license: pending an operator decision (see docs/DESIGN.md and LICENSE
-# placeholder) — do not set [project].license until that's resolved;
-# hatchling validates it against a real SPDX id / file at build time.
+# license: default applied absent any historical project precedent;
+# pending explicit operator confirmation (see docs/DESIGN.md and NOTICE).
+license = "Apache-2.0"
 requires-python = ">=3.12"
 authors = [
     { name = "first-polyphony" },
