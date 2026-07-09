@@ -31,6 +31,35 @@ for sessions confirmed DETACHED/STOPPED after an explicit liveness check —
 never for a live lane. The ``-p --resume`` fallback path itself is out of
 scope for this build; only the ``LaneLock`` enforcement and a
 ``liveness_check`` helper stub are provided here.
+
+Directive-voice guard
+----------------------
+
+``directive_voice_violation`` is a pure regex predicate checked at the top
+of ``dispatch_to_tmux``, before the pre-dispatch pane check and before
+anything is pasted. Chitra relays instructions; it never speaks as the
+operator or claims the operator's authority. A nudge that attributes itself
+to "the operator" / "the monitor", or has chitra claim in its own voice to
+want/say/need/relay something, is rejected outright: ``dispatch_to_tmux``
+returns ``DispatchResult(status=BLOCKED, reason="directive-voice: ...")``
+with nothing pasted and no delivery-ledger entry (``dispatchd`` only signs
+the ledger on ``SENT`` — see ``dispatchd.process_one_order``).
+
+Origin / never-cancel guard (MANDATORY CONTRACT for any future reconciler)
+----------------------------------------------------------------------------
+
+No reconciliation/drift-detection code path exists in this codebase yet
+(``dispatchd`` only delivers; nothing currently holds, cancels, or reorders
+a target session's task list). This module nonetheless fixes the contract
+any future reconciler MUST follow, and provides the predicate + ledger
+lookup it must use: ``is_chitra_dispatched_task`` cross-references the
+delivery ledger (``chitra.ledger.verify_delivery``) for a given
+``session_ref`` + task text. A task with **no** matching ledger entry is
+presumed operator-authored and is **immutable to chitra** — a future
+reconciler may only ADD tasks or REORDER tasks for which this predicate
+returns ``True`` (chitra-dispatched ones). It must never remove, hold, or
+"correct away" a task for which this predicate returns ``False``. A
+growing task list is not drift.
 """
 
 from __future__ import annotations
@@ -55,6 +84,8 @@ from typing import Protocol
 import structlog
 from pydantic import BaseModel, Field
 
+from . import ledger as ledger_mod
+
 logger = structlog.get_logger(__name__)
 
 
@@ -73,6 +104,12 @@ _IDLE_INPUT_LINE_RE = re.compile(
     r"(?:[\w.-]+@[\w.-]+(?::[^$#%>]*)?)?\s*"
     r"(?:[$#%>]|>>>|\.\.\.|In \[\d+\]:)\s*$"
 )
+
+# Directive-voice guard: chitra relays instructions, it never speaks AS the
+# operator or claims the operator's authority. A nudge that attributes itself
+# to "the operator" or "the monitor", or has chitra claim to want/say/need/
+# relay something in its own voice, is a directive-voice violation.
+_BANNED = re.compile(r"\boperator\b|\bthe monitor\b|\bchitra (wants|says|needs|relays)\b", re.I)
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +151,13 @@ class DispatchOrder(BaseModel):
     order_id: str
     session_ref: str
     nudge: str
+    """Verbatim text to inject. Convention (enforced in practice by
+    ``directive_voice_violation``'s regex match on the ``operator`` token):
+    chitra must never quote the operator verbatim or speak in the
+    operator's voice — no "the operator wants/says", no "chitra
+    wants/says/needs/relays", no bare "operator" attribution. A nudge that
+    trips the check is rejected by ``dispatch_to_tmux`` (status
+    ``BLOCKED``) before anything is pasted."""
     tag: str = "[C]"
     routing_hint: str | None = None
     task_type: str | None = None
@@ -289,6 +333,40 @@ def tmux_pane_target(session: str, pane: str) -> str:
 # ---------------------------------------------------------------------------
 # Text normalization helpers (mirrors of the source)
 # ---------------------------------------------------------------------------
+
+
+def directive_voice_violation(nudge: str) -> str | None:
+    """Return the banned attribution phrase found in ``nudge``, or ``None``.
+
+    Pure regex predicate: chitra relays instructions, it never speaks as
+    the operator or claims the operator's authority. Matches a bare
+    ``operator`` token, ``the monitor``, or chitra claiming to
+    want/say/need/relay something in its own voice. Case-insensitive.
+    """
+    m = _BANNED.search(nudge)
+    return m.group(0) if m else None
+
+
+def is_chitra_dispatched_task(
+    task_text: str,
+    *,
+    session_ref: str,
+    ledger_path: Path,
+    key: bytes,
+) -> bool:
+    """Origin / never-cancel guard: is ``task_text`` something chitra itself
+    dispatched to ``session_ref``?
+
+    Cross-references the delivery ledger via ``ledger.verify_delivery``.
+    Returns ``True`` only if a signed ledger entry proves chitra delivered
+    this exact text to this session. ``False`` means no matching entry
+    exists — the task is presumed operator-authored and MUST be treated as
+    immutable by any reconciler (see this module's docstring): a
+    reconciler may add tasks or reorder tasks for which this returns
+    ``True``, but must never remove, hold, or "correct away" a task for
+    which this returns ``False``.
+    """
+    return ledger_mod.verify_delivery(ledger_path, key=key, session_ref=session_ref, nudge=task_text) is not None
 
 
 def strip_terminal_controls(text: str) -> str:
@@ -848,6 +926,20 @@ def dispatch_to_tmux(
         )
     host, session, pane_field = parts
     pane = tmux_pane_target(session, pane_field)
+
+    # Directive-voice guard: reject before anything is pasted. A BLOCKED
+    # voice violation must never touch the pane and must never generate a
+    # delivery-ledger entry (dispatchd only signs/logs on SENT).
+    bad = directive_voice_violation(order.nudge)
+    if bad is not None:
+        logger.info("tmux_dispatch_blocked_directive_voice", session_ref=order.session_ref, phrase=bad)
+        return DispatchResult(
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            status=DispatchStatus.BLOCKED,
+            reason=f"directive-voice: banned attribution phrase {bad!r}",
+        )
+
     hosts = allowed_hosts if allowed_hosts is not None else allowed_remote_dispatch_hosts()
     if host not in hosts and not is_local_host(host, local_extra):
         return DispatchResult(

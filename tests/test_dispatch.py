@@ -19,9 +19,11 @@ from chitra.dispatch import (
     LaneLock,
     LaneLockError,
     cancel_copy_mode,
+    directive_voice_violation,
     dispatch_to_tmux,
     ensure_pane_not_in_mode,
     find_recent_transcript,
+    is_chitra_dispatched_task,
     liveness_check,
     pane_in_mode,
     paste_nudge_to_local_tmux,
@@ -29,6 +31,7 @@ from chitra.dispatch import (
     tmux_pane_target,
     transcript_confirms_nudge,
 )
+from chitra.ledger import append_entry, load_or_create_signing_key
 
 HAS_TMUX = shutil.which("tmux") is not None
 
@@ -341,6 +344,104 @@ def test_dispatch_to_tmux_defaults_routing_hint_to_none() -> None:
     result = dispatch_to_tmux(order)
     assert result.status == DispatchStatus.FAILED
     assert result.routing_hint is None
+
+
+# --- directive-voice guard --------------------------------------------------
+
+
+def test_directive_voice_violation_none_for_a_clean_instruction() -> None:
+    assert directive_voice_violation("Stop editing main and open a PR.") is None
+
+
+def test_dispatch_to_tmux_sends_a_clean_order(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    session_dir = projects_root / "some-project"
+    session_dir.mkdir(parents=True)
+    transcript = session_dir / "abc123.jsonl"
+    transcript.write_text(json.dumps({"text": "Stop editing main and open a PR."}) + "\n", encoding="utf-8")
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return fake_completed(0, "ubuntu@host:~$ ", "")
+        return fake_completed(0, "", "")
+
+    def input_runner(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        return fake_completed(0, "", "")
+
+    order = DispatchOrder(order_id="o1", session_ref="localhost:f3:0.0", nudge="Stop editing main and open a PR.")
+    result = dispatch_to_tmux(
+        order,
+        runner=runner,
+        input_runner=input_runner,
+        local_extra={"localhost"},
+        projects_root=projects_root,
+        sleep=lambda _seconds: None,
+    )
+    assert result.status == DispatchStatus.SENT
+
+
+@pytest.mark.parametrize(
+    "nudge",
+    [
+        "the operator wants X",
+        "operator is frustrated",
+        "chitra relays: do X",
+    ],
+)
+def test_dispatch_to_tmux_blocks_directive_voice_violations(nudge: str) -> None:
+    calls: list[list[str]] = []
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return fake_completed(0, "", "")
+
+    def input_runner(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return fake_completed(0, "", "")
+
+    order = DispatchOrder(order_id="o1", session_ref="localhost:f3:0.0", nudge=nudge)
+    result = dispatch_to_tmux(order, runner=runner, input_runner=input_runner, local_extra={"localhost"})
+
+    assert result.status == DispatchStatus.BLOCKED
+    assert result.reason.startswith("directive-voice:")
+    # Nothing pasted: no tmux/paste/capture commands issued at all, and no
+    # command was ever routed through the stdin-payload (load-buffer) runner.
+    assert calls == []
+
+
+# --- origin / never-cancel guard --------------------------------------------
+
+
+def test_is_chitra_dispatched_task_false_for_task_absent_from_ledger(tmp_path: Path) -> None:
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    ledger_path = tmp_path / "ledger.jsonl"
+    append_entry(ledger_path, order_id="o1", session_ref="localhost:s:0.0", tag="[C]", nudge="a chitra-dispatched task", key=key)
+
+    assert (
+        is_chitra_dispatched_task(
+            "an operator-typed task chitra never sent",
+            session_ref="localhost:s:0.0",
+            ledger_path=ledger_path,
+            key=key,
+        )
+        is False
+    )
+
+
+def test_is_chitra_dispatched_task_true_for_task_present_in_ledger(tmp_path: Path) -> None:
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    ledger_path = tmp_path / "ledger.jsonl"
+    append_entry(ledger_path, order_id="o1", session_ref="localhost:s:0.0", tag="[C]", nudge="a chitra-dispatched task", key=key)
+
+    assert (
+        is_chitra_dispatched_task(
+            "a chitra-dispatched task",
+            session_ref="localhost:s:0.0",
+            ledger_path=ledger_path,
+            key=key,
+        )
+        is True
+    )
 
 
 # --- optional real-tmux integration test (skipped if tmux is unavailable) -
