@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+import chitra.dispatchd as dispatchd_mod
+import chitra.ledger as ledger_mod
 from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
 from chitra.dispatchd import process_one_order, run_once
 
@@ -19,7 +21,6 @@ def _write_order(orders_dir: Path, order: DispatchOrder) -> Path:
 
 
 def test_run_once_processes_pending_orders_and_moves_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import chitra.dispatchd as dispatchd_mod
 
     def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
         return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT, reason="sent: test")
@@ -49,7 +50,6 @@ def test_run_once_processes_pending_orders_and_moves_them(tmp_path: Path, monkey
 def test_partially_processed_order_is_not_reprocessed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A result file already existing for an order id means it was already
     delivered — process_one_order must not re-dispatch, only file-move."""
-    import chitra.dispatchd as dispatchd_mod
 
     call_count = {"n": 0}
 
@@ -86,7 +86,6 @@ def test_partially_processed_order_is_not_reprocessed(tmp_path: Path, monkeypatc
 
 
 def test_blocked_result_does_not_write_a_ledger_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import chitra.dispatchd as dispatchd_mod
 
     def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
         return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.BLOCKED, reason="blocked: test")
@@ -108,6 +107,43 @@ def test_blocked_result_does_not_write_a_ledger_entry(tmp_path: Path, monkeypatc
     assert results[0].status == DispatchStatus.BLOCKED
     # Only a real send is signed/logged — a blocked attempt is not a delivery.
     assert not (tmp_path / "ledger.jsonl").exists()
+
+
+def test_ledger_write_failure_does_not_prevent_completion_or_cause_redelivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: a ledger append failure after a real successful
+    dispatch must not leave the order un-completed -- that would cause a
+    redelivery (paste the same nudge into the live pane again) on the next
+    pass, exactly the double-delivery the crash-safety design promises
+    never happens."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    def failing_append_entry(*args: Any, **kwargs: Any) -> None:
+        raise OSError("simulated disk failure writing the ledger")
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    monkeypatch.setattr(ledger_mod, "append_entry", failing_append_entry)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-4", session_ref="localhost:s:0.0", nudge="hi")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+    # The order must still be marked complete -- moved and result-written --
+    # even though the ledger write failed. Otherwise the next run_once()
+    # would see it still pending and redeliver it.
+    assert not (queue_dir / "orders" / "ord-4.json").exists()
+    assert (queue_dir / "processed" / "ord-4.json").exists()
+    assert (queue_dir / "results" / "ord-4.json").exists()
 
 
 def test_malformed_order_file_is_moved_aside_not_crashed_on(tmp_path: Path) -> None:

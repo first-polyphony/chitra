@@ -52,13 +52,18 @@ def state_signature(text: str) -> str:
 
 
 def load_state(state_file: Path) -> dict[str, str]:
-    """Load the lane_id -> last-seen-signature map. Missing/corrupt file ->
-    empty map (fail-soft: a lost dedup state means one extra triage event
-    per lane at worst, never a crash)."""
+    """Load the lane_id -> last-seen-signature map. A missing file silently
+    starts empty (nothing to log — there's genuinely nothing there yet). A
+    file that EXISTS but fails to parse is logged before falling back to
+    empty (fail-soft: a lost dedup state means one extra triage event per
+    lane at worst, never a crash — but corruption is never silent)."""
     try:
         loaded: dict[str, str] = json.loads(state_file.read_text(encoding="utf-8"))
         return loaded
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning("triaged_state_file_corrupt", path=str(state_file), error=str(exc))
         return {}
 
 
@@ -115,7 +120,10 @@ def run_once(
     offset_path = offset_file or state_file.with_suffix(".offset")
     try:
         last_offset = int(offset_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        last_offset = 0
+    except (OSError, ValueError) as exc:
+        logger.warning("triaged_offset_file_corrupt", path=str(offset_path), error=str(exc))
         last_offset = 0
 
     if not events_log.exists():

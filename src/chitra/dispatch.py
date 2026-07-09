@@ -252,6 +252,22 @@ def is_local_host(host: str, extra: set[str] | None = None) -> bool:
     return host.split(".", 1)[0] in local_host_aliases(extra)
 
 
+def tmux_pane_target(session: str, pane: str) -> str:
+    """Build a fully-qualified tmux target from a ``session_ref``'s session
+    and pane components.
+
+    A bare pane spec like ``"0.0"`` resolves against tmux's CURRENT session
+    when passed alone to ``-t`` — on any host running more than one tmux
+    session (this package's entire intended deployment shape), that silently
+    targets the wrong session. Qualify with the session name unless the pane
+    is already fully-qualified (contains ``:``) or is a globally-unique tmux
+    pane id (``%N``, valid on its own regardless of session).
+    """
+    if not pane or ":" in pane or pane.startswith("%"):
+        return pane
+    return f"{session}:{pane}"
+
+
 # ---------------------------------------------------------------------------
 # Text normalization helpers (mirrors of the source)
 # ---------------------------------------------------------------------------
@@ -472,11 +488,16 @@ def paste_nudge_to_local_tmux(
         return load
     # NOTE: -p is mandatory here. Without it, newlines act as real Enters.
     paste = run(["tmux", "paste-buffer", "-p", "-b", buffer_name, "-t", pane], timeout=5)
-    cleanup = run(["tmux", "delete-buffer", "-b", buffer_name], timeout=5)
     if paste.returncode != 0:
         return paste
+    # Buffer cleanup is housekeeping, not the critical step -- a failure here
+    # must never block send-keys Enter, or a successfully pasted nudge is
+    # left uncommitted in the pane (an orphaned draft, exactly the failure
+    # mode this package's own draft_scanner exists to catch, caused here by
+    # the dispatch path itself). Log and proceed regardless of cleanup result.
+    cleanup = run(["tmux", "delete-buffer", "-b", buffer_name], timeout=5)
     if cleanup.returncode != 0:
-        return cleanup
+        logger.warning("tmux_buffer_cleanup_failed", pane=pane, buffer_name=buffer_name, stderr=cleanup.stderr.strip())
     return run(["tmux", "send-keys", "-t", pane, "Enter"], timeout=5)
 
 
@@ -661,8 +682,11 @@ class LaneLock:
 
     One writer per session id: a lock file per session id / pane target,
     acquired before any delivery attempt, released after. Acquiring a lock
-    for an already-locked session id fails (raises ``LaneLockError``) rather
-    than silently proceeding — the single-writer rule.
+    for an already-locked session id never silently proceeds: non-blocking
+    ``acquire()`` (the default) returns ``False``; blocking ``acquire()``
+    raises ``LaneLockError`` after ``timeout_seconds`` — the single-writer
+    rule, enforced by whichever mode the caller chooses, not by the class
+    on its own. ``dispatchd`` always calls ``acquire(blocking=True, ...)``.
 
     Implementation: an atomic ``O_CREAT|O_EXCL`` create of a lock file. The
     file holds the acquiring pid and a timestamp for diagnostics. On
@@ -802,7 +826,8 @@ def dispatch_to_tmux(
             status=DispatchStatus.FAILED,
             reason="unsupported session_ref (expected host:session:pane)",
         )
-    host, _session, pane = parts
+    host, session, pane_field = parts
+    pane = tmux_pane_target(session, pane_field)
     hosts = allowed_hosts if allowed_hosts is not None else allowed_remote_dispatch_hosts()
     if host not in hosts and not is_local_host(host, local_extra):
         return DispatchResult(
