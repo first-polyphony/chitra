@@ -1,16 +1,98 @@
-# Roadmap
+# chitra next-version plan
 
 chitra is deliberately small. Every item below is scoped to justify itself against that — if an idea would make the core daemons bigger, more dependent, or reasoning-capable, it belongs in a separate tool that *consumes* chitra's output, not in chitra.
 
-## v1.1
+This document was previously titled "v1.1" and framed as a wishlist. It's retitled here because most of what's below isn't a loose set of ideas — it's a consolidation of decisions and research already made across this program (PyPI publishing mechanics, a security audit, a routing-preferences design study) plus the pre-existing pull-only beads plan and the self-improvement observer plan, carried over largely unchanged. There is no committed version number attached to this plan; treat it as "what's next," not a numbered release promise.
 
-### beads integration (pull side only)
+---
 
-[beads](https://github.com/steveyegge/beads) (a git-native work tracker) is a candidate backing store for the read side of a lane-status/decisions ledger: something that wants to know "what's the current state and history of decisions for session X" could query beads instead of re-deriving it. This is explicitly **pull-only** — chitra's own orders and dispatch stay push-based through `dispatchd`'s JSON queue; beads has no push mechanism, and nothing about chitra's delivery path changes. Scope: read-side integration for status/ledger queries, nothing else.
+## Landed since v0.2.0
 
-### Self-improvement: a separate, read-only observer — not a framework
+These PRs implement decisions this program already made. As of this consolidation pass all of them have merged to `main` in `first-polyphony/chitra`; the monorepo mirror PRs are tracked separately and may lag. Listed here so the roadmap reflects real repo state rather than intent.
 
-chitra's daemons already emit plain, documented artifacts (dispatch results, triage events, the delivery ledger). The plan for "learning from operational traces" is a **separate, read-only observer process** that computes simple rolling statistics over those artifacts — dispatch success rate, queue latency, dedup hit/miss rate — and surfaces threshold-based flags (e.g., "the dedup window looks too short given N near-miss collisions this week"). That's it: statistical monitoring and flagging, not an automated mutator of chitra's own config, and not a new dependency inside chitra itself.
+| PR | Repo | Status |
+|---|---|---|
+| [#4](https://github.com/first-polyphony/chitra/pull/4) chore: switch license to MIT | chitra | merged |
+| [#5](https://github.com/first-polyphony/chitra/pull/5) fix: genericize `CHITRA_*` env vars, add `liveness_check` test coverage | chitra | merged |
+| [#1917](https://github.com/first-polyphony/polyphony/pull/1917) fix(chitra): genericize `CHITRA_*` env vars, add `liveness_check` tests | monorepo mirror | see PR for current status |
+| [#8](https://github.com/first-polyphony/chitra/pull/8) docs: clarify chitra's scope statement re: LLM calls | chitra | merged |
+| [#1918](https://github.com/first-polyphony/polyphony/pull/1918) docs(chitra): clarify scope statement re: LLM calls | monorepo mirror | see PR for current status |
+| [#13](https://github.com/first-polyphony/chitra/pull/13) feat: add opaque `routing_hint` pass-through field + `routing.yaml` config | chitra | see PR for current status |
+
+`pyproject.toml`'s env var naming and the observer-pattern scope wording (see below) already match what this document assumes.
+
+---
+
+## PyPI migration — gated checklist
+
+Full mechanics research: see `internal/publishing-research-readout.md` and `internal/license-history.md`, added by [PR #7](https://github.com/first-polyphony/chitra/pull/7) (merged; these files exist on `main`). Summary of the key findings and a concrete, ordered gate list follows — each gate should be satisfied in order before the next, and none skipped, before `pip install chitra-monitor` becomes a real, supportable path.
+
+**Gate 1 — License question: decided.** `pyproject.toml` declares `license = "MIT"`, copyright held by Reticle Works (Trey Herr) — the final license decision, confirmed by the operator and merged via PR #4. This gate is closed.
+
+**Gate 2 — Distribution name: decided.** The name `chitra` is already taken on PyPI by an unrelated, dormant (since 2021, ~4.5 years stale) image-utility project (`aniketmaurya/chitra`). A PEP 541 name-transfer claim is not viable — that dormant project doesn't clear PEP 541's abandonment bar (no notability, no proof a rename is unacceptable). The distribution name is **`chitra-monitor`**, confirmed available on PyPI and decided by the operator on 2026-07-09 (an earlier candidate, `polyphony-chitra`, is superseded); every internal module and every consumer's `import chitra` stays unchanged — standard, unremarkable practice (Pillow ships as `Pillow`/imports as `PIL`; `opencv-python`/imports as `cv2`). Only one line in `pyproject.toml` changes: `name = "chitra"` → `name = "chitra-monitor"`. Lock this name in before Gate 4, since a pending-publisher registration is tied to the exact name and a delay risks someone else claiming it.
+
+**Gate 3 — Add missing packaging metadata.** Confirmed by reading `pyproject.toml` directly: `classifiers` and `keywords` are absent entirely, and `project.urls` is missing a `Homepage` key (PyPI's UI looks for that specific key to render its sidebar link). Add classifiers appropriate to a pre-1.0 project with no external users yet (`Development Status :: 3 - Alpha`, `Intended Audience :: Developers`, the correct `License ::` classifier once Gate 1 resolves, Python 3.12/3.13, `Typing :: Typed` — earned since `mypy strict = true` is already enforced in CI). This is independent of the naming decision and can happen in parallel.
+
+**Gate 4 — Register trusted publishing (OIDC), not a stored API token.** On PyPI, register a **pending publisher** (the project doesn't need to exist yet) naming the exact GitHub owner/repo/workflow-file/environment. On the GitHub Actions side, the release workflow needs `permissions: id-token: write` and calls `pypa/gh-action-pypi-publish@release/v1` with no token/password input — that's the entire auth surface. Confirmed finding: **this does not require the GitHub repo to be public.** OIDC trust is between GitHub Actions and PyPI at publish time; repo visibility plays no part in that trust decision. The resulting PyPI package is public the moment it's published (no private-tier), but `first-polyphony/chitra` can stay private indefinitely — this gate is fully decoupled from any future public/private repo decision.
+
+**Gate 5 — Register a separate TestPyPI trusted publisher and do a dry run.** TestPyPI's trusted-publisher registration is host-specific — a pypi.org registration does not cover test.pypi.org. Register a second pending publisher at `test.pypi.org/manage/account/publishing/` with the same repo/workflow details, then verify at least one dry-run install (`pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ chitra-monitor` — the second index is needed because dependencies like `structlog`/`pydantic` aren't mirrored to TestPyPI) before cutting the first real release.
+
+**Gate 6 — Wire the release trigger.** Recommended: GitHub-Release/tag-triggered publish, not `workflow_dispatch` as the primary trigger — this matches chitra's existing Keep-a-Changelog discipline (every version already gets a real changelog entry) and forces version bump + changelog + tag to happen together as one ritual, rather than allowing a publish from an untagged or mismatched commit. Keep `workflow_dispatch` available only as a manual override for re-running a failed publish step against an already-tagged version.
+
+**Gate 7 — Confirm PEP 740 attestations are on.** No extra work needed beyond Gate 4: as of `pypa/gh-action-pypi-publish@release/v1` v1.11.0+, Sigstore-backed provenance attestations are generated automatically whenever trusted publishing is used, reusing the same OIDC identity. Just confirm the pinned action version is v1.11.0 or later.
+
+**Gate 8 — Run `twine check dist/*` in CI before any publish step.** Catches structural README problems (GitHub-specific `> [!NOTE]` alert syntax renders as a literal blockquote on PyPI; relative image/link paths that resolve on GitHub 404 on PyPI) as a build-time gate, not a post-publish surprise.
+
+**Gate 9 — Cut the first real release.** Only after Gates 1–8 are satisfied. Remember: PyPI refuses to reuse a filename/version even after deletion — there is no "publish, notice a mistake, fix, re-publish 0.2.0" loop. Get it right in TestPyPI (Gate 5) rather than treating the first real publish as a rehearsal.
+
+Note: PyPI has required account 2FA for any account with upload activity since 2024-01-01 — not a new gate to add, just confirm whoever administers the pending-publisher registration already has it enabled.
+
+---
+
+## Security — outstanding items
+
+What's already fixed and confirmed live (via direct `gh api` queries against `first-polyphony/chitra`, 2026-07-09): secret scanning, secret-scanning push protection, Dependabot security updates, and Dependabot version updates are all **enabled and active** (0 open Dependabot alerts). No action needed on these.
+
+**Outstanding, with owner-facing next steps:**
+
+1. **CodeQL is configured but not functioning.** The workflow runs on push/PR/weekly cron and completes analysis successfully, but every run fails at the upload/reporting step with a GitHub Actions token-permissions error (`Resource not accessible by integration`). Result: `code-scanning/alerts` returns "no analysis found" — zero enforced static-analysis signal is reaching GitHub's UI, despite the workflow appearing green in the CI summary. **Next step:** add `actions: read` to the CodeQL workflow's `permissions:` block (or review the `GITHUB_TOKEN` permission model more broadly) and confirm a subsequent run actually populates the code-scanning tab. This should be fixed regardless of the PyPI or public/private timeline — a code-scanning badge that silently produces nothing is worse than no badge.
+2. **No required PR reviewer in branch protection.** Consistent with this fleet's own auto-merge convention (CI-green + automated review → merge, no manual approval gate) — not an oversight. Worth naming explicitly because "no required review" reads differently to an external contributor on a repo accepting outside PRs than it does internally. **Next step:** no change needed while the repo stays private and fleet-only; revisit as an explicit operator decision if/when external contributors are invited, not before.
+3. **`enforce_admins` is off**, meaning the repo owner can bypass branch protection. Low-risk on a private, single-maintainer repo. **Next step:** no action needed now; flag for a conscious decision if the repo ever goes public.
+
+---
+
+## Best practices — already landed in code (see PR links above for merge status)
+
+These fixes were already designed and coded this program; they are not new roadmap work, just tracked here so the roadmap reflects what's already been decided:
+
+- **`CHITRA_*` env var naming** — genericized per PR #5 (chitra) / #1917 (monorepo mirror).
+- **`liveness_check` test coverage** — added in the same PRs (#5 / #1917).
+- **LLM-scope-statement clarity fix** — PR #8 (chitra) / #1918 (monorepo mirror) tightens the wording that chitra has no internal LLM calls anywhere in its own code path while still managing LLM-driven sessions in the panes it dispatches to. The self-improvement and beads sections below use this same framing deliberately — see each section.
+
+---
+
+## Routing preferences (built)
+
+This is no longer a proposal: `DispatchOrder` now carries an optional, opaque `routing_hint: str | None = None` field, plus an optional `task_type` string used only to drive config lookup (see the README's "Routing config" subsection for the full mechanics). Summary of what's actually in the repo:
+
+- **`routing_hint` is a passive, opaque field.** Chitra never interprets, validates against a fixed vocabulary, or acts on its contents — it is carried through to `DispatchResult` and the signed ledger entry exactly the way `tag` already passes through, for audit/observability only.
+- **A static, operator-populated `routing.yaml` config maps `task_type -> routing_hint`.** `chitra.routing_config.load_routing_config` reads a YAML file (path via the `CHITRA_ROUTING_CONFIG` env var or `dispatchd --routing-config-path`) into a flat `defaults: {task_type: routing_hint}` table; `resolve_routing_hint` does a pure dictionary lookup. This is config-driven substitution, not a smart router — chitra does not decide what a task type IS.
+- **Explicit caller hint always wins.** `dispatchd` only consults the config when the order's `routing_hint` is unset AND a `task_type` is present; an explicit `routing_hint` from the caller is never overridden.
+- **Missing config is a no-op, not an error.** If neither the env var nor the flag is set, `dispatchd` runs with no routing config at all. If a path IS configured but the file is missing or fails to parse, that's a real configuration error and `load_routing_config` raises rather than silently ignoring it.
+
+**Known gap, not hidden:** the ledger records the post-substitution `routing_hint` but not `task_type` or any provenance marker for *how* that value was set. This means an auditor reading `ledger.jsonl` after the fact cannot distinguish "the caller explicitly chose this `routing_hint`" from "the config defaulted to it via `task_type`" — both look identical in the signed record. Closing that gap (e.g. recording `task_type` and a source flag alongside `routing_hint`) is not yet scheduled; flagging it here so it isn't lost.
+
+**Explicitly out of scope for chitra — a named scope boundary, not a quiet omission.** A more ambitious idea was also discussed this program: chitra actively *suggesting* how a receiving session should organize its own sub-agent hierarchy (e.g., "this looks like a multi-file refactor, consider a plan→build→validate breakdown"). This does **not** belong inside chitra. Generating a task-aware suggestion requires evaluating the content/class of a task and producing a judgment about appropriate structure — that's reasoning, not plumbing, and doing it would require either an LLM call (violating chitra's zero-LLM-calls invariant) or a hardcoded rule table far richer than the flat `task_type -> routing_hint` map above. This conclusion should not be softened: if this capability is built, it belongs in a **separate, higher-level advisor system** that reads chitra's order/ledger data (`routing_hint`, delivery history per `session_ref`, dispatch outcomes) as its data source, does its own reasoning there, and feeds the *result* back to chitra as an ordinary dispatched `nudge` — keeping chitra's own code path LLM-free.
+
+---
+
+## beads integration (pull side only)
+
+[beads](https://github.com/steveyegge/beads) (a git-native work tracker) remains a candidate backing store for the read side of a lane-status/decisions ledger: something that wants to know "what's the current state and history of decisions for session X" could query beads instead of re-deriving it. This is explicitly **pull-only** — chitra's own orders and dispatch stay push-based through `dispatchd`'s JSON queue; beads has no push mechanism, and nothing about chitra's delivery path changes. Scope stays narrow: read-side integration for status/ledger queries, nothing else. No code exists for this yet; it remains a pilot candidate, not a committed item, and should stay that way until a concrete consumer needs it — adding it speculatively would violate the "stays lightweight" test every item on this page has to pass.
+
+## Self-improvement: a separate, read-only observer — not a framework
+
+chitra's daemons already emit plain, documented artifacts (dispatch results, triage events, the delivery ledger). The plan for "learning from operational traces" is a **separate, read-only observer process** that computes simple rolling statistics over those artifacts — dispatch success rate, queue latency, dedup hit/miss rate — and surfaces threshold-based flags (e.g., "the dedup window looks too short given N near-miss collisions this week"). That's it: statistical monitoring and flagging, not an automated mutator of chitra's own config, and not a new dependency inside chitra itself. To state this with the same clarity as PR #8's scope-statement fix elsewhere in this repo: **chitra's own code path contains no LLM calls anywhere**, including in this observer — the observer computes deterministic rolling statistics over chitra's artifacts, full stop; it does not itself reason about them. (Separately, and outside this roadmap's scope: a sidecar LLM-driven observer capability used elsewhere in the fleet to watch *sessions* chitra dispatches into — confirmed live and unaffected by any change in this program — is a consumer of chitra's output, not a part of chitra, and needs no action here.)
 
 Explicitly ruled out, with reasons: **DSPy** optimizes LLM prompt/pipeline behavior against a scoring metric — chitra has no LLM call anywhere in its core, so there's no prompt to optimize and no natural role for a DSPy-style optimizer here. **RL-from-logs / closed-loop auto-tuning** is a real technique but a heavier lift (defined action space, reward shaping, an evaluation harness) than a read-only observer, and a closed loop that silently rewrites chitra's runtime config is exactly the kind of complexity this project is trying to avoid. Both stay out of scope.
 
