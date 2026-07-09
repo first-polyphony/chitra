@@ -44,6 +44,7 @@ import re
 import shlex
 import socket
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -675,7 +676,8 @@ class LaneLock:
 
     def __init__(self, session_ref: str, *, lock_dir: Path | str | None = None) -> None:
         self.session_ref = session_ref
-        base = Path(lock_dir) if lock_dir is not None else Path(_env("POLYPHONY_CHITRA_LANE_LOCK_DIR", "/tmp/polyphony-chitra-locks"))
+        default_lock_dir = str(Path(tempfile.gettempdir()) / "polyphony-chitra-locks")
+        base = Path(lock_dir) if lock_dir is not None else Path(_env("POLYPHONY_CHITRA_LANE_LOCK_DIR", default_lock_dir))
         base.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_ref)
         self.lock_path = base / f"lane-{safe}.lock"
