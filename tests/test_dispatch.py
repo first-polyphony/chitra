@@ -25,6 +25,7 @@ from chitra.dispatch import (
     pane_in_mode,
     paste_nudge_to_local_tmux,
     remote_tmux_paste_command,
+    tmux_pane_target,
     transcript_confirms_nudge,
 )
 
@@ -209,6 +210,45 @@ def test_lane_lock_context_manager_releases_on_exit(tmp_path: Path) -> None:
     other2 = LaneLock(session_ref, lock_dir=lock_dir)
     assert other2.acquire(blocking=False) is True
     other2.release()
+
+
+# --- tmux_pane_target ------------------------------------------------------
+
+
+def test_tmux_pane_target_qualifies_a_bare_pane_with_its_session() -> None:
+    assert tmux_pane_target("f3", "0.0") == "f3:0.0"
+
+
+def test_tmux_pane_target_leaves_an_already_qualified_target_alone() -> None:
+    assert tmux_pane_target("f3", "other-session:0.0") == "other-session:0.0"
+
+
+def test_tmux_pane_target_leaves_a_global_pane_id_alone() -> None:
+    assert tmux_pane_target("f3", "%42") == "%42"
+
+
+def test_dispatch_to_tmux_qualifies_pane_with_session_before_any_tmux_call() -> None:
+    """Regression test: capture/paste/etc must never receive a bare pane
+    spec — on a host running more than one tmux session, that resolves
+    against whichever session tmux considers 'current', not the session
+    named in session_ref."""
+    seen_targets: list[str] = []
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if "-t" in cmd:
+            seen_targets.append(cmd[cmd.index("-t") + 1])
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return fake_completed(0, "ubuntu@host:~$ ", "")
+        return fake_completed(0, "", "")
+
+    def input_runner(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        return fake_completed(0, "", "")
+
+    order = DispatchOrder(order_id="o1", session_ref="localhost:f3:0.0", nudge="hello")
+    dispatch_to_tmux(order, runner=runner, input_runner=input_runner, local_extra={"localhost"})
+
+    assert seen_targets, "expected at least one -t target to have been recorded"
+    assert all(t == "f3:0.0" for t in seen_targets), seen_targets
 
 
 # --- dispatch_to_tmux end-to-end (fake runner) ----------------------------

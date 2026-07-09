@@ -20,6 +20,7 @@ from .dispatch import (
     TmuxRunner,
     capture_dispatch_pane,
     pane_input_check,
+    tmux_pane_target,
 )
 
 logger = structlog.get_logger(__name__)
@@ -71,7 +72,8 @@ def scan_targets(
         if len(parts) != 3:
             result.errors.append(f"{ref}: malformed session_ref (expected host:session:pane)")
             continue
-        host, _session, pane = parts
+        host, session, pane_field = parts
+        pane = tmux_pane_target(session, pane_field)
         captured = capture_dispatch_pane(host, pane, runner=runner, local_extra=local_extra)
         check = pane_input_check(captured)
         if not captured:

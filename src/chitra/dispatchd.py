@@ -124,15 +124,31 @@ def process_one_order(
     if result.status == DispatchStatus.SENT:
         # Sign and log automatically on every successful delivery — no
         # extra step for the caller, no added friction to a normal send.
-        key = ledger_mod.load_or_create_signing_key(ledger_key_path or ledger_mod.DEFAULT_KEY_PATH)
-        ledger_mod.append_entry(
-            ledger_path or ledger_mod.DEFAULT_LEDGER_PATH,
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            tag=order.tag,
-            nudge=order.nudge,
-            key=key,
-        )
+        #
+        # Crash-safety: this MUST NOT be able to cause redelivery. The
+        # dispatch already happened and the lock is already released; if
+        # the ledger write itself failed here uncaught, the order would
+        # still be sitting in orders/ with no result file on the next pass,
+        # so process_one_order would re-run dispatch_to_tmux and paste the
+        # same nudge into the live pane a second time. A ledger failure
+        # therefore only costs the proof-of-delivery record for this one
+        # message -- it can never cause a duplicate send.
+        try:
+            key = ledger_mod.load_or_create_signing_key(ledger_key_path or ledger_mod.DEFAULT_KEY_PATH)
+            ledger_mod.append_entry(
+                ledger_path or ledger_mod.DEFAULT_LEDGER_PATH,
+                order_id=order.order_id,
+                session_ref=order.session_ref,
+                tag=order.tag,
+                nudge=order.nudge,
+                key=key,
+            )
+        except Exception as exc:  # noqa: BLE001 -- deliberate, narrow exception to the crash-safety
+            # contract above: any failure signing/appending the ledger is logged and swallowed
+            # here specifically because letting it propagate would break the tested guarantee
+            # that a fully-completed dispatch is never redelivered. This is the one place in the
+            # package where fail-loud is overridden, and only for this one documented reason.
+            logger.warning("dispatchd_ledger_write_failed", order_id=order.order_id, session_ref=order.session_ref, error=str(exc))
     _write_result_atomic(results_dir, result)
     order_path.replace(processed_dir / order_path.name)
     return result
@@ -182,7 +198,12 @@ def run_forever(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dispatchd", description="Deterministic tmux dispatch daemon (chitra phase 1).")
     parser.add_argument("--queue-dir", type=Path, default=DEFAULT_QUEUE_DIR, help="Order/result/processed queue root.")
-    parser.add_argument("--lock-dir", type=Path, default=None, help="LaneLock directory (env POLYPHONY_CHITRA_LANE_LOCK_DIR, else /tmp).")
+    parser.add_argument(
+        "--lock-dir",
+        type=Path,
+        default=None,
+        help="LaneLock directory (env POLYPHONY_CHITRA_LANE_LOCK_DIR, else a dir under the system temp dir).",
+    )
     parser.add_argument("--ledger-path", type=Path, default=None, help="Delivery ledger JSONL path (default: next to the state dir).")
     parser.add_argument("--ledger-key-path", type=Path, default=None, help="HMAC signing key path (generated on first use if missing).")
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
