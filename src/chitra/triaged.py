@@ -24,9 +24,9 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_EVENTS_LOG = Path("/var/lib/polyphony-chitra/events.log")
-DEFAULT_STATE_FILE = Path("/var/lib/polyphony-chitra/triaged-state.json")
-DEFAULT_TRIAGE_LOG = Path("/var/lib/polyphony-chitra/triaged.log")
+DEFAULT_EVENTS_LOG = Path("/var/lib/chitra/events.log")
+DEFAULT_STATE_FILE = Path("/var/lib/chitra/triaged-state.json")
+DEFAULT_TRIAGE_LOG = Path("/var/lib/chitra/triaged.log")
 DEFAULT_POLL_SECONDS = 2.0
 
 # <ISO8601-ish timestamp> <LANE_ID> <rest of line>

@@ -75,12 +75,12 @@ All configuration is via CLI flags (see `--help` on each entrypoint) or a small 
 | Env var | Default | Read by | Notes |
 |---|---|---|---|
 | `REMOTE_DISPATCH_HOSTS` | *(empty — local delivery only)* | `chitra.dispatch` | Comma-separated allowlist of remote hostnames dispatch may target over ssh |
-| `POLYPHONY_CHITRA_LOCAL_HOST` | *(unset)* | `chitra.dispatch` | Override for this host's own name, for local-vs-remote detection in tests/unusual setups |
-| `POLYPHONY_CHITRA_LANE_LOCK_DIR` | a `polyphony-chitra-locks` dir under the system temp dir | `chitra.dispatch` | Directory for `LaneLock` lock files |
-| `POLYPHONY_CHITRA_CLAUDE_PROJECTS` | `~/.claude/projects` | `chitra.dispatch` | Root directory searched for transcript-grep verification |
-| `POLYPHONY_CHITRA_SSH_CONFIG` | *(unset)* | `chitra.dispatch` | Optional `ssh -F <path>` config file for remote dispatch |
-| `POLYPHONY_CHITRA_SSH_IDENTITY` | *(unset)* | `chitra.dispatch` | Optional `ssh -i <path>` identity file for remote dispatch |
-| `POLYPHONY_CHITRA_SSH_KNOWN_HOSTS` | *(unset)* | `chitra.dispatch` | Optional `UserKnownHostsFile` for remote dispatch |
+| `CHITRA_LOCAL_HOST` | *(unset)* | `chitra.dispatch` | Override for this host's own name, for local-vs-remote detection in tests/unusual setups |
+| `CHITRA_LANE_LOCK_DIR` | a `chitra-locks` dir under the system temp dir | `chitra.dispatch` | Directory for `LaneLock` lock files |
+| `CHITRA_CLAUDE_PROJECTS` | `~/.claude/projects` | `chitra.dispatch` | Root directory searched for transcript-grep verification |
+| `CHITRA_SSH_CONFIG` | *(unset)* | `chitra.dispatch` | Optional `ssh -F <path>` config file for remote dispatch |
+| `CHITRA_SSH_IDENTITY` | *(unset)* | `chitra.dispatch` | Optional `ssh -i <path>` identity file for remote dispatch |
+| `CHITRA_SSH_KNOWN_HOSTS` | *(unset)* | `chitra.dispatch` | Optional `UserKnownHostsFile` for remote dispatch |
 
 `chitra.dispatchd` and `chitra.triaged` take their queue/log/state paths as CLI flags rather than environment variables (see `--help`).
 
@@ -94,7 +94,7 @@ See `docs/ROADMAP.md` for the v1.1 plan (kept intentionally small — chitra's l
 
 ## Authors
 
-Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI), orchestrated by first-polyphony engineers.
+Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI), orchestrated by its maintainers.
 
 ## License
 
