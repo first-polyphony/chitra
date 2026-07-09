@@ -24,3 +24,7 @@ pytest
 - `ruff check .` and `mypy src/chitra` should be clean.
 - New behavior needs a test. This project has no untested modules; let's keep it that way.
 - Keep changes focused — this project explicitly favors staying small over accumulating features.
+
+## Code of Conduct
+
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
