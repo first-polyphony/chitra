@@ -98,4 +98,4 @@ Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](http
 
 ## License
 
-Apache License 2.0 (see `LICENSE` and `NOTICE`). This is a default applied absent any historical project precedent — it has not yet been confirmed by the operator and may change.
+MIT License — see `LICENSE`.
