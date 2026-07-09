@@ -221,6 +221,30 @@ def test_routing_hint_defaults_to_none_and_is_unaffected(tmp_path: Path, monkeyp
     assert entry.routing_hint is None
 
 
+def test_directive_voice_violation_writes_a_result_file_and_no_ledger_entry(tmp_path: Path) -> None:
+    """End-to-end (real dispatch_to_tmux, not mocked): a nudge that trips the
+    directive-voice guard must still produce a result file -- BLOCKED orders
+    write results like any other order -- but must never generate a
+    delivery-ledger entry, since dispatchd only signs/logs on SENT."""
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-7", session_ref="localhost:s:0.0", nudge="the operator wants this pasted")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.BLOCKED
+    assert results[0].reason.startswith("directive-voice:")
+    assert (queue_dir / "results" / "ord-7.json").exists()
+    assert (queue_dir / "processed" / "ord-7.json").exists()
+    assert not (tmp_path / "ledger.jsonl").exists()
+
+
 def test_malformed_order_file_is_moved_aside_not_crashed_on(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     orders_dir = queue_dir / "orders"
