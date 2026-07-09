@@ -239,7 +239,7 @@ def local_host_aliases(extra: set[str] | None = None) -> set[str]:
         aliases.add(socket.getfqdn().split(".", 1)[0])
     except OSError:
         pass
-    override = _env("POLYPHONY_CHITRA_LOCAL_HOST")
+    override = _env("CHITRA_LOCAL_HOST")
     if override:
         aliases.add(override.split(".", 1)[0])
     if extra:
@@ -372,13 +372,13 @@ def ssh_command(target: str, remote_command: str) -> list[str]:
         "-o",
         "ConnectTimeout=4",
     ]
-    config = _env("POLYPHONY_CHITRA_SSH_CONFIG")
+    config = _env("CHITRA_SSH_CONFIG")
     if config:
         cmd.extend(["-F", config])
-    identity = _env("POLYPHONY_CHITRA_SSH_IDENTITY")
+    identity = _env("CHITRA_SSH_IDENTITY")
     if identity:
         cmd.extend(["-i", identity, "-o", "IdentitiesOnly=yes"])
-    known_hosts = _env("POLYPHONY_CHITRA_SSH_KNOWN_HOSTS")
+    known_hosts = _env("CHITRA_SSH_KNOWN_HOSTS")
     if known_hosts:
         cmd.extend(["-o", f"UserKnownHostsFile={known_hosts}"])
     cmd.extend([target, remote_command])
@@ -549,10 +549,11 @@ def remote_tmux_paste_command(pane: str, nudge: str) -> str:
 
 def _candidate_transcript_dirs(projects_root: Path | None = None) -> list[Path]:
     """Return candidate ``~/.claude/projects/*`` transcript directories."""
-    if projects_root is not None:
-        root = projects_root
-    else:
-        root = Path(_env("POLYPHONY_CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
+    root = (
+        projects_root
+        if projects_root is not None
+        else Path(_env("CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
+    )
     if not root.is_dir():
         return []
     return [p for p in root.iterdir() if p.is_dir()]
@@ -700,8 +701,8 @@ class LaneLock:
 
     def __init__(self, session_ref: str, *, lock_dir: Path | str | None = None) -> None:
         self.session_ref = session_ref
-        default_lock_dir = str(Path(tempfile.gettempdir()) / "polyphony-chitra-locks")
-        base = Path(lock_dir) if lock_dir is not None else Path(_env("POLYPHONY_CHITRA_LANE_LOCK_DIR", default_lock_dir))
+        default_lock_dir = str(Path(tempfile.gettempdir()) / "chitra-locks")
+        base = Path(lock_dir) if lock_dir is not None else Path(_env("CHITRA_LANE_LOCK_DIR", default_lock_dir))
         base.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_ref)
         self.lock_path = base / f"lane-{safe}.lock"

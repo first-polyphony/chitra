@@ -39,7 +39,7 @@ from .dispatch import (
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_QUEUE_DIR = Path("/var/lib/polyphony-chitra/queue")
+DEFAULT_QUEUE_DIR = Path("/var/lib/chitra/queue")
 DEFAULT_POLL_SECONDS = 1.0
 
 
@@ -202,7 +202,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--lock-dir",
         type=Path,
         default=None,
-        help="LaneLock directory (env POLYPHONY_CHITRA_LANE_LOCK_DIR, else a dir under the system temp dir).",
+        help="LaneLock directory (env CHITRA_LANE_LOCK_DIR, else a dir under the system temp dir).",
     )
     parser.add_argument("--ledger-path", type=Path, default=None, help="Delivery ledger JSONL path (default: next to the state dir).")
     parser.add_argument("--ledger-key-path", type=Path, default=None, help="HMAC signing key path (generated on first use if missing).")

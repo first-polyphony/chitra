@@ -31,8 +31,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-DEFAULT_KEY_PATH = Path("/var/lib/polyphony-chitra/ledger.key")
-DEFAULT_LEDGER_PATH = Path("/var/lib/polyphony-chitra/ledger.jsonl")
+DEFAULT_KEY_PATH = Path("/var/lib/chitra/ledger.key")
+DEFAULT_LEDGER_PATH = Path("/var/lib/chitra/ledger.jsonl")
 _KEY_BYTES = 32
 
 
