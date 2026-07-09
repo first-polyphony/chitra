@@ -38,6 +38,7 @@ from .dispatch import (
     LaneLockError,
     dispatch_to_tmux,
 )
+from .routing_config import RoutingConfig, load_routing_config, resolve_routing_hint
 
 logger = structlog.get_logger(__name__)
 
@@ -72,12 +73,20 @@ def process_one_order(
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
+    routing_config: RoutingConfig | None = None,
 ) -> DispatchResult | None:
     """Process a single order file. Returns the result, or None if skipped.
 
     Crash-safe: if a result file already exists for this order id, the order
     is considered already processed — it is moved to ``processed/`` without
     re-dispatching, and None is returned (no duplicate delivery).
+
+    ``routing_config``, if given, is a purely mechanical ``task_type ->
+    routing_hint`` lookup table (see ``chitra.routing_config``). If the
+    order's ``routing_hint`` is not already set AND the order has a
+    ``task_type``, the config is consulted to fill in a default
+    ``routing_hint`` before dispatch — an explicit ``routing_hint`` from the
+    caller always wins and skips this lookup entirely.
     """
     try:
         order = DispatchOrder.model_validate_json(order_path.read_text(encoding="utf-8"))
@@ -88,6 +97,9 @@ def process_one_order(
         with contextlib.suppress(OSError):
             order_path.replace(processed_dir / order_path.name)
         return None
+
+    if order.routing_hint is None and order.task_type is not None:
+        order.routing_hint = resolve_routing_hint(order.task_type, routing_config)
 
     existing_result = results_dir / f"{order.order_id}.json"
     if existing_result.exists():
@@ -105,6 +117,7 @@ def process_one_order(
         result = DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
             status=DispatchStatus.BLOCKED,
             reason=f"lane lock unavailable: {exc}",
         )
@@ -142,6 +155,7 @@ def process_one_order(
                 order_id=order.order_id,
                 session_ref=order.session_ref,
                 tag=order.tag,
+                routing_hint=order.routing_hint,
                 nudge=order.nudge,
                 key=key,
             )
@@ -162,9 +176,16 @@ def run_once(
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
+    routing_config_path: Path | None = None,
 ) -> list[DispatchResult]:
-    """Process every pending order in ``queue_dir/orders`` once, FIFO by mtime."""
+    """Process every pending order in ``queue_dir/orders`` once, FIFO by mtime.
+
+    ``routing_config_path`` (or the ``CHITRA_ROUTING_CONFIG`` env var if
+    unset) is loaded once per call and passed to every ``process_one_order``
+    invocation — see ``chitra.routing_config`` for the lookup semantics.
+    """
     orders_dir, results_dir, processed_dir = _ensure_queue_dirs(queue_dir)
+    routing_config = load_routing_config(routing_config_path)
     pending = sorted(orders_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
     out: list[DispatchResult] = []
     for order_path in pending:
@@ -176,6 +197,7 @@ def run_once(
             lock_dir=lock_dir,
             ledger_path=ledger_path,
             ledger_key_path=ledger_key_path,
+            routing_config=routing_config,
         )
         if result is not None:
             out.append(result)
@@ -189,11 +211,18 @@ def run_forever(
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
+    routing_config_path: Path | None = None,
 ) -> None:
     """Run the daemon loop: drain the queue, sleep, repeat. Runs until killed."""
     logger.info("dispatchd_started", queue_dir=str(queue_dir), poll_seconds=poll_seconds)
     while True:
-        run_once(queue_dir, lock_dir=lock_dir, ledger_path=ledger_path, ledger_key_path=ledger_key_path)
+        run_once(
+            queue_dir,
+            lock_dir=lock_dir,
+            ledger_path=ledger_path,
+            ledger_key_path=ledger_key_path,
+            routing_config_path=routing_config_path,
+        )
         time.sleep(poll_seconds)
 
 
@@ -208,6 +237,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ledger-path", type=Path, default=None, help="Delivery ledger JSONL path (default: next to the state dir).")
     parser.add_argument("--ledger-key-path", type=Path, default=None, help="HMAC signing key path (generated on first use if missing).")
+    parser.add_argument(
+        "--routing-config-path",
+        type=Path,
+        default=None,
+        help="Path to a routing.yaml task_type->routing_hint lookup (env CHITRA_ROUTING_CONFIG, else no config/no-op).",
+    )
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--once", action="store_true", help="Drain the queue once and exit (for tests/cron), instead of looping forever.")
     return parser
@@ -216,7 +251,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     if args.once:
-        results = run_once(args.queue_dir, lock_dir=args.lock_dir, ledger_path=args.ledger_path, ledger_key_path=args.ledger_key_path)
+        results = run_once(
+            args.queue_dir,
+            lock_dir=args.lock_dir,
+            ledger_path=args.ledger_path,
+            ledger_key_path=args.ledger_key_path,
+            routing_config_path=args.routing_config_path,
+        )
         print(json.dumps([r.model_dump(mode="json") for r in results], indent=2))
         return 0
     run_forever(
@@ -225,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         lock_dir=args.lock_dir,
         ledger_path=args.ledger_path,
         ledger_key_path=args.ledger_key_path,
+        routing_config_path=args.routing_config_path,
     )
     return 0
 

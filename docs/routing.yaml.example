@@ -1,0 +1,18 @@
+# chitra routing preferences — maps task_type to a default routing_hint.
+#
+# Purely mechanical lookup: chitra does not interpret task_type's meaning
+# or evaluate any content to classify it. The caller states task_type on a
+# DispatchOrder; dispatchd looks it up here and fills in routing_hint only
+# if the caller did not already supply one directly (an explicit
+# routing_hint on the order always wins over this table).
+#
+# This file is entirely operator-populated — chitra ships no opinions
+# about what task types or routing targets (sub-agent types, model names)
+# mean in any given deployment. Copy this file, edit the keys/values for
+# your deployment, and point CHITRA_ROUTING_CONFIG (or dispatchd's
+# --routing-config-path flag) at it. Unset/missing: dispatchd runs with no
+# routing config, a normal no-op.
+defaults:
+  code-review: sonnet
+  design-judgment: fable
+  search: haiku

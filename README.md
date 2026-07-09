@@ -45,15 +45,34 @@ Delivery into a **live** tmux session follows one path:
 
 ## Message tag and delivery authentication
 
-Every dispatched message carries a `tag` (default `"[C]"`) marking it as a chitra relay delivery. An operator typing directly into a pane needs no tag and no authentication; the pane is that operator's own channel.
+Every dispatched message carries a `tag` (default `"[C]"`) marking it as a chitra relay delivery. An operator typing directly into a pane needs no tag and no authentication; the pane is that operator's own channel. `DispatchOrder`/`DispatchResult` also carry an optional `routing_hint` (default `None`) — an opaque string recording a routing/model-preference decision the calling system already made; chitra never reads, validates, or acts on its contents, only passes it through unchanged into the result and the signed ledger entry for audit purposes.
 
-Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` signs an HMAC-SHA256 over `(timestamp, session_ref, tag, message_hash)` using a key stored in the state directory (generated on first use) and appends the signed record to an append-only JSON Lines (JSONL) ledger. This adds no extra step to a normal send.
+Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` signs an HMAC-SHA256 over `(timestamp, session_ref, tag, message_hash, routing_hint)` using a key stored in the state directory (generated on first use) and appends the signed record to an append-only JSON Lines (JSONL) ledger. This adds no extra step to a normal send.
 
 The ledger proves two things:
 - **Positive**: "chitra delivered this exact message to this session at this time" — recompute the HMAC over the ledger entry and compare.
 - **Negative**: "chitra did NOT send this" — the ledger is append-only, so a message's absence from it is itself the proof that no such delivery happened.
 
 See `chitra.ledger.verify_delivery` for the check as a function call, or read `ledger.jsonl` directly (a plain, documented JSONL format) if the verifying reader doesn't have chitra installed.
+
+## Routing config (`task_type` -> default `routing_hint`)
+
+`DispatchOrder` also carries an optional `task_type` — a separate, caller-supplied classification string (e.g. `"code-review"`, `"design-judgment"`). Chitra does not decide what a task type IS or evaluate any content to classify one; the caller states it. `task_type` is not carried through to `DispatchResult` or the ledger — it exists only to drive the config lookup below.
+
+If a caller sets `task_type` but leaves `routing_hint` unset, `dispatchd` can fill in a default `routing_hint` from a static, operator-populated YAML lookup table. This is purely mechanical config-driven substitution — like a `.gitattributes` or `nginx.conf` mapping file — not a smart router, and it is skipped entirely whenever the caller already supplied an explicit `routing_hint` (**explicit `routing_hint` always wins**).
+
+Point `dispatchd` at a config file via the `CHITRA_ROUTING_CONFIG` env var (or its `--routing-config-path` flag). If unset, `dispatchd` runs with no routing config — a normal no-op, not an error. If the env var/flag IS set but the file is missing or fails to parse, that's a real configuration error and `dispatchd` raises rather than silently ignoring it. An example template ships at `docs/routing.yaml.example`:
+
+```yaml
+# chitra routing preferences — maps task_type to a default routing_hint.
+# Purely mechanical lookup; chitra does not interpret task_type's meaning.
+defaults:
+  code-review: sonnet
+  design-judgment: fable
+  search: haiku
+```
+
+The keys/values above are illustrative only. Chitra ships no default content or opinions about what task types or routing targets (sub-agent types, model names) mean in any given deployment — this is a file each operator populates for their own fleet.
 
 ## Install
 

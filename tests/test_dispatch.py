@@ -316,6 +316,33 @@ def test_dispatch_to_tmux_blocks_host_not_in_allowlist() -> None:
     assert "not in allowlist" in result.reason
 
 
+# --- routing_hint: opaque pass-through only, chitra never interprets it --
+
+
+def test_dispatch_to_tmux_carries_routing_hint_through_unchanged() -> None:
+    """routing_hint is a caller-supplied opaque value: chitra copies it
+    into DispatchResult unchanged and never reads/acts on its contents,
+    exactly like the existing tag pass-through."""
+    order = DispatchOrder(
+        order_id="o1",
+        session_ref="not-three-parts",
+        nudge="hello",
+        routing_hint="opus-panel",
+    )
+    result = dispatch_to_tmux(order)
+    assert result.routing_hint == "opus-panel"
+
+
+def test_dispatch_to_tmux_defaults_routing_hint_to_none() -> None:
+    """Backward compatibility: an order that never sets routing_hint (the
+    default) behaves exactly as before this field was added."""
+    order = DispatchOrder(order_id="o1", session_ref="not-three-parts", nudge="hello")
+    assert order.routing_hint is None
+    result = dispatch_to_tmux(order)
+    assert result.status == DispatchStatus.FAILED
+    assert result.routing_hint is None
+
+
 # --- optional real-tmux integration test (skipped if tmux is unavailable) -
 
 
