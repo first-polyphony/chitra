@@ -7,12 +7,10 @@ name = "chitra"
 version = "0.2.0"
 description = "Deterministic tmux relay/dedup daemons for AI-agent fleet monitoring"
 readme = "README.md"
-# license: default applied absent any historical project precedent;
-# pending explicit operator confirmation (see docs/DESIGN.md and NOTICE).
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.12"
 authors = [
-    { name = "first-polyphony" },
+    { name = "Trey Herr" },
 ]
 dependencies = [
     "structlog>=24.0.0",
