@@ -8,7 +8,8 @@ spaces). This is a defensive, minimal contract — lines that don't match are
 logged and skipped rather than raising, since triaged must survive a watchd
 emitter format drift without crashing.
 
-No LLM calls. Deterministic dedup only.
+No LLM calls in this module's own code path — deterministic dedup only.
+It watches state emitted by LLM-driven sessions, but never invokes a model itself.
 """
 
 from __future__ import annotations

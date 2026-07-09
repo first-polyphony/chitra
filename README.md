@@ -2,7 +2,7 @@
 
 Deterministic, systemd-supervised relay and dedup daemons for delivering text into (and watching state from) `tmux`-hosted AI-agent sessions — built for fleets of Claude Code sessions, but the tmux-level mechanics are agent-agnostic.
 
-**Scope statement:** chitra is a small, focused relay/plumbing layer. It does not do reasoning, does not draft messages, and does not decide anything — it delivers text reliably, verifies delivery against evidence, and dedups repeated state. If a request would add reasoning/decision logic, LLM calls, or a broader agent-orchestration surface to this repo, it's out of scope here; chitra stays deliberately lightweight.
+**Scope statement:** chitra's whole purpose is to deliver messages to, and observe the state of, sessions that are themselves driven by an LLM (e.g. Claude Code instances running in tmux) — that IS its job. What chitra itself never does is call an LLM API to decide what to say or how to act: every decision about message content, timing, and target is made by the caller (a human operator or an orchestrating session) before it reaches chitra. chitra's own code path is 100% deterministic plumbing — it delivers text reliably, verifies delivery against evidence, and dedups repeated state, but makes no drafting or judgment calls of its own. If a request would add reasoning/decision logic or an LLM call *inside chitra's own code*, that's out of scope here; chitra stays deliberately lightweight.
 
 ## Why "chitra"
 
@@ -10,7 +10,7 @@ The name is a short form of *Chitragupta*, a figure from Hindu tradition describ
 
 ## What's in this repo
 
-No LLM calls anywhere in this package — it is deterministic relay/plumbing only.
+chitra delivers to and observes LLM-driven sessions from the outside; its own code path makes no LLM calls — no drafting, no judgment calls, deterministic relay/plumbing only.
 
 - **`chitra.dispatch`** — a hardened tmux dispatch library: delivers text into a tmux pane using a verified recipe (checks for tmux copy-mode and cancels it, uses `paste-buffer -p` for a proper bracketed-paste wrapper, then confirms delivery by grepping the target session's own transcript rather than trusting a pane screenshot). Includes `LaneLock`, a file-based single-writer lock: at most one writer may deliver to a given session id at a time.
 - **`chitra.dispatchd`** — a daemon that drains a JSON order queue (`queue/orders/*.json`), delivers each order via `chitra.dispatch` under a `LaneLock`, writes a result JSON, and moves the processed order aside. Crash-safe: a partially-processed order is never redelivered.
