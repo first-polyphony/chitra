@@ -169,8 +169,8 @@ def test_find_recent_transcript_respects_recency_window(tmp_path: Path) -> None:
 
 def test_lane_lock_second_acquire_fails_non_blocking(tmp_path: Path) -> None:
     lock_dir = tmp_path / "locks"
-    lock_a = LaneLock("tophand:f3:0.0", lock_dir=lock_dir)
-    lock_b = LaneLock("tophand:f3:0.0", lock_dir=lock_dir)
+    lock_a = LaneLock("examplehost:f3:0.0", lock_dir=lock_dir)
+    lock_b = LaneLock("examplehost:f3:0.0", lock_dir=lock_dir)
     assert lock_a.acquire(blocking=False) is True
     assert lock_b.acquire(blocking=False) is False
     lock_a.release()
@@ -180,8 +180,8 @@ def test_lane_lock_second_acquire_fails_non_blocking(tmp_path: Path) -> None:
 
 def test_lane_lock_blocking_raises_after_timeout(tmp_path: Path) -> None:
     lock_dir = tmp_path / "locks"
-    lock_a = LaneLock("tophand:f3:0.0", lock_dir=lock_dir)
-    lock_b = LaneLock("tophand:f3:0.0", lock_dir=lock_dir)
+    lock_a = LaneLock("examplehost:f3:0.0", lock_dir=lock_dir)
+    lock_b = LaneLock("examplehost:f3:0.0", lock_dir=lock_dir)
     assert lock_a.acquire(blocking=False) is True
     with pytest.raises(LaneLockError):
         lock_b.acquire(blocking=True, poll_seconds=0.01, timeout_seconds=0.05)
@@ -191,17 +191,17 @@ def test_lane_lock_blocking_raises_after_timeout(tmp_path: Path) -> None:
 def test_lane_lock_reclaims_stale_lock_from_dead_pid(tmp_path: Path) -> None:
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True)
-    stale = lock_dir / "lane-tophand_f3_0.0.lock"
+    stale = lock_dir / "lane-examplehost_f3_0.0.lock"
     # A pid that is (almost certainly) not alive.
-    stale.write_text(json.dumps({"pid": 999999, "session_ref": "tophand:f3:0.0", "at": "x"}), encoding="utf-8")
-    lock = LaneLock("tophand:f3:0.0", lock_dir=lock_dir)
+    stale.write_text(json.dumps({"pid": 999999, "session_ref": "examplehost:f3:0.0", "at": "x"}), encoding="utf-8")
+    lock = LaneLock("examplehost:f3:0.0", lock_dir=lock_dir)
     assert lock.acquire(blocking=False) is True
     lock.release()
 
 
 def test_lane_lock_context_manager_releases_on_exit(tmp_path: Path) -> None:
     lock_dir = tmp_path / "locks"
-    session_ref = "tophand:f3:0.0"
+    session_ref = "examplehost:f3:0.0"
     with LaneLock(session_ref, lock_dir=lock_dir) as lock:
         assert lock.acquired is True
         other = LaneLock(session_ref, lock_dir=lock_dir)

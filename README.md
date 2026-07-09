@@ -17,6 +17,7 @@ No LLM calls anywhere in this package — it is deterministic relay/plumbing onl
 - **`chitra.triaged`** — a daemon that tails an events log and emits a "triage event" only when a session's state signature actually changes, not on every repeated poll.
 - **`chitra.draft_scanner`** — a periodic scan of `host:session:pane` targets for an unsubmitted draft sitting in the tmux input box. Flags only; never submits or discards anything.
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back automatically if validation fails.
+- **`chitra.ledger`** — HMAC-signed, append-only delivery ledger: every successfully delivered message is automatically signed and logged, so any reader can later verify "chitra delivered this exact message at this time" or, just as importantly, prove "chitra never sent this."
 
 ## The verified tmux-injection recipe
 
@@ -31,6 +32,18 @@ The one safe path for delivering text into a **live** tmux session:
 ## Single-writer rule
 
 `dispatchd` owns explicit lane-ownership locking (`LaneLock`): one writer per session id, acquired before any delivery attempt and released after. Acquiring a lock for an already-locked session id fails/blocks rather than silently proceeding — two writers racing to deliver to the same session at once is exactly the failure mode this exists to prevent (a second, out-of-band delivery mechanism racing a live session's own process can silently corrupt its next turn).
+
+## Message tag and delivery authentication
+
+Every dispatched message carries a `tag` (default `"[C]"`, marking it as a chitra relay delivery — distinct from an operator or user typing directly into a pane, which needs no tag and no authentication, since the pane itself is that operator's own channel).
+
+`chitra.ledger` closes a real gap: a relayed message otherwise has no way for the receiving session to distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery (never on blocked/failed attempts), `dispatchd` automatically signs an HMAC-SHA256 over `(timestamp, session_ref, tag, message_hash)` using a key stored in the state directory (generated on first use), and appends the signed record to an append-only JSONL ledger. No extra step, no added friction to a normal send.
+
+This proves two things, symmetrically:
+- **Positive**: "chitra delivered this exact message to this session at this time" — recompute the HMAC over the ledger entry and compare.
+- **Negative**: "chitra did NOT send this" — the ledger is append-only, so a message's absence from it is itself the proof no such delivery happened.
+
+See `chitra.ledger.verify_delivery` for the check as a function call, or read `ledger.jsonl` directly (it's a plain, documented JSONL format) if the verifying reader doesn't have chitra installed.
 
 ## Install
 
@@ -60,8 +73,12 @@ All configuration is via CLI flags (see `--help` on each entrypoint) or a small 
 | Env var | Default | Read by | Notes |
 |---|---|---|---|
 | `REMOTE_DISPATCH_HOSTS` | *(empty — local delivery only)* | `chitra.dispatch` | Comma-separated allowlist of remote hostnames dispatch may target over ssh |
-| `POLYPHONY_CHITRA_LANE_LOCK_DIR` | `/tmp/polyphony-chitra-locks` | `chitra.dispatch` | Directory for `LaneLock` lock files |
+| `POLYPHONY_CHITRA_LOCAL_HOST` | *(unset)* | `chitra.dispatch` | Override for this host's own name, for local-vs-remote detection in tests/unusual setups |
+| `POLYPHONY_CHITRA_LANE_LOCK_DIR` | a `polyphony-chitra-locks` dir under the system temp dir | `chitra.dispatch` | Directory for `LaneLock` lock files |
 | `POLYPHONY_CHITRA_CLAUDE_PROJECTS` | `~/.claude/projects` | `chitra.dispatch` | Root directory searched for transcript-grep verification |
+| `POLYPHONY_CHITRA_SSH_CONFIG` | *(unset)* | `chitra.dispatch` | Optional `ssh -F <path>` config file for remote dispatch |
+| `POLYPHONY_CHITRA_SSH_IDENTITY` | *(unset)* | `chitra.dispatch` | Optional `ssh -i <path>` identity file for remote dispatch |
+| `POLYPHONY_CHITRA_SSH_KNOWN_HOSTS` | *(unset)* | `chitra.dispatch` | Optional `UserKnownHostsFile` for remote dispatch |
 
 `chitra.dispatchd` and `chitra.triaged` take their queue/log/state paths as CLI flags rather than environment variables (see `--help`).
 
