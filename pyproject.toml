@@ -23,6 +23,8 @@ dependencies = [
 test = [
     "pytest>=8,<9.1",
     "pytest-cov>=6",
+    "ruff>=0.15,<0.16",
+    "mypy>=1.14,<2",
 ]
 
 [project.scripts]
