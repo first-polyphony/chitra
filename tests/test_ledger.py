@@ -93,3 +93,58 @@ def test_sign_changes_if_any_field_changes() -> None:
     base = sign(key, session_ref="s", tag="[C]", digest="abc", sent_at="2026-07-09T00:00:00Z")
     different_tag = sign(key, session_ref="s", tag="[X]", digest="abc", sent_at="2026-07-09T00:00:00Z")
     assert base != different_tag
+
+
+def test_append_entry_carries_routing_hint_through_unchanged(tmp_path: Path) -> None:
+    """routing_hint is an opaque pass-through value: chitra signs and logs
+    it, but never interprets it — mirrors the tag pass-through contract."""
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    ledger_path = tmp_path / "ledger.jsonl"
+    entry = append_entry(
+        ledger_path,
+        order_id="o1",
+        session_ref="localhost:s:0.0",
+        tag="[C]",
+        routing_hint="opus-panel",
+        nudge="hello lane",
+        key=key,
+    )
+    assert entry.routing_hint == "opus-panel"
+    assert verify_entry(entry, key=key) is True
+
+
+def test_append_entry_defaults_routing_hint_to_none(tmp_path: Path) -> None:
+    """Backward compatibility: a caller that never sets routing_hint sees
+    exactly the prior behavior."""
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    ledger_path = tmp_path / "ledger.jsonl"
+    entry = append_entry(ledger_path, order_id="o1", session_ref="localhost:s:0.0", tag="[C]", nudge="hello lane", key=key)
+    assert entry.routing_hint is None
+    assert verify_entry(entry, key=key) is True
+
+
+def test_sign_changes_if_routing_hint_changes() -> None:
+    """routing_hint is part of the signed payload — it is part of the
+    record being attested to, same as every other field."""
+    key = b"0" * 32
+    base = sign(key, session_ref="s", tag="[C]", digest="abc", sent_at="2026-07-09T00:00:00Z", routing_hint="opus-panel")
+    no_hint = sign(key, session_ref="s", tag="[C]", digest="abc", sent_at="2026-07-09T00:00:00Z")
+    different_hint = sign(key, session_ref="s", tag="[C]", digest="abc", sent_at="2026-07-09T00:00:00Z", routing_hint="sonnet")
+    assert base != no_hint
+    assert base != different_hint
+
+
+def test_verify_entry_fails_if_routing_hint_tampered(tmp_path: Path) -> None:
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    ledger_path = tmp_path / "ledger.jsonl"
+    entry = append_entry(
+        ledger_path,
+        order_id="o1",
+        session_ref="localhost:s:0.0",
+        tag="[C]",
+        routing_hint="opus-panel",
+        nudge="hello",
+        key=key,
+    )
+    tampered = entry.model_copy(update={"routing_hint": "sonnet"})
+    assert verify_entry(tampered, key=key) is False

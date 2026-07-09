@@ -97,13 +97,26 @@ class DispatchOrder(BaseModel):
     message's authenticity class in the delivery ledger — ``"[C]"`` (chitra
     relay) is the default; a caller relaying verbatim operator-typed text
     with no relay in between may use a different tag, but the ledger records
-    whatever tag is asserted so it can be audited later.
+    whatever tag is asserted so it can be audited later. ``routing_hint`` is
+    an opaque, caller-supplied string recording a routing/model-preference
+    decision already made upstream — chitra never reads, validates, or acts
+    on its contents; it is only carried through to ``DispatchResult`` and
+    the ledger for audit purposes, exactly like ``tag``. ``task_type`` is a
+    separate, optional caller-supplied classification string (e.g.
+    ``"code-review"``) — chitra does not decide what a task type IS or
+    evaluate content to classify one; the caller states it. If the caller
+    sets ``task_type`` but leaves ``routing_hint`` unset, ``dispatchd`` may
+    fill in ``routing_hint`` from a purely mechanical ``task_type ->
+    routing_hint`` lookup table (see ``chitra.routing_config``) — an
+    explicit ``routing_hint`` from the caller always wins over this lookup.
     """
 
     order_id: str
     session_ref: str
     nudge: str
     tag: str = "[C]"
+    routing_hint: str | None = None
+    task_type: str | None = None
     input_baseline_hash: str | None = None
     input_seen_hash: str | None = None
     snapshot_tail_hash: str | None = None
@@ -111,7 +124,11 @@ class DispatchOrder(BaseModel):
 
 
 class DispatchResult(BaseModel):
-    """Result of processing a dispatch order."""
+    """Result of processing a dispatch order.
+
+    ``routing_hint`` is copied through unchanged from the originating
+    ``DispatchOrder`` — an opaque pass-through value chitra never interprets.
+    """
 
     order_id: str
     session_ref: str
@@ -120,6 +137,7 @@ class DispatchResult(BaseModel):
     marker: str = ""
     tail_hash: str = ""
     transcript_path: str | None = None
+    routing_hint: str | None = None
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -824,6 +842,7 @@ def dispatch_to_tmux(
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
             status=DispatchStatus.FAILED,
             reason="unsupported session_ref (expected host:session:pane)",
         )
@@ -834,6 +853,7 @@ def dispatch_to_tmux(
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
             status=DispatchStatus.BLOCKED,
             reason=f"remote dispatch to {host} not in allowlist",
         )
@@ -857,6 +877,7 @@ def dispatch_to_tmux(
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
             status=DispatchStatus.BLOCKED,
             reason=pre_check.reason,
             tail_hash=pre_check.tail_hash,
@@ -867,6 +888,7 @@ def dispatch_to_tmux(
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
             status=DispatchStatus.BLOCKED,
             reason="blocked: pane in copy-mode and cancel failed",
         )
@@ -878,6 +900,7 @@ def dispatch_to_tmux(
             return DispatchResult(
                 order_id=order.order_id,
                 session_ref=order.session_ref,
+                routing_hint=order.routing_hint,
                 status=DispatchStatus.FAILED,
                 reason=proc.stderr.strip() or proc.stdout.strip() or f"tmux paste-buffer failed rc={proc.returncode}",
             )
@@ -888,6 +911,7 @@ def dispatch_to_tmux(
             return DispatchResult(
                 order_id=order.order_id,
                 session_ref=order.session_ref,
+                routing_hint=order.routing_hint,
                 status=DispatchStatus.FAILED,
                 reason=proc.stderr.strip() or proc.stdout.strip() or f"remote tmux paste-buffer failed rc={proc.returncode}",
             )
@@ -911,6 +935,7 @@ def dispatch_to_tmux(
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
             status=DispatchStatus.SENT,
             reason="sent: confirmed via transcript-grep",
             marker=marker,
@@ -924,6 +949,7 @@ def dispatch_to_tmux(
     return DispatchResult(
         order_id=order.order_id,
         session_ref=order.session_ref,
+        routing_hint=order.routing_hint,
         status=DispatchStatus.FAILED,
         reason="send-failed-no-confirmation (transcript-grep found no marker)",
         marker=marker,

@@ -37,11 +37,17 @@ _KEY_BYTES = 32
 
 
 class LedgerEntry(BaseModel):
-    """One signed, append-only delivery record."""
+    """One signed, append-only delivery record.
+
+    ``routing_hint`` is an opaque, caller-supplied value copied through
+    unchanged from the originating ``DispatchOrder`` — chitra signs and logs
+    it for audit purposes only, never interprets it, exactly like ``tag``.
+    """
 
     order_id: str
     session_ref: str
     tag: str
+    routing_hint: str | None = None
     message_hash: str
     sent_at: str
     signature: str
@@ -68,11 +74,14 @@ def load_or_create_signing_key(key_path: Path = DEFAULT_KEY_PATH) -> bytes:
     return key
 
 
-def sign(key: bytes, *, session_ref: str, tag: str, digest: str, sent_at: str) -> str:
-    """HMAC-SHA256 signature over (sent_at, session_ref, tag, message_hash),
-    hex-encoded. The canonical string is a fixed, unambiguous field order —
-    changing any field changes the signature."""
-    canonical = "|".join([sent_at, session_ref, tag, digest]).encode("utf-8")
+def sign(key: bytes, *, session_ref: str, tag: str, digest: str, sent_at: str, routing_hint: str | None = None) -> str:
+    """HMAC-SHA256 signature over (sent_at, session_ref, tag, message_hash,
+    routing_hint), hex-encoded. The canonical string is a fixed, unambiguous
+    field order — changing any field changes the signature. ``routing_hint``
+    is part of the signed payload (an empty placeholder when absent) since
+    it is part of the record being attested to, same as every other field
+    here."""
+    canonical = "|".join([sent_at, session_ref, tag, digest, routing_hint or ""]).encode("utf-8")
     return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
 
@@ -84,14 +93,23 @@ def append_entry(
     tag: str,
     nudge: str,
     key: bytes,
+    routing_hint: str | None = None,
     sent_at: str | None = None,
 ) -> LedgerEntry:
     """Sign and append one delivery record. Append-only: never rewrites or
     truncates existing entries."""
     stamp = sent_at or datetime.now(UTC).isoformat()
     digest = message_hash(nudge)
-    signature = sign(key, session_ref=session_ref, tag=tag, digest=digest, sent_at=stamp)
-    entry = LedgerEntry(order_id=order_id, session_ref=session_ref, tag=tag, message_hash=digest, sent_at=stamp, signature=signature)
+    signature = sign(key, session_ref=session_ref, tag=tag, digest=digest, sent_at=stamp, routing_hint=routing_hint)
+    entry = LedgerEntry(
+        order_id=order_id,
+        session_ref=session_ref,
+        tag=tag,
+        routing_hint=routing_hint,
+        message_hash=digest,
+        sent_at=stamp,
+        signature=signature,
+    )
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     with ledger_path.open("a", encoding="utf-8") as fh:
         fh.write(entry.model_dump_json() + "\n")
@@ -101,7 +119,14 @@ def append_entry(
 def verify_entry(entry: LedgerEntry, *, key: bytes) -> bool:
     """Recompute the signature and compare (constant-time) against the
     entry's recorded signature."""
-    expected = sign(key, session_ref=entry.session_ref, tag=entry.tag, digest=entry.message_hash, sent_at=entry.sent_at)
+    expected = sign(
+        key,
+        session_ref=entry.session_ref,
+        tag=entry.tag,
+        digest=entry.message_hash,
+        sent_at=entry.sent_at,
+        routing_hint=entry.routing_hint,
+    )
     return hmac.compare_digest(expected, entry.signature)
 
 

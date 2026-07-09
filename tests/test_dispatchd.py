@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 import chitra.dispatchd as dispatchd_mod
 import chitra.ledger as ledger_mod
 from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
 from chitra.dispatchd import process_one_order, run_once
+from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
 
 def _write_order(orders_dir: Path, order: DispatchOrder) -> Path:
@@ -146,6 +148,79 @@ def test_ledger_write_failure_does_not_prevent_completion_or_cause_redelivery(tm
     assert (queue_dir / "results" / "ord-4.json").exists()
 
 
+def test_routing_hint_flows_from_order_through_result_and_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An opaque routing_hint set on the order must appear unchanged on the
+    DispatchResult and in the signed ledger entry -- chitra carries it
+    through for audit purposes only, never interprets it."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
+            status=DispatchStatus.SENT,
+            reason="sent: test",
+        )
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-5", session_ref="localhost:s:0.0", nudge="hi", routing_hint="opus-panel")
+    _write_order(queue_dir / "orders", order)
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=ledger_path,
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].routing_hint == "opus-panel"
+
+    ledger_lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    assert len(ledger_lines) == 1
+    entry = ledger_mod.LedgerEntry.model_validate_json(ledger_lines[0])
+    assert entry.routing_hint == "opus-panel"
+
+
+def test_routing_hint_defaults_to_none_and_is_unaffected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backward compatibility: an order that never sets routing_hint (the
+    default) flows through as None on both the result and the ledger."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
+            status=DispatchStatus.SENT,
+            reason="sent: test",
+        )
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-6", session_ref="localhost:s:0.0", nudge="hi")
+    assert order.routing_hint is None
+    _write_order(queue_dir / "orders", order)
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=ledger_path,
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].routing_hint is None
+
+    ledger_lines = ledger_path.read_text(encoding="utf-8").splitlines()
+    entry = ledger_mod.LedgerEntry.model_validate_json(ledger_lines[0])
+    assert entry.routing_hint is None
+
+
 def test_malformed_order_file_is_moved_aside_not_crashed_on(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"
     orders_dir = queue_dir / "orders"
@@ -158,3 +233,157 @@ def test_malformed_order_file_is_moved_aside_not_crashed_on(tmp_path: Path) -> N
     assert results == []
     assert not bad.exists()
     assert (queue_dir / "processed" / "bad.json").exists()
+
+
+def _fake_dispatch_passthrough(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+    return DispatchResult(
+        order_id=order.order_id,
+        session_ref=order.session_ref,
+        routing_hint=order.routing_hint,
+        status=DispatchStatus.SENT,
+        reason="sent: test",
+    )
+
+
+def test_routing_config_fills_in_routing_hint_when_task_type_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """task_type set, no explicit routing_hint, config has a matching entry:
+    dispatchd fills in routing_hint from the config before dispatch."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(yaml.safe_dump({"defaults": {"code-review": "sonnet"}}), encoding="utf-8")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-7", session_ref="localhost:s:0.0", nudge="hi", task_type="code-review")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )
+
+    assert len(results) == 1
+    assert results[0].routing_hint == "sonnet"
+
+
+def test_routing_config_no_match_leaves_routing_hint_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """task_type set but absent from the config's defaults map: routing_hint
+    stays None, exactly as if no task_type had been given."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(yaml.safe_dump({"defaults": {"code-review": "sonnet"}}), encoding="utf-8")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-8", session_ref="localhost:s:0.0", nudge="hi", task_type="unlisted-type")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )
+
+    assert len(results) == 1
+    assert results[0].routing_hint is None
+
+
+def test_no_routing_config_set_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CHITRA_ROUTING_CONFIG unset and no path passed: dispatchd runs exactly
+    as it did before task_type/routing_config existed -- routing_hint is
+    unaffected."""
+    monkeypatch.delenv(ROUTING_CONFIG_ENV_VAR, raising=False)
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-9", session_ref="localhost:s:0.0", nudge="hi", task_type="code-review")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].routing_hint is None
+
+
+def test_explicit_routing_hint_wins_over_config_lookup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caller already set routing_hint directly: the config lookup is
+    skipped entirely, even though task_type also matches a config entry."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(yaml.safe_dump({"defaults": {"code-review": "sonnet"}}), encoding="utf-8")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(
+        order_id="ord-10",
+        session_ref="localhost:s:0.0",
+        nudge="hi",
+        task_type="code-review",
+        routing_hint="caller-chosen-hint",
+    )
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )
+
+    assert len(results) == 1
+    assert results[0].routing_hint == "caller-chosen-hint"
+
+
+def test_malformed_routing_config_raises_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configured routing_config_path that fails to parse is a real
+    configuration error -- run_once raises rather than silently ignoring
+    it or falling back to no-config behavior."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text("defaults: [this is not a mapping: :", encoding="utf-8")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-11", session_ref="localhost:s:0.0", nudge="hi", task_type="code-review")
+    _write_order(queue_dir / "orders", order)
+
+    with pytest.raises(yaml.YAMLError):
+        run_once(
+            queue_dir,
+            lock_dir=tmp_path / "locks",
+            ledger_path=tmp_path / "ledger.jsonl",
+            ledger_key_path=tmp_path / "ledger.key",
+            routing_config_path=config_path,
+        )
+
+
+def test_missing_routing_config_file_raises_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configured routing_config_path that doesn't exist is a real
+    configuration error -- run_once raises rather than silently no-oping."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-12", session_ref="localhost:s:0.0", nudge="hi", task_type="code-review")
+    _write_order(queue_dir / "orders", order)
+
+    with pytest.raises(OSError):
+        run_once(
+            queue_dir,
+            lock_dir=tmp_path / "locks",
+            ledger_path=tmp_path / "ledger.jsonl",
+            ledger_key_path=tmp_path / "ledger.key",
+            routing_config_path=tmp_path / "does-not-exist.yaml",
+        )
