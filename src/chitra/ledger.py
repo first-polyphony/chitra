@@ -18,7 +18,7 @@ What this proves, and to whom:
   entry and no authentication — the pane itself is the operator's own
   channel; only chitra-relayed [C] messages go through this ledger.)
 
-No LLM calls. Deterministic signing/logging only.
+No LLM calls in this module's own code path — deterministic signing/logging only.
 """
 
 from __future__ import annotations

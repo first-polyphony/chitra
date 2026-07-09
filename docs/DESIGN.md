@@ -6,7 +6,7 @@ chitra began as an internal extraction: a tmux dispatch function that had two re
 
 ## What chitra is not
 
-chitra deliberately does not do reasoning, drafting, or decision-making. If a request would add an LLM call, a decision-making surface, or general-purpose agent orchestration to this repo, it belongs in a different, higher-level system that *uses* chitra as its delivery/dedup layer — not in chitra itself. This is a scope statement, not an oversight: keeping chitra small is a design goal.
+chitra delivers messages to, and observes the state of, sessions that are themselves driven by an LLM (e.g. Claude Code instances running in tmux) — that IS chitra's purpose. What chitra never does is call an LLM API *itself* to decide what to say or how to act: every decision about message content, timing, and target is made by the caller (a human operator or an orchestrating session) before it reaches chitra. Put another way, chitra manages/orchestrates LLM sessions from the outside, but contains no LLM calls internally — like a mail carrier that doesn't read the letters it delivers. If a request would add an LLM call, a decision-making surface, or general-purpose agent orchestration *inside chitra's own code*, it belongs in a different, higher-level system that *uses* chitra as its delivery/dedup layer — not in chitra itself. This is a scope statement, not an oversight: keeping chitra small is a design goal.
 
 ## Distribution and packaging
 

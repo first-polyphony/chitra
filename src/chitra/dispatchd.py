@@ -14,7 +14,9 @@ move (the move happens last; a result file guards against double-delivery
 too — if a result already exists for an order id, the order is treated as
 already processed and moved without re-dispatching).
 
-No LLM calls. This module is deterministic plumbing only.
+No LLM calls in this module's own code path — it delivers orders to LLM-driven
+sessions, but the content/timing/target of every order is decided by the
+caller before it reaches this module; this module is deterministic plumbing only.
 """
 
 from __future__ import annotations

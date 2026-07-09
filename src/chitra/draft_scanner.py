@@ -5,7 +5,7 @@ Formalizes the residual-sweep duty ("check EVERY box EVERY sweep") as a
 mechanical guarantee: a draft sitting in an input box for one sweep cycle
 too long should never be silently lost between interactive-monitor turns.
 
-No LLM calls. Deterministic flagging only.
+No LLM calls in this module's own code path — deterministic flagging only.
 """
 
 from __future__ import annotations

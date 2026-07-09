@@ -12,7 +12,7 @@ with their own board schema constant (a fixed owner string, a fixed host
 allowlist) pass those in rather than this module baking in someone else's
 deployment topology.
 
-No LLM calls. Deterministic validate-then-write only.
+No LLM calls in this module's own code path — deterministic validate-then-write only.
 """
 
 from __future__ import annotations

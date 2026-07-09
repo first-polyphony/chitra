@@ -2,7 +2,7 @@
 
 ## Scope
 
-chitra is a small, deterministic relay/dedup layer — no LLM calls, no reasoning, no decision-making. If a proposed change would add any of those to this repo, it likely belongs in a different, higher-level project that *uses* chitra rather than in chitra itself. This isn't a bureaucratic gate — it's the actual design boundary, and PRs are evaluated against it before anything else.
+chitra's purpose is delivering to and observing LLM-driven sessions (e.g. Claude Code in tmux) — that's the whole point of the tool. The scope boundary is narrower than "no LLM involved anywhere": chitra's own code path — the relay/dispatch/dedup logic — never calls an LLM API to decide what to say or how to act; every decision about message content, timing, and target is made by the caller before it reaches chitra. If a proposed change would add an LLM call, reasoning, or decision-making *inside chitra's own code*, it likely belongs in a different, higher-level project that *uses* chitra rather than in chitra itself. This isn't a bureaucratic gate — it's the actual design boundary, and PRs are evaluated against it before anything else.
 
 ## Before opening a nontrivial PR
 
