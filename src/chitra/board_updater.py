@@ -4,13 +4,13 @@ valid hosts/owner are always parameters supplied by the caller; this module
 never hardcodes a deployment's own hostnames or ownership string.
 
 Validator constraints are generic by default: ``selfcheck`` needs string
-keys ``solid``/``weak``/``unsure``, every ``log[*].chip_target`` must be
-null or match a current session id, and ``state.cls`` must be one of a
-known set. ``snapshot_owner`` and per-session ``host`` are validated only
-when the caller supplies ``expected_owner``/``valid_hosts`` — deployments
-with their own board schema constant (a fixed owner string, a fixed host
-allowlist) pass those in rather than this module baking in someone else's
-deployment topology.
+keys ``solid``/``weak``/``unsure``, and every ``log[*].chip_target`` must be
+null or match a current session id. ``snapshot_owner``, per-session
+``host``, and the set of valid ``state.cls`` values are validated against
+``VALID_STATE_CLS`` by default -- module-level constants matching this
+project's own board schema -- but can be overridden per call via
+``expected_owner``/``valid_hosts``/``valid_state_cls`` for a deployment with
+its own owner string, host allowlist, or state-class set.
 
 No LLM calls in this module's own code path — deterministic validate-then-write only.
 """
@@ -42,17 +42,21 @@ def validate_facts(
     *,
     expected_owner: str | None = None,
     valid_hosts: set[str] | None = None,
+    valid_state_cls: set[str] | None = None,
 ) -> ValidationResult:
     """Validate a facts.json-shaped dict against the board schema constraints.
 
     ``expected_owner`` and ``valid_hosts`` are optional deployment-specific
     constraints (e.g. a fixed ``snapshot_owner`` string, an allowlist of
     known host names) — omit either to skip that check entirely.
+    ``valid_state_cls`` overrides the module-level ``VALID_STATE_CLS``
+    default for a deployment with its own set of ``state.cls`` values.
 
     Returns ``ok=False`` with the first-found errors (not exhaustive by
     design — callers roll back on any failure, so "first error" is enough
     signal without over-engineering an error-aggregation contract).
     """
+    valid_state_cls = valid_state_cls if valid_state_cls is not None else VALID_STATE_CLS
     errors: list[str] = []
 
     if expected_owner is not None and facts.get("snapshot_owner") != expected_owner:
@@ -73,8 +77,8 @@ def validate_facts(
                 state = session.get("state")
                 if isinstance(state, dict):
                     cls = state.get("cls")
-                    if cls is not None and cls not in VALID_STATE_CLS:
-                        errors.append(f"state.cls '{cls}' not in {sorted(VALID_STATE_CLS)}")
+                    if cls is not None and cls not in valid_state_cls:
+                        errors.append(f"state.cls '{cls}' not in {sorted(valid_state_cls)}")
                 host = session.get("host")
                 if valid_hosts is not None and host is not None and host not in valid_hosts:
                     errors.append(f"session host '{host}' not in {sorted(valid_hosts)}")
@@ -101,10 +105,12 @@ def write_facts(
     facts_filename: str = "facts.json",
     expected_owner: str | None = None,
     valid_hosts: set[str] | None = None,
+    valid_state_cls: set[str] | None = None,
 ) -> dict[str, Any]:
     """Validate, backup, write, and (on validator failure) roll back.
 
-    ``expected_owner``/``valid_hosts`` are forwarded to ``validate_facts``.
+    ``expected_owner``/``valid_hosts``/``valid_state_cls`` are forwarded to
+    ``validate_facts``.
 
     Returns a result dict: ``{"ok": bool, "path": str, "backup": str | None,
     "errors": list[str]}``. On failure, the pre-existing facts.json (if any)
@@ -113,7 +119,12 @@ def write_facts(
     board_dir.mkdir(parents=True, exist_ok=True)
     target = board_dir / facts_filename
 
-    validation = validate_facts(facts, expected_owner=expected_owner, valid_hosts=valid_hosts)
+    validation = validate_facts(
+        facts,
+        expected_owner=expected_owner,
+        valid_hosts=valid_hosts,
+        valid_state_cls=valid_state_cls,
+    )
     if not validation.ok:
         logger.warning("board_updater_validation_failed", errors=validation.errors)
         return {"ok": False, "path": str(target), "backup": None, "errors": validation.errors}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -309,6 +310,69 @@ def test_malformed_order_file_is_moved_aside_not_crashed_on(tmp_path: Path) -> N
     assert results == []
     assert not bad.exists()
     assert (queue_dir / "processed" / "bad.json").exists()
+
+
+def test_malformed_order_file_is_logged_at_error_level(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unreadable/incomplete order is a silently-lost order (see the
+    'Known limitation' docstring in process_one_order) -- it must be logged
+    at ERROR, not buried at WARNING among routine noise. structlog's default
+    logger factory prints to stdout rather than routing through stdlib
+    logging, so this is asserted via captured output rather than caplog."""
+    queue_dir = tmp_path / "queue"
+    orders_dir = queue_dir / "orders"
+    orders_dir.mkdir(parents=True)
+    bad = orders_dir / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+
+    run_once(queue_dir, lock_dir=tmp_path / "locks")
+
+    captured = capsys.readouterr()
+    lines = [line for line in captured.out.splitlines() if "dispatchd_order_unreadable" in line]
+    assert len(lines) == 1
+    assert "error" in lines[0].lower()
+    assert "warning" not in lines[0].lower()
+
+
+def test_run_once_skips_order_file_that_vanishes_before_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file present in the glob() listing but removed before stat() (e.g.
+    raced by something else touching the queue dir) must be skipped, not
+    crash the drain loop."""
+    queue_dir = tmp_path / "queue"
+    orders_dir = queue_dir / "orders"
+    orders_dir.mkdir(parents=True)
+    good_order = DispatchOrder(order_id="ord-good", session_ref="localhost:s:0.0", nudge="hi")
+    _write_order(orders_dir, good_order)
+    vanished_path = orders_dir / "vanished.json"
+    vanished_path.write_text('{"not": "a real order"}', encoding="utf-8")
+
+    real_stat = Path.stat
+
+    def flaky_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name == "vanished.json":
+            raise FileNotFoundError(self)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT, reason="sent: test")
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].order_id == "ord-good"
+    # The vanished file was skipped entirely -- neither processed nor moved.
+    # (checked via os.path, not Path.exists(), since Path.stat() is patched above)
+    assert os.path.exists(vanished_path)
 
 
 def _fake_dispatch_passthrough(order: DispatchOrder, **kwargs: Any) -> DispatchResult:

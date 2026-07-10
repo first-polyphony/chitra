@@ -10,6 +10,18 @@ emitter format drift without crashing.
 
 No LLM calls in this module's own code path — deterministic dedup only.
 It watches state emitted by LLM-driven sessions, but never invokes a model itself.
+
+Known limitation: the lane_id -> signature state map (``load_state`` /
+``save_state``) has no eviction -- a lane that stops emitting events (e.g. a
+retired session) leaves its entry in ``triaged-state.json`` forever. This is
+a small, bounded string per lane, so growth is slow, but on a very
+long-running deployment with many retired lanes the file will grow
+unboundedly. A time-based eviction was considered (drop entries not touched
+in N days) but the only per-event timestamp available is the event log's own
+``ts`` field, which this module deliberately treats as an opaque, unvalidated
+string (see the events-log contract above) rather than a value safe to parse
+as a date for eviction decisions. Left as a documented limitation rather than
+adding unvalidated timestamp parsing.
 """
 
 from __future__ import annotations

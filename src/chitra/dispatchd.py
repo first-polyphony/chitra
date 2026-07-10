@@ -8,11 +8,14 @@ Queue layout (default ``queue_dir``, overridable per call/CLI):
     queue_dir/results/<id>.json  -- DispatchResult JSON, written after processing
     queue_dir/processed/*.json   -- the order file, moved here after processing
 
-Crash-safety: an order file already present under ``processed/`` is never
-reprocessed, even if left in ``orders/`` by a crash between delivery and the
-move (the move happens last; a result file guards against double-delivery
-too — if a result already exists for an order id, the order is treated as
-already processed and moved without re-dispatching).
+Crash-safety: once a result file exists for an order id, that order is never
+redispatched -- process_one_order checks for an existing result file before
+dispatching and, if found, moves the order aside without re-dispatching. The
+one real gap this does NOT close: a crash between the paste actually landing
+in the target pane and the result file being written leaves the order file
+in ``orders/`` with no result file, so the next pass re-dispatches it and the
+message is delivered a second time. See ``process_one_order``'s ledger-write
+comment below for exactly where that window sits.
 
 No LLM calls in this module's own code path — it delivers orders to LLM-driven
 sessions, but the content/timing/target of every order is decided by the
@@ -87,11 +90,22 @@ def process_one_order(
     ``task_type``, the config is consulted to fill in a default
     ``routing_hint`` before dispatch — an explicit ``routing_hint`` from the
     caller always wins and skips this lookup entirely.
+
+    Known limitation: an order file that is valid-looking JSON but was left
+    incomplete by a crashed/killed writer (as opposed to outright malformed
+    JSON, e.g. a truncated write) is not distinguishable here from a
+    genuinely malformed order -- both raise on ``model_validate_json`` and
+    are moved to ``processed/`` with no result file, i.e. the order is
+    silently dropped with no redelivery and no retry. This is logged at
+    ERROR level specifically so it is not lost among routine warnings.
     """
     try:
         order = DispatchOrder.model_validate_json(order_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        logger.warning("dispatchd_order_unreadable", path=str(order_path), error=str(exc))
+        # ERROR, not warning: an order is being silently lost here (see the
+        # "Known limitation" note above) and this must not blend into
+        # routine warning-level noise.
+        logger.error("dispatchd_order_unreadable", path=str(order_path), error=str(exc))
         # Move aside so a malformed file doesn't spin the loop forever.
         processed_dir.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
@@ -186,7 +200,16 @@ def run_once(
     """
     orders_dir, results_dir, processed_dir = _ensure_queue_dirs(queue_dir)
     routing_config = load_routing_config(routing_config_path)
-    pending = sorted(orders_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    dated: list[tuple[float, Path]] = []
+    for order_path in orders_dir.glob("*.json"):
+        try:
+            dated.append((order_path.stat().st_mtime, order_path))
+        except FileNotFoundError:
+            # Order file vanished between the glob and the stat (e.g. raced
+            # by something else touching the queue dir). Skip it rather than
+            # letting the stat's exception kill run_forever's loop.
+            logger.warning("dispatchd_order_vanished_before_stat", path=str(order_path))
+    pending = [p for _, p in sorted(dated, key=lambda t: t[0])]
     out: list[DispatchResult] = []
     for order_path in pending:
         result = process_one_order(
