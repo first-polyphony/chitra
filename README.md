@@ -67,22 +67,33 @@ See `chitra.ledger.verify_delivery` for the check as a function call, or read `l
 
 ## Routing config (`task_type` -> default `routing_hint`)
 
-`DispatchOrder` also carries an optional `task_type` — a separate, caller-supplied classification string (e.g. `"code-review"`, `"design-judgment"`). Chitra does not decide what a task type IS or evaluate any content to classify one; the caller states it. `task_type` is not carried through to `DispatchResult` or the ledger — it exists only to drive the config lookup below.
+`DispatchOrder` also carries an optional `task_type` — a separate, caller-supplied classification string (e.g. `"code-review"`, `"design-judgment"`). Chitra does not decide what a task type IS or evaluate any content to classify one; the caller states it. `task_type`, the resolved routing selection, and a provenance flag (`routing_hint_source`) are carried through onto `DispatchResult` and the signed ledger entry for audit.
 
-If a caller sets `task_type` but leaves `routing_hint` unset, `dispatchd` can fill in a default `routing_hint` from a static, operator-populated YAML lookup table. This is purely mechanical config-driven substitution — like a `.gitattributes` or `nginx.conf` mapping file — not a smart router, and it is skipped entirely whenever the caller already supplied an explicit `routing_hint` (**explicit `routing_hint` always wins**).
+If a caller sets `task_type` but leaves `routing_hint` unset, `dispatchd` consults an operator-populated YAML config keyed by `task_type`. This is still config-driven substitution — like a `.gitattributes` or `nginx.conf` mapping file, not a smart router — and it is skipped entirely whenever the caller already supplied an explicit `routing_hint` (**explicit `routing_hint` always wins**). The config supports two shapes:
+
+- **`defaults` (opaque hint)** — a flat `task_type -> routing_hint` map. Chitra fills in the opaque `routing_hint` string but never acts on it (`routing_hint_source: "config"`). Unchanged; existing configs keep working.
+- **`routes` (active model/harness selection)** — a structured `task_type -> {model, harness, zdr?}` map. Chitra **resolves** the model+harness at dispatch, records the resolved selection structurally (`resolved_model` / `resolved_harness` / `resolved_zdr`) plus a `model@harness[+zdr]` `routing_hint`, and stamps `routing_hint_source: "route"`. When both a `routes` and a `defaults` entry exist for the same `task_type`, the structured route wins.
 
 Point `dispatchd` at a config file via the `CHITRA_ROUTING_CONFIG` env var (or its `--routing-config-path` flag). If unset, `dispatchd` runs with no routing config — a normal no-op, not an error. If the env var/flag IS set but the file is missing or fails to parse, that's a real configuration error and `dispatchd` raises rather than silently ignoring it. An example template ships at `docs/routing.yaml.example`:
 
 ```yaml
-# chitra routing preferences — maps task_type to a default routing_hint.
-# Purely mechanical lookup; chitra does not interpret task_type's meaning.
+# chitra routing preferences, keyed by task_type.
+# defaults: opaque routing_hint chitra carries but never acts on.
 defaults:
   heartbeat: sonnet
-  sparring: fable
   quorum: haiku
+# routes: structured model+harness (+zdr) chitra RESOLVES and records.
+routes:
+  design-judgment:
+    model: opus-4.8
+    harness: claude-code
+    zdr: true
+  code-fix:
+    model: gpt-5.6-sol
+    harness: codex-cli
 ```
 
-The keys/values above are illustrative only. Chitra ships no default content or opinions about what task types or routing targets (sub-agent types, model names) mean in any given deployment — this is a file each operator populates for their own fleet. For real-world naming precedent (not a prescription), see [`docs/workflow-pattern-catalog.md`](docs/workflow-pattern-catalog.md), a catalog of named orchestration loop patterns some deployments' `task_type` values may correspond to.
+The keys/values above are illustrative only. Chitra ships no default content or opinions about what task types or routing targets (model names, harnesses) mean in any given deployment — this is a file each operator populates for their own fleet. For real-world naming precedent (not a prescription), see [`docs/workflow-pattern-catalog.md`](docs/workflow-pattern-catalog.md), a catalog of named orchestration loop patterns some deployments' `task_type` values may correspond to.
 
 ## Install
 

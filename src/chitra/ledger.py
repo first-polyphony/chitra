@@ -62,6 +62,9 @@ class LedgerEntry(BaseModel):
     routing_hint: str | None = None
     task_type: str | None = None
     routing_hint_source: str = "unset"
+    resolved_model: str | None = None
+    resolved_harness: str | None = None
+    resolved_zdr: bool = False
     sig_v: int = 1
     message_hash: str
     sent_at: str
@@ -100,19 +103,27 @@ def sign(
     routing_hint: str | None = None,
     task_type: str | None = None,
     routing_hint_source: str = "unset",
-    sig_v: int = 2,
+    resolved_model: str | None = None,
+    resolved_harness: str | None = None,
+    resolved_zdr: bool = False,
+    sig_v: int = 3,
 ) -> str:
-    """HMAC-SHA256 signature over (sent_at, session_ref, tag, message_hash,
-    routing_hint), hex-encoded. The canonical string is a fixed, unambiguous
-    field order — changing any field changes the signature. ``routing_hint``
-    is part of the signed payload (an empty placeholder when absent) since
-    it is part of the record being attested to, same as every other field
-    here."""
+    """HMAC-SHA256 signature over the record's canonical field order,
+    hex-encoded. Changing any signed field changes the signature.
+
+    Fields are appended by version so older entries keep verifying: v1 signs
+    ``(sent_at, session_ref, tag, message_hash, routing_hint)``; v2 adds
+    ``(task_type, routing_hint_source)``; v3 adds the resolved structured
+    selection ``(resolved_model, resolved_harness, resolved_zdr)``. Absent
+    values sign as an empty placeholder (``resolved_zdr`` as ``"1"``/``"0"``)
+    since they are part of the record being attested to."""
+    if sig_v not in (1, 2, 3):
+        raise ValueError(f"unsupported signature version: {sig_v}")
     fields = [sent_at, session_ref, tag, digest, routing_hint or ""]
     if sig_v >= 2:
         fields.extend([task_type or "", routing_hint_source])
-    elif sig_v != 1:
-        raise ValueError(f"unsupported signature version: {sig_v}")
+    if sig_v >= 3:
+        fields.extend([resolved_model or "", resolved_harness or "", "1" if resolved_zdr else "0"])
     canonical = "|".join(fields).encode("utf-8")
     return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
@@ -128,6 +139,9 @@ def append_entry(
     routing_hint: str | None = None,
     task_type: str | None = None,
     routing_hint_source: str = "unset",
+    resolved_model: str | None = None,
+    resolved_harness: str | None = None,
+    resolved_zdr: bool = False,
     sent_at: str | None = None,
 ) -> LedgerEntry:
     """Sign and append one delivery record. Append-only: never rewrites or
@@ -143,6 +157,9 @@ def append_entry(
         routing_hint=routing_hint,
         task_type=task_type,
         routing_hint_source=routing_hint_source,
+        resolved_model=resolved_model,
+        resolved_harness=resolved_harness,
+        resolved_zdr=resolved_zdr,
     )
     entry = LedgerEntry(
         order_id=order_id,
@@ -151,7 +168,10 @@ def append_entry(
         routing_hint=routing_hint,
         task_type=task_type,
         routing_hint_source=routing_hint_source,
-        sig_v=2,
+        resolved_model=resolved_model,
+        resolved_harness=resolved_harness,
+        resolved_zdr=resolved_zdr,
+        sig_v=3,
         message_hash=digest,
         sent_at=stamp,
         signature=signature,
@@ -174,6 +194,9 @@ def verify_entry(entry: LedgerEntry, *, key: bytes) -> bool:
         routing_hint=entry.routing_hint,
         task_type=entry.task_type,
         routing_hint_source=entry.routing_hint_source,
+        resolved_model=entry.resolved_model,
+        resolved_harness=entry.resolved_harness,
+        resolved_zdr=entry.resolved_zdr,
         sig_v=entry.sig_v,
     )
     return hmac.compare_digest(expected, entry.signature)

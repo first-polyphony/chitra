@@ -48,7 +48,7 @@ from .dispatch import (
     dispatch_to_tmux,
 )
 from .policy_config import PolicyConfig, load_policy_config
-from .routing_config import RoutingConfig, load_routing_config, resolve_routing_hint
+from .routing_config import RoutingConfig, load_routing_config, resolve_route, resolve_routing_hint
 from .state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
 from .taxonomy import load_taxonomy
 
@@ -95,12 +95,15 @@ def process_one_order(
     is considered already processed — it is moved to ``processed/`` without
     re-dispatching, and None is returned (no duplicate delivery).
 
-    ``routing_config``, if given, is a purely mechanical ``task_type ->
-    routing_hint`` lookup table (see ``chitra.routing_config``). If the
-    order's ``routing_hint`` is not already set AND the order has a
-    ``task_type``, the config is consulted to fill in a default
-    ``routing_hint`` before dispatch — an explicit ``routing_hint`` from the
-    caller always wins and skips this lookup entirely.
+    ``routing_config``, if given, maps ``task_type`` to a routing selection
+    (see ``chitra.routing_config``). If the order's ``routing_hint`` is not
+    already set AND the order has a ``task_type``, the config is consulted
+    before dispatch: a structured ``routes`` entry is RESOLVED to a concrete
+    model+harness (+zdr) — recorded, with ``"route"`` provenance, on the
+    result and signed ledger entry — otherwise a flat ``defaults`` entry
+    fills in the opaque ``routing_hint`` (``"config"`` provenance). An
+    explicit ``routing_hint`` from the caller always wins and skips this
+    lookup entirely.
 
     Invalid orders produce a FAILED result using the source filename stem and
     are moved to ``invalid/`` (or ``invalid_dir``) so they cannot be retried
@@ -126,11 +129,25 @@ def process_one_order(
         return result
 
     routing_hint_source = "explicit" if order.routing_hint is not None else "unset"
+    resolved_model: str | None = None
+    resolved_harness: str | None = None
+    resolved_zdr = False
     if order.routing_hint is None and order.task_type is not None:
-        resolved_hint = resolve_routing_hint(order.task_type, routing_config)
-        if resolved_hint is not None:
-            order.routing_hint = resolved_hint
-            routing_hint_source = "config"
+        # A structured ``routes`` entry wins over a flat ``defaults`` hint:
+        # chitra RESOLVES model+harness (+zdr) and records the resolved
+        # selection + "route" provenance, closing the ROADMAP line-97 gap.
+        route = resolve_route(order.task_type, routing_config)
+        if route is not None:
+            order.routing_hint = route.routing_hint
+            resolved_model = route.model
+            resolved_harness = route.harness
+            resolved_zdr = route.zdr
+            routing_hint_source = "route"
+        else:
+            resolved_hint = resolve_routing_hint(order.task_type, routing_config)
+            if resolved_hint is not None:
+                order.routing_hint = resolved_hint
+                routing_hint_source = "config"
 
     existing_result = results_dir / f"{order.order_id}.json"
     if existing_result.exists():
@@ -171,6 +188,9 @@ def process_one_order(
                 routing_hint=order.routing_hint,
                 task_type=order.task_type,
                 routing_hint_source=routing_hint_source,
+                resolved_model=resolved_model,
+                resolved_harness=resolved_harness,
+                resolved_zdr=resolved_zdr,
             )
             _write_result_atomic(results_dir, result)
             processed_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +214,9 @@ def process_one_order(
             routing_hint=order.routing_hint,
             task_type=order.task_type,
             routing_hint_source=routing_hint_source,
+            resolved_model=resolved_model,
+            resolved_harness=resolved_harness,
+            resolved_zdr=resolved_zdr,
             status=DispatchStatus.BLOCKED,
             reason=f"lane lock unavailable: {exc}",
         )
@@ -209,6 +232,9 @@ def process_one_order(
     result.task_type = order.task_type
     result.routing_hint_source = routing_hint_source
     result.routing_hint = order.routing_hint
+    result.resolved_model = resolved_model
+    result.resolved_harness = resolved_harness
+    result.resolved_zdr = resolved_zdr
     logger.info(
         "dispatchd_order_processed",
         order_id=order.order_id,
@@ -237,6 +263,9 @@ def process_one_order(
                 routing_hint=order.routing_hint,
                 task_type=order.task_type,
                 routing_hint_source=routing_hint_source,
+                resolved_model=resolved_model,
+                resolved_harness=resolved_harness,
+                resolved_zdr=resolved_zdr,
                 nudge=order.nudge,
                 key=key,
             )

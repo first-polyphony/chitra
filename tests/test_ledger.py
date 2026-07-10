@@ -168,7 +168,7 @@ def test_existing_v1_ledger_entry_still_verifies() -> None:
     assert verify_entry(entry, key=key) is True
 
 
-def test_new_v2_ledger_entry_signs_provenance_and_rejects_tampering(tmp_path: Path) -> None:
+def test_new_v3_ledger_entry_signs_provenance_and_rejects_tampering(tmp_path: Path) -> None:
     key = load_or_create_signing_key(tmp_path / "ledger.key")
     entry = append_entry(
         tmp_path / "ledger.jsonl",
@@ -180,7 +180,33 @@ def test_new_v2_ledger_entry_signs_provenance_and_rejects_tampering(tmp_path: Pa
         task_type="code-review",
         routing_hint_source="config",
     )
-    assert entry.sig_v == 2
+    assert entry.sig_v == 3
     assert verify_entry(entry, key=key) is True
     assert verify_entry(entry.model_copy(update={"task_type": "different"}), key=key) is False
     assert verify_entry(entry.model_copy(update={"routing_hint_source": "explicit"}), key=key) is False
+
+
+def test_v3_ledger_entry_signs_resolved_route_selection_and_rejects_tampering(tmp_path: Path) -> None:
+    """A resolved ``routes`` selection (model+harness+zdr) is part of the
+    signed v3 payload: tampering with any resolved field breaks the HMAC."""
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    entry = append_entry(
+        tmp_path / "ledger.jsonl",
+        order_id="routed",
+        session_ref="localhost:s:0.0",
+        tag="[C]",
+        nudge="routed message",
+        key=key,
+        routing_hint="opus-4.8@claude-code+zdr",
+        task_type="design-judgment",
+        routing_hint_source="route",
+        resolved_model="opus-4.8",
+        resolved_harness="claude-code",
+        resolved_zdr=True,
+    )
+    assert entry.sig_v == 3
+    assert (entry.resolved_model, entry.resolved_harness, entry.resolved_zdr) == ("opus-4.8", "claude-code", True)
+    assert verify_entry(entry, key=key) is True
+    assert verify_entry(entry.model_copy(update={"resolved_model": "haiku"}), key=key) is False
+    assert verify_entry(entry.model_copy(update={"resolved_harness": "codex-cli"}), key=key) is False
+    assert verify_entry(entry.model_copy(update={"resolved_zdr": False}), key=key) is False
