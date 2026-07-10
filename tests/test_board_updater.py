@@ -55,6 +55,17 @@ def test_validate_facts_rejects_bad_state_cls() -> None:
     assert any("state.cls" in e for e in result.errors)
 
 
+def test_validate_facts_rejects_bad_state_cls_unless_overridden_via_valid_state_cls() -> None:
+    facts = _valid_facts()
+    facts["sessions"][0]["state"]["cls"] = "custom-deployment-state"
+    default_result = validate_facts(facts)
+    assert default_result.ok is False
+    assert any("state.cls" in e for e in default_result.errors)
+
+    overridden_result = validate_facts(facts, valid_state_cls={"custom-deployment-state"})
+    assert overridden_result.ok is True
+
+
 def test_validate_facts_rejects_dangling_chip_target() -> None:
     facts = _valid_facts()
     facts["log"].append({"chip_target": "row-does-not-exist"})

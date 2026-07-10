@@ -23,7 +23,7 @@ BrowserStack's `chitragupta-node` and `chitragupta-rails` are open-source SDKs t
 chitra delivers to and observes LLM-driven sessions from the outside; its own code path makes no LLM calls — no drafting, no judgment calls, deterministic relay/plumbing only.
 
 - **`chitra.dispatch`** — a tmux dispatch library. It checks for tmux copy-mode and cancels it, uses `paste-buffer -p` for a proper bracketed-paste wrapper, then confirms delivery by grepping the target session's own transcript rather than trusting a pane screenshot. Includes `LaneLock`, a file-based single-writer lock: only one writer delivers to a given session id at a time.
-- **`chitra.dispatchd`** — a daemon that drains a JSON order queue (`queue/orders/*.json`), delivers each order via `chitra.dispatch` under a `LaneLock`, writes a result JSON, and moves the processed order aside. A partially processed order is never redelivered after a crash.
+- **`chitra.dispatchd`** — a daemon that drains a JSON order queue (`queue/orders/*.json`), delivers each order via `chitra.dispatch` under a `LaneLock`, writes a result JSON, and moves the processed order aside. Once a result file exists for an order, it is never redispatched — but a crash between the paste actually happening and the result file being written is a real gap that can cause a redelivery on restart; see "Crash-safety" below.
 - **`chitra.triaged`** — a daemon that tails an events log and emits a triage event only when a session's state signature changes, not on every repeated poll.
 - **`chitra.draft_scanner`** — a periodic scan of `host:session:pane` targets for an unsubmitted draft sitting in the tmux input box. Flags only; never submits or discards anything.
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
@@ -45,15 +45,23 @@ Every step above runs against the **actual target host** — a plain local `tmux
 
 `dispatchd` acquires a `LaneLock` per session id before any delivery attempt and releases it after: one writer per session id. Acquiring a lock for an already-locked session id fails or blocks rather than silently proceeding. This prevents two writers racing to deliver to the same session at once — an out-of-band delivery racing a live session's own process can silently corrupt its next turn.
 
+## Crash-safety
+
+`dispatchd` guards against redelivery using a result file: before dispatching, it checks whether a result file already exists for an order id, and if so treats the order as already processed. This means **once a result file exists for an order, it is never redispatched**, even across a daemon restart.
+
+The one real gap: the result file is written *after* the paste already happened (paste -> optional ledger sign/log -> result write -> move to `processed/`). If the daemon crashes in that window — after the paste actually landed in the target pane but before the result file is written — the order file is still sitting in `orders/` with no result file, so the next run re-dispatches it and the message is delivered a second time. This window is small (no I/O happens between the paste and the result write beyond the ledger append), but it is real and not closed by anything in this package.
+
 ## Message tag and delivery authentication
 
 Every dispatched message carries a `tag` (default `"[C]"`) marking it as a chitra relay delivery. An operator typing directly into a pane needs no tag and no authentication; the pane is that operator's own channel. `DispatchOrder`/`DispatchResult` also carry an optional `routing_hint` (default `None`) — an opaque string recording a routing/model-preference decision the calling system already made; chitra never reads, validates, or acts on its contents, only passes it through unchanged into the result and the signed ledger entry for audit purposes.
 
 Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` signs an HMAC-SHA256 over `(timestamp, session_ref, tag, message_hash, routing_hint)` using a key stored in the state directory (generated on first use) and appends the signed record to an append-only JSON Lines (JSONL) ledger. This adds no extra step to a normal send.
 
-The ledger proves two things:
-- **Positive**: "chitra delivered this exact message to this session at this time" — recompute the HMAC over the ledger entry and compare.
-- **Negative**: "chitra did NOT send this" — the ledger is append-only, so a message's absence from it is itself the proof that no such delivery happened.
+This is a trusted-host threat model: the ledger assumes whoever can write to the state directory is trusted (systemd-supervised `dispatchd`, plus the host's own root/admin). It is not designed to resist a malicious actor with filesystem write access to `ledger.jsonl`.
+
+Within that model, the ledger proves one thing cryptographically, and one thing only by convention:
+- **Positive (cryptographic)**: "chitra delivered this exact message to this session at this time" — recompute the HMAC over a given ledger entry and compare; if you have that entry, its authenticity is provable.
+- **Absence (convention, not cryptographic)**: `dispatchd` only ever appends to `ledger.jsonl`, so under normal operation a message's absence suggests no such delivery happened. But append-only-ness here is enforced by convention and file permissions, not by a hash chain or monotonic counter linking entries — there is nothing in the file format that would let a reader detect a wholesale truncation or edit. Anyone with write access to the ledger file can rewrite or shorten it undetected. Treat "not in the ledger" as a strong signal under the trusted-host assumption, not as tamper-proof evidence.
 
 See `chitra.ledger.verify_delivery` for the check as a function call, or read `ledger.jsonl` directly (a plain, documented JSONL format) if the verifying reader doesn't have chitra installed.
 

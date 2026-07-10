@@ -8,15 +8,27 @@ deliberately minimal — one signing key, one append-only JSONL file — and
 adds no friction to a normal send: `dispatchd` signs and logs automatically
 on every successful delivery; nothing else changes about the send path.
 
+Threat model: trusted host. This assumes whoever can write to the ledger's
+state directory (a systemd-supervised `dispatchd`, plus the host's own
+root/admin) is trusted. It is not designed to resist a malicious actor with
+filesystem write access to `ledger.jsonl` itself.
+
 What this proves, and to whom:
-- POSITIVE: "chitra delivered this exact message to this session at this
-  time" — a lane (or any local reader) greps `ledger.jsonl` for its own
-  session_ref + message hash and verifies the HMAC with the shared key.
-- NEGATIVE: "chitra did NOT send this" — absence from the ledger is itself
-  the proof; the ledger is append-only, so a message that isn't in it was
-  never delivered by chitra. (Operator-direct typing into a pane needs no
-  entry and no authentication — the pane itself is the operator's own
-  channel; only chitra-relayed [C] messages go through this ledger.)
+- POSITIVE (cryptographic): "chitra delivered this exact message to this
+  session at this time" — a lane (or any local reader) greps `ledger.jsonl`
+  for its own session_ref + message hash and verifies the HMAC with the
+  shared key. If you have the entry, its authenticity is provable.
+- ABSENCE (convention, not cryptographic): `dispatchd` only ever appends to
+  this file, so under normal operation a message's absence from it suggests
+  no such delivery happened. But that append-only-ness is enforced by
+  convention and file permissions, NOT by a hash chain or counter linking
+  entries to each other — nothing here would let a reader detect a wholesale
+  truncation or edit of the file. Anyone with write access to the ledger can
+  rewrite or shorten it undetected. Treat "not in the ledger" as a strong
+  signal under the trusted-host assumption, not as tamper-proof evidence.
+  (Operator-direct typing into a pane needs no entry and no authentication —
+  the pane itself is the operator's own channel; only chitra-relayed [C]
+  messages go through this ledger.)
 
 No LLM calls in this module's own code path — deterministic signing/logging only.
 """
@@ -138,9 +150,14 @@ def verify_delivery(
     nudge: str,
 ) -> LedgerEntry | None:
     """Return the first ledger entry proving ``nudge`` was delivered to
-    ``session_ref`` with a valid signature, or None if no such entry exists
-    (a caller can treat ``None`` as proof-of-absence — chitra never sent
-    this — since the ledger is append-only and every real send is logged)."""
+    ``session_ref`` with a valid signature, or None if no such entry exists.
+
+    ``None`` is a strong signal under this module's trusted-host threat
+    model (chitra only ever appends, so nothing it wrote is missing) but is
+    NOT cryptographic proof of absence: append-only-ness here is convention
+    and file permissions, not a hash chain or counter, so a caller with
+    write access to ``ledger.jsonl`` could truncate or edit it undetected.
+    """
     if not ledger_path.exists():
         return None
     digest = message_hash(nudge)
