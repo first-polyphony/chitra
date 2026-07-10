@@ -17,13 +17,15 @@ import re
 import socket
 import subprocess
 import time
+from collections.abc import Sequence
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 
 import structlog
 
 from chitra.board_updater import validate_board_facts
+from chitra.goals import GoalStatus, session_host, session_name
 from chitra.state_paths import state_dir as default_state_dir
 
 logger = structlog.get_logger(__name__)
@@ -47,6 +49,107 @@ PROVIDER_LABELS = {
     "tavily": "Tavily API key",
     "github": "GitHub OAuth",
 }
+ROSTER_GOAL_MAX_WIDTH = 60
+ROSTER_NOW_MAX_WIDTH = 50
+ROSTER_MARKERS: dict[GoalStatus, str] = {
+    "blocked": "🔴",
+    "held": "🟡",
+    "working": "🟢",
+    "done-pending-verification": "🟢",
+    "done-pending-close": "🟢",
+}
+
+
+class RosterRecord(Protocol):
+    """The goal-state fields consumed by the small terminal roster."""
+
+    @property
+    def session_ref(self) -> str: ...
+
+    @property
+    def goal(self) -> str: ...
+
+    @property
+    def done_when(self) -> str: ...
+
+    @property
+    def status(self) -> GoalStatus: ...
+
+    @property
+    def now(self) -> str: ...
+
+
+def marker_for(status: GoalStatus) -> str:
+    """Return the prescribed marker, rejecting status outside the five states."""
+    try:
+        return ROSTER_MARKERS[status]
+    except KeyError as exc:
+        raise ValueError(f"unknown goal status: {status}") from exc
+
+
+def _roster_cell(value: str, limit: int) -> str:
+    """Keep one physical table row by collapsing whitespace and truncating."""
+    compact = " ".join(value.split())
+    return compact if len(compact) <= limit else compact[: limit - 1] + "…"
+
+
+def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, str]]:
+    """Build rows sorted host, session name, then full ref for stable output."""
+    ordered = sorted(
+        records,
+        key=lambda record: (
+            session_host(record.session_ref),
+            session_name(record.session_ref),
+            record.session_ref,
+        ),
+    )
+    return [
+        (
+            marker_for(record.status),
+            session_name(record.session_ref),
+            _roster_cell(f"{record.goal} — done: {record.done_when}", ROSTER_GOAL_MAX_WIDTH),
+            _roster_cell(record.now, ROSTER_NOW_MAX_WIDTH),
+        )
+        for record in ordered
+    ]
+
+
+def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markdown"] = "box") -> str:
+    """Render every stored lane in fixed roster columns.
+
+    The monitor specification gives no ordering, so this renderer adds a
+    documented stable rule: host, then session name, then full session ref.
+    """
+    if not records:
+        return "no lanes recorded"
+    headers = ("status-marker", "Session", "Goal", "Now")
+    rows = _roster_rows(records)
+    if fmt == "markdown":
+        def markdown_cell(value: str) -> str:
+            return value.replace("|", "\\|")
+
+        rendered = ["| " + " | ".join(headers) + " |", "| --- | --- | --- | --- |"]
+        rendered.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
+        return "\n".join(rendered)
+    if fmt != "box":
+        raise ValueError(f"unknown roster format: {fmt}")
+    widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
+
+    def border(left: str, middle: str, right: str, fill: str) -> str:
+        return left + middle.join(fill * (width + 2) for width in widths) + right
+
+    def line(row: tuple[str, str, str, str]) -> str:
+        return "│" + "│".join(f" {cell:<{widths[index]}} " for index, cell in enumerate(row)) + "│"
+
+    return "\n".join(
+        (
+            border("┌", "┬", "┐", "─"),
+            line(headers),
+            border("├", "┼", "┤", "─"),
+            *(line(row) for row in rows),
+            border("└", "┴", "┘", "─"),
+        )
+    )
 
 
 def _env_path(name: str, default: Path) -> Path:
