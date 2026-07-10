@@ -19,6 +19,7 @@ from chitra.dispatch import (
     DispatchStatus,
     LaneLock,
     LaneLockError,
+    _remote_transcript_grep_command,
     cancel_copy_mode,
     directive_voice_violation,
     dispatch_to_tmux,
@@ -210,24 +211,72 @@ def test_transcript_confirms_nudge_excludes_given_path(tmp_path: Path) -> None:
     assert path is None
 
 
-def test_find_recent_transcript_remote_parses_matching_line_from_ssh_output() -> None:
-    """Regression test: a remote delivery's transcript lives on the target
-    host's filesystem, not the local one -- verification must grep the
-    remote host over ssh, and this is what dispatch_to_tmux relies on to
-    ever reach SENT (and therefore get a ledger entry) for a remote order."""
-    runner = FakeRunner(default=fake_completed(0, "1720000000 /home/ubuntu/.claude/projects/foo/abc.jsonl\n", ""))
+def test_remote_transcript_find_script_expands_default_tilde_root() -> None:
+    script = _remote_transcript_grep_command("marker", "~/.claude/projects", 300)
+
+    assert 'root="$HOME"/.claude/projects' in script
+    assert "'~/.claude/projects'" not in script
+    assert "~/.claude/projects" not in script
+    assert "grep" not in script
+
+
+def test_remote_transcript_find_script_quotes_absolute_custom_root() -> None:
+    script = _remote_transcript_grep_command("marker", "/srv/Claude Projects", 300)
+
+    assert "root='/srv/Claude Projects'" in script
+    assert '-path "$root"/' in script
+
+
+def test_find_recent_transcript_remote_matches_tail_from_ssh_output() -> None:
+    """Remote transcript candidates are located over ssh and their tails are
+    compared locally before a delivery can become SENT."""
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if "find " in cmd[-1]:
+            return fake_completed(0, "1720000000 /home/ubuntu/.claude/projects/foo/abc.jsonl\n", "")
+        return fake_completed(0, '{"text": "please check lane f3 status now"}\n', "")
+
     path = find_recent_transcript_remote("otherhost", "please check lane f3 status now", runner=runner)
     assert path == "/home/ubuntu/.claude/projects/foo/abc.jsonl"
+
+def test_find_recent_transcript_remote_matches_json_escaped_quote_and_whitespace() -> None:
+    path = "/remote/projects/foo/abc.jsonl"
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if "find " in cmd[-1]:
+            return fake_completed(0, f"1720000000 {path}\n", "")
+        return fake_completed(0, json.dumps({"text": 'please say "hello"   now'}) + "\n", "")
+
+    confirmed, found = transcript_confirms_nudge(
+        'please say "hello"     now',
+        host="otherhost",
+        runner=runner,
+        local_extra={"localhost"},
+    )
+    assert confirmed is True
+    assert found == path
+
+
+def test_find_recent_transcript_remote_find_command_never_quotes_default_tilde() -> None:
+    runner = FakeRunner(default=fake_completed(0, "", ""))
+    assert find_recent_transcript_remote("otherhost", "marker text", runner=runner) is None
+
     assert len(runner.calls) == 1
     cmd = runner.calls[0]
     assert cmd[0] == "ssh"
     assert cmd[-2] == "otherhost"
-    assert "please check lane f3 status now" in cmd[-1]
+    assert "'~/.claude/projects'" not in cmd[-1]
+    assert 'root="$HOME"/.claude/projects' in cmd[-1]
 
 
 def test_find_recent_transcript_remote_picks_most_recent_of_multiple_matches() -> None:
     stdout = "1000 /old/path.jsonl\n2000 /new/path.jsonl\n"
-    runner = FakeRunner(default=fake_completed(0, stdout, ""))
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if "find " in cmd[-1]:
+            return fake_completed(0, stdout, "")
+        return fake_completed(0, "marker text", "")
+
     path = find_recent_transcript_remote("otherhost", "marker text", runner=runner)
     assert path == "/new/path.jsonl"
 
@@ -242,8 +291,12 @@ def test_find_recent_transcript_remote_returns_none_on_ssh_failure() -> None:
     assert find_recent_transcript_remote("otherhost", "marker text", runner=runner) is None
 
 
-def test_transcript_confirms_nudge_uses_remote_grep_for_a_remote_host() -> None:
-    runner = FakeRunner(default=fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n", ""))
+def test_transcript_confirms_nudge_uses_remote_transcript_for_a_remote_host() -> None:
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if "find " in cmd[-1]:
+            return fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n", "")
+        return fake_completed(0, "please check lane f3 status now", "")
+
     confirmed, path = transcript_confirms_nudge(
         "please check lane f3 status now",
         host="otherhost",
@@ -799,6 +852,8 @@ def test_dispatch_to_tmux_sends_a_clean_order_to_a_remote_host() -> None:
             return fake_completed(0, "", "")
         if "find " in remote_cmd:
             return fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n", "")
+        if "tail -c" in remote_cmd:
+            return fake_completed(0, "Stop editing main and open a PR.", "")
         return fake_completed(0, "", "")
 
     order = DispatchOrder(order_id="o1", session_ref="otherhost:f3:0.0", nudge="Stop editing main and open a PR.")

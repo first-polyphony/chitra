@@ -23,9 +23,10 @@ own ``~/.claude/projects/*/*.jsonl`` transcript (found by recency + content
 match, explicitly excluding the caller's own transcript), replacing the
 weaker pane-capture confirmation: a spinner or status line is not evidence
 that a message was actually received; the transcript is. For a remote
-target this grep runs over ssh against the **target host's** filesystem
-(``find_recent_transcript_remote``) — the transcript proving a remote
-delivery lives on the remote host, never on the machine chitra runs on.
+target, recent candidate paths and their tails are read over ssh against the
+**target host's** filesystem (``find_recent_transcript_remote``), then
+compared locally — the transcript proving a remote delivery lives on the
+remote host, never on the machine chitra runs on.
 
 Single-writer rule
 -----------------
@@ -912,28 +913,64 @@ def find_recent_transcript(
 _REMOTE_CLAUDE_PROJECTS_DEFAULT = "~/.claude/projects"
 
 
+def _remote_root_shell_value(root: str) -> str:
+    """Return ``root`` as a shell value, expanding only a leading ``~/``."""
+    if root == "~":
+        return '"$HOME"'
+    if root.startswith("~/"):
+        return f'"$HOME"/{shlex.quote(root[2:])}'
+    return shlex.quote(root)
+
+
 def _remote_transcript_grep_command(marker: str, root: str, recency_seconds: float, max_bytes: int = 262144) -> str:
-    """Build a single ssh-safe shell script that finds the most recently
-    modified ``*.jsonl`` transcript(s) under ``root`` (one level of project
-    subdirectories, mirroring ``_candidate_transcript_dirs``) modified within
-    ``recency_seconds``, greps each candidate's tail for ``marker``, and
-    prints ``"<mtime> <path>"`` for every match. Uses ``find -mmin`` (minutes,
-    portable across GNU and BSD ``find``) rather than GNU-only flags, and
-    tries GNU ``stat -c`` then BSD ``stat -f`` so it works whether the remote
-    host is Linux or macOS.
+    """Build an ssh-safe script which lists recent remote transcript paths.
+
+    The marker and tail size remain parameters for compatibility with the
+    previous helper signature. Matching intentionally happens locally in
+    ``find_recent_transcript_remote`` so it uses the same normalization as
+    ``find_recent_transcript``. Uses ``find -mmin`` (minutes, portable across
+    GNU and BSD ``find``) and tries GNU ``stat -c`` then BSD ``stat -f``.
     """
-    quoted_marker = shlex.quote(marker)
+    del marker, max_bytes
     pattern = transcript_glob()
     depth = pattern.count("/") + 1
-    root_pattern = f"{root}/{pattern}"
     minutes = max(1, -(-int(recency_seconds) // 60))  # ceil division, minimum 1 minute
+    stat_command = "for f do stat -c '%Y %n' \"$f\" 2>/dev/null || stat -f '%m %N' \"$f\" 2>/dev/null; done"
     return (
-        f"for f in $(find {shlex.quote(root)} -mindepth {depth} -maxdepth {depth} -path {shlex.quote(root_pattern)} "
-        f"-mmin -{minutes} 2>/dev/null); do "
-        f'if tail -c {max_bytes} "$f" 2>/dev/null | grep -qF -- {quoted_marker}; then '
-        f"stat -c '%Y %n' \"$f\" 2>/dev/null || stat -f '%m %N' \"$f\" 2>/dev/null; "
-        f"fi; done"
+        f"root={_remote_root_shell_value(root)}; "
+        f"find \"$root\" -mindepth {depth} -maxdepth {depth} -path \"$root\"/{shlex.quote(pattern)} "
+        f"-mmin -{minutes} 2>/dev/null -exec sh -c {shlex.quote(stat_command)} sh {{}} \\;"
     )
+
+
+def _remote_transcript_tail_command(path: str, max_bytes: int = 262144) -> str:
+    """Build an ssh-safe command to read one remote transcript tail."""
+    return f"tail -c {max_bytes} {shlex.quote(path)} 2>/dev/null"
+
+
+def _remote_tail_confirms_marker(tail: str, marker_norm: str) -> bool:
+    """Compare a remote JSONL tail using the local normalization semantics."""
+    if marker_norm in normalized_dispatch_text(tail):
+        return True
+    for line in tail.splitlines():
+        try:
+            record: object = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if marker_norm in normalized_dispatch_text("\n".join(_json_string_values(record))):
+            return True
+    return False
+
+
+def _json_string_values(value: object) -> list[str]:
+    """Return all string leaves from a decoded JSON value."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [text for item in value for text in _json_string_values(item)]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _json_string_values(item)]
+    return []
 
 
 def find_recent_transcript_remote(
@@ -944,12 +981,18 @@ def find_recent_transcript_remote(
     recency_seconds: float = 300.0,
     runner: TmuxRunner | None = None,
 ) -> str | None:
-    """Remote counterpart to ``find_recent_transcript``: find the most
-    recently modified transcript containing ``marker`` on ``host`` over ssh.
+    """Remote counterpart to ``find_recent_transcript`` over ssh.
+
+    Lists recent candidates remotely, then reads at most eight newest tails
+    and compares them locally with the same normalized marker semantics as
+    the local implementation.
 
     Returns the remote path as a string (there is no local ``Path`` for it),
     or ``None`` if no match is found or the ssh call fails.
     """
+    marker_norm = normalized_dispatch_text(marker)
+    if not marker_norm:
+        return None
     run = runner or run_cmd
     remote_root = root or _env("CHITRA_REMOTE_CLAUDE_PROJECTS", _REMOTE_CLAUDE_PROJECTS_DEFAULT)
     script = _remote_transcript_grep_command(marker, remote_root, recency_seconds)
@@ -969,7 +1012,11 @@ def find_recent_transcript_remote(
     if not candidates:
         return None
     candidates.sort(key=lambda pair: pair[0], reverse=True)
-    return candidates[0][1]
+    for _, path in candidates[:8]:
+        tail_proc = run(ssh_command(host, _remote_transcript_tail_command(path)), timeout=10)
+        if tail_proc.returncode == 0 and _remote_tail_confirms_marker(tail_proc.stdout, marker_norm):
+            return path
+    return None
 
 
 def transcript_confirms_nudge(
@@ -992,7 +1039,7 @@ def transcript_confirms_nudge(
     ``host`` selects local vs remote verification: the default (``""``,
     treated as local, preserving prior behavior for existing callers) or any
     host ``is_local_host`` recognizes searches this machine's own
-    ``~/.claude/projects`` (or ``projects_root``). Any other host greps the
+    ``~/.claude/projects`` (or ``projects_root``). Any other host checks the
     **target** host's transcripts over ssh instead — a remote delivery's
     transcript lives on the remote host's filesystem, not the caller's; the
     local-only search this function used to perform would never confirm a
@@ -1038,7 +1085,9 @@ def pane_capture_confirms_nudge(
     This checks the weaker-but-real pane signal (the same "verify by pane" a
     human operator would do): after paste+Enter, the submitted nudge text is
     visible in the pane's scrollback. Only consulted when transcript-grep did
-    not confirm.
+    not confirm. Long nudges delivered by tmux paste render in Claude Code as a
+    ``[Pasted text #N ...]`` placeholder, so this fallback inherently cannot
+    confirm their text; the transcript path is required for those deliveries.
     """
     marker = nudge_confirmation_marker(nudge)
     if not marker:
