@@ -27,6 +27,7 @@ from chitra.dispatch import (
     find_recent_transcript_remote,
     is_chitra_dispatched_task,
     liveness_check,
+    pane_capture_confirms_nudge,
     pane_in_mode,
     pane_input_check,
     paste_nudge_to_local_tmux,
@@ -422,6 +423,75 @@ def test_dispatch_to_tmux_qualifies_pane_with_session_before_any_tmux_call() -> 
 
     assert seen_targets, "expected at least one -t target to have been recorded"
     assert all(t == "f3:0.0" for t in seen_targets), seen_targets
+
+
+def test_pane_capture_confirms_nudge_true_when_marker_visible() -> None:
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return fake_completed(0, "scrollback line\n❯ please check lane f3 status now\n", "")
+        return fake_completed(0, "", "")
+
+    assert (
+        pane_capture_confirms_nudge(
+            "please check lane f3 status now",
+            host="localhost",
+            pane="f3:0.0",
+            runner=runner,
+            local_extra={"localhost"},
+        )
+        is True
+    )
+
+
+def test_pane_capture_confirms_nudge_false_when_marker_absent() -> None:
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return fake_completed(0, "unrelated pane content\n❯ \n", "")
+        return fake_completed(0, "", "")
+
+    assert (
+        pane_capture_confirms_nudge(
+            "please check lane f3 status now",
+            host="localhost",
+            pane="f3:0.0",
+            runner=runner,
+            local_extra={"localhost"},
+        )
+        is False
+    )
+
+
+def test_dispatch_to_tmux_falls_back_to_pane_capture_when_transcript_missing(tmp_path: Path) -> None:
+    """Regression: a mechanically-successful send whose transcript can't be
+    located must NOT report FAILED. When transcript-grep finds nothing but the
+    pane shows the delivered nudge, the result is SENT via pane-capture
+    fallback."""
+    empty_projects = tmp_path / "projects"
+    empty_projects.mkdir()
+    captures = {"n": 0}
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            captures["n"] += 1
+            if captures["n"] == 1:
+                return fake_completed(0, "ubuntu@host:~$ ", "")  # pre-check: idle
+            return fake_completed(0, "❯ diagnose the failing build\n", "")  # fallback: marker visible
+        return fake_completed(0, "", "")
+
+    def input_runner(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        return fake_completed(0, "", "")
+
+    order = DispatchOrder(order_id="o1", session_ref="localhost:f3:0.0", nudge="diagnose the failing build")
+    result = dispatch_to_tmux(
+        order,
+        runner=runner,
+        input_runner=input_runner,
+        local_extra={"localhost"},
+        projects_root=empty_projects,
+    )
+
+    assert result.status == DispatchStatus.SENT
+    assert "pane-capture fallback" in result.reason
 
 
 # --- pane_input_check ------------------------------------------------------

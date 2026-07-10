@@ -1018,6 +1018,38 @@ def transcript_confirms_nudge(
     return (path is not None, path)
 
 
+def pane_capture_confirms_nudge(
+    nudge: str,
+    *,
+    host: str,
+    pane: str,
+    lines: int = DISPATCH_CAPTURE_LINES,
+    runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
+) -> bool:
+    """Fallback confirmation: does the delivered nudge marker appear in the
+    target pane's recent capture?
+
+    Transcript-grep is the primary, stronger evidence, but it can legitimately
+    fail to *locate* the transcript (an unresolvable cwd-slug, a not-yet-flushed
+    write, a target whose transcript lives outside the searched roots). When it
+    does, the send may still have succeeded — reporting ``FAILED`` in that case
+    is a false negative that erodes trust in the queue path and risks a resend.
+    This checks the weaker-but-real pane signal (the same "verify by pane" a
+    human operator would do): after paste+Enter, the submitted nudge text is
+    visible in the pane's scrollback. Only consulted when transcript-grep did
+    not confirm.
+    """
+    marker = nudge_confirmation_marker(nudge)
+    if not marker:
+        return False
+    captured = capture_dispatch_pane(host, pane, lines=lines, runner=runner, local_extra=local_extra)
+    if not captured:
+        return False
+    text = normalized_dispatch_text(strip_terminal_controls("\n".join(captured)))
+    return marker in text
+
+
 # ---------------------------------------------------------------------------
 # Liveness check (stub for the -p --resume fallback path)
 # ---------------------------------------------------------------------------
@@ -1366,6 +1398,33 @@ def dispatch_to_tmux(
             marker=marker,
             transcript_path=str(transcript_path) if transcript_path is not None else None,
         )
+    # Transcript-grep could not confirm — but it can fail to *locate* the
+    # transcript even when the send succeeded (unresolvable cwd-slug,
+    # not-yet-flushed write, transcript outside the searched roots). Before
+    # declaring FAILED (a false negative that erodes queue-path trust and
+    # risks a resend), fall back to the weaker-but-real pane signal.
+    if pane_capture_confirms_nudge(
+        order.nudge,
+        host=host,
+        pane=pane,
+        lines=tuning.capture_lines,
+        runner=run,
+        local_extra=local_extra,
+    ):
+        logger.info(
+            "tmux_dispatch_sent_pane_fallback",
+            session_ref=order.session_ref,
+            marker=marker,
+        )
+        return DispatchResult(
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
+            task_type=order.task_type,
+            status=DispatchStatus.SENT,
+            reason="sent: confirmed via pane-capture fallback (transcript unavailable)",
+            marker=marker,
+        )
     logger.info(
         "tmux_dispatch_unverified",
         session_ref=order.session_ref,
@@ -1377,6 +1436,6 @@ def dispatch_to_tmux(
         routing_hint=order.routing_hint,
         task_type=order.task_type,
         status=DispatchStatus.FAILED,
-        reason="send-failed-no-confirmation (transcript-grep found no marker)",
+        reason="send-failed-no-confirmation (transcript-grep and pane-capture both found no marker)",
         marker=marker,
     )
