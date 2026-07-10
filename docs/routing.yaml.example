@@ -17,7 +17,27 @@
 # orchestration loop patterns (see docs/workflow-pattern-catalog.md) —
 # chitra has no opinion on task_type naming and does not require these
 # specific keys.
+# Two shapes, both keyed by task_type, both operator-populated:
+#
+#   defaults -- flat task_type -> routing_hint. Chitra fills in the opaque
+#               routing_hint string but never acts on it (provenance
+#               "config"). This is the original, unchanged shape.
+#   routes   -- structured task_type -> {model, harness, zdr?}. Chitra
+#               RESOLVES the model+harness at dispatch, records the resolved
+#               selection (resolved_model/resolved_harness/resolved_zdr) plus
+#               a model@harness[+zdr] routing_hint, with provenance "route".
+#               A routes entry wins over a defaults entry for the same
+#               task_type.
 defaults:
   heartbeat: sonnet
   sparring: fable
   quorum: haiku
+
+routes:
+  design-judgment:
+    model: opus-4.8
+    harness: claude-code
+    zdr: true
+  code-fix:
+    model: gpt-5.6-sol
+    harness: codex-cli

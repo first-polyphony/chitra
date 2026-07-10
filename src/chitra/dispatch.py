@@ -210,7 +210,12 @@ class DispatchResult(BaseModel):
     """Result of processing a dispatch order.
 
     ``routing_hint`` is copied through unchanged from the originating
-    ``DispatchOrder`` — an opaque pass-through value chitra never interprets.
+    ``DispatchOrder`` when the caller supplied one (opaque pass-through) or
+    the ``defaults`` config filled it in. When a structured ``routes`` entry
+    resolved the task_type instead, ``routing_hint`` holds the derived
+    ``model@harness`` string and the resolved selection is also recorded
+    structurally in ``resolved_model`` / ``resolved_harness`` / ``resolved_zdr``
+    (``routing_hint_source == "route"``).
     """
 
     order_id: str
@@ -223,6 +228,14 @@ class DispatchResult(BaseModel):
     routing_hint: str | None = None
     task_type: str | None = None
     routing_hint_source: str = "unset"
+    # Resolved structured selection when ``routing_hint_source == "route"``
+    # (see chitra.routing_config.resolve_route): the concrete model + harness
+    # (+ zdr) chitra resolved from the task_type's ``routes`` entry. None /
+    # False for the opaque ``defaults`` path, an explicit caller hint, or no
+    # routing config -- those record only the opaque ``routing_hint``.
+    resolved_model: str | None = None
+    resolved_harness: str | None = None
+    resolved_zdr: bool = False
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

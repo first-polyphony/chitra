@@ -525,7 +525,105 @@ def test_routing_provenance_is_stamped_on_result_and_signed_ledger(tmp_path: Pat
     entry = ledger_mod.LedgerEntry.model_validate_json(ledger_path.read_text(encoding="utf-8"))
     assert entry.task_type == "code-review"
     assert entry.routing_hint_source == "config"
-    assert entry.sig_v == 2
+    assert entry.sig_v == 3
+
+
+def test_routes_entry_resolves_model_and_harness_into_result_and_signed_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structured ``routes`` entry is actively RESOLVED at dispatch: the
+    concrete model+harness (+zdr) and ``"route"`` provenance land on the
+    result and in the HMAC-signed ledger entry (closes ROADMAP line 97)."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"routes": {"design-judgment": {"model": "opus-4.8", "harness": "claude-code", "zdr": True}}}),
+        encoding="utf-8",
+    )
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(order_id="routed", session_ref="localhost:s:0.0", nudge="hi", task_type="design-judgment"),
+    )
+    ledger_path = tmp_path / "ledger.jsonl"
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=ledger_path,
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )[0]
+
+    assert result.routing_hint == "opus-4.8@claude-code+zdr"
+    assert result.routing_hint_source == "route"
+    assert (result.resolved_model, result.resolved_harness, result.resolved_zdr) == ("opus-4.8", "claude-code", True)
+
+    key = ledger_mod.load_or_create_signing_key(tmp_path / "ledger.key")
+    entry = ledger_mod.LedgerEntry.model_validate_json(ledger_path.read_text(encoding="utf-8"))
+    assert (entry.resolved_model, entry.resolved_harness, entry.resolved_zdr) == ("opus-4.8", "claude-code", True)
+    assert entry.routing_hint_source == "route"
+    assert entry.sig_v == 3
+    assert ledger_mod.verify_entry(entry, key=key) is True
+
+
+def test_routes_entry_wins_over_a_defaults_entry_for_same_task_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When both a ``routes`` and a ``defaults`` entry exist for the same
+    task_type, the structured (acted-on) route is preferred."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "defaults": {"code-fix": "sonnet"},
+                "routes": {"code-fix": {"model": "gpt-5.6-sol", "harness": "codex-cli"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(order_id="both", session_ref="localhost:s:0.0", nudge="hi", task_type="code-fix"),
+    )
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )[0]
+
+    assert result.routing_hint == "gpt-5.6-sol@codex-cli"
+    assert result.routing_hint_source == "route"
+    assert result.resolved_model == "gpt-5.6-sol"
+
+
+def test_defaults_only_config_leaves_resolved_fields_empty_backcompat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Back-compat: a defaults-only config behaves exactly as before — the
+    opaque routing_hint is filled with ``"config"`` provenance and no
+    resolved model/harness selection is recorded."""
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(yaml.safe_dump({"defaults": {"code-review": "sonnet"}}), encoding="utf-8")
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(order_id="legacy", session_ref="localhost:s:0.0", nudge="hi", task_type="code-review"),
+    )
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )[0]
+
+    assert result.routing_hint == "sonnet"
+    assert result.routing_hint_source == "config"
+    assert (result.resolved_model, result.resolved_harness, result.resolved_zdr) == (None, None, False)
 
 
 def test_policy_file_is_wired_to_completion_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
