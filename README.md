@@ -77,12 +77,12 @@ Point `dispatchd` at a config file via the `CHITRA_ROUTING_CONFIG` env var (or i
 # chitra routing preferences — maps task_type to a default routing_hint.
 # Purely mechanical lookup; chitra does not interpret task_type's meaning.
 defaults:
-  code-review: sonnet
-  design-judgment: fable
-  search: haiku
+  heartbeat: sonnet
+  sparring: fable
+  quorum: haiku
 ```
 
-The keys/values above are illustrative only. Chitra ships no default content or opinions about what task types or routing targets (sub-agent types, model names) mean in any given deployment — this is a file each operator populates for their own fleet.
+The keys/values above are illustrative only. Chitra ships no default content or opinions about what task types or routing targets (sub-agent types, model names) mean in any given deployment — this is a file each operator populates for their own fleet. For real-world naming precedent (not a prescription), see [`docs/workflow-pattern-catalog.md`](docs/workflow-pattern-catalog.md), a catalog of named orchestration loop patterns some deployments' `task_type` values may correspond to.
 
 ## Install
 

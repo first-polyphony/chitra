@@ -12,7 +12,12 @@
 # your deployment, and point CHITRA_ROUTING_CONFIG (or dispatchd's
 # --routing-config-path flag) at it. Unset/missing: dispatchd runs with no
 # routing config, a normal no-op.
+# The task_type keys below are purely illustrative examples, not a
+# prescribed vocabulary. They happen to be drawn from real-world named
+# orchestration loop patterns (see docs/workflow-pattern-catalog.md) —
+# chitra has no opinion on task_type naming and does not require these
+# specific keys.
 defaults:
-  code-review: sonnet
-  design-judgment: fable
-  search: haiku
+  heartbeat: sonnet
+  sparring: fable
+  quorum: haiku
