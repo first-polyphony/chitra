@@ -12,7 +12,7 @@ import yaml
 
 import chitra.dispatchd as dispatchd_mod
 import chitra.ledger as ledger_mod
-from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
+from chitra.dispatch import DISPATCH_VERIFY_WAIT_SECONDS, DispatchOrder, DispatchResult, DispatchStatus
 from chitra.dispatchd import build_arg_parser, process_one_order, run_once
 from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
@@ -679,6 +679,12 @@ def test_dispatchd_parser_exposes_policy_invalid_order_and_tuning_flags() -> Non
         120.0,
         9.0,
     )
+
+
+def test_dispatchd_parser_uses_the_transcript_write_allowance_by_default() -> None:
+    args = build_arg_parser().parse_args([])
+
+    assert args.post_paste_wait_seconds == DISPATCH_VERIFY_WAIT_SECONDS == 1.0
 
 
 def test_malformed_routing_config_raises_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
