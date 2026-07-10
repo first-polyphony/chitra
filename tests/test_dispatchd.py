@@ -74,6 +74,8 @@ def test_remote_delivery_writes_a_ledger_entry_same_as_local(tmp_path: Path, mon
             return fake_completed(0, "")
         if "find " in remote_cmd:
             return fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n")
+        if "tail -c" in remote_cmd:
+            return fake_completed(0, "Stop editing main and open a PR.")
         return fake_completed(0, "")
 
     # dispatch_to_tmux resolves its default runner (run_cmd) as a module
