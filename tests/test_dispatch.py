@@ -458,6 +458,63 @@ def test_pane_input_check_blocks_a_claude_code_tui_draft() -> None:
     assert check.last_line == "❯ some text"
 
 
+def test_pane_input_check_treats_a_dim_placeholder_hint_as_idle() -> None:
+    """A fresh/idle Claude Code session paints its input row with a dim
+    (ANSI SGR 2) placeholder hint. With an escape-aware capture, that ghost
+    text must classify as idle so chitra can deliver — not block as if it were
+    a real draft."""
+    check = pane_input_check(
+        [
+            "Claude Code output",
+            "──────────────────────",
+            '\x1b[38;5;242m❯\x1b[39m \x1b[2mTry "how does src/foo.py work?"\x1b[22m',
+            "──────────────────────",
+            "⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+    )
+
+    assert check.ok is True
+    assert check.reason == "idle: Claude Code TUI input row shows only a dim placeholder hint"
+    assert check.last_line == '❯ Try "how does src/foo.py work?"'
+
+
+def test_pane_input_check_blocks_a_normal_intensity_draft_even_with_styling() -> None:
+    """A real draft is normal intensity. Even when the pane carries escape
+    sequences (colored prompt marker), a normal-intensity draft must still
+    block — the placeholder relaxation must not weaken real-draft protection."""
+    check = pane_input_check(
+        [
+            "Claude Code output",
+            "──────────────────────",
+            "\x1b[38;5;242m❯\x1b[39m fix the parser bug",
+            "──────────────────────",
+            "⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+    )
+
+    assert check.ok is False
+    assert check.reason == "blocked: unsubmitted operator draft detected"
+    assert check.last_line == "❯ fix the parser bug"
+
+
+def test_pane_input_check_blocks_a_partially_dim_draft() -> None:
+    """A draft that is only partly dim (operator typed over a placeholder, or
+    mixed styling) is still a real draft — any normal-intensity visible char
+    blocks."""
+    check = pane_input_check(
+        [
+            "Claude Code output",
+            "──────────────────────",
+            '\x1b[2m❯ Try "x"\x1b[22m real text',
+            "──────────────────────",
+            "⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+    )
+
+    assert check.ok is False
+    assert check.reason == "blocked: unsubmitted operator draft detected"
+
+
 @pytest.mark.parametrize("prompt", ["ubuntu@host:~$ ", "(venv) user@host:~$ ", ">>> "])
 def test_pane_input_check_keeps_shell_prompt_idle_detection(prompt: str) -> None:
     check = pane_input_check(["previous output", prompt])
@@ -604,6 +661,44 @@ def test_dispatch_to_tmux_sends_a_clean_order(tmp_path: Path) -> None:
         return fake_completed(0, "", "")
 
     order = DispatchOrder(order_id="o1", session_ref="localhost:f3:0.0", nudge="Stop editing main and open a PR.")
+    result = dispatch_to_tmux(
+        order,
+        runner=runner,
+        input_runner=input_runner,
+        local_extra={"localhost"},
+        projects_root=projects_root,
+        sleep=lambda _seconds: None,
+    )
+    assert result.status == DispatchStatus.SENT
+
+
+def test_dispatch_to_tmux_delivers_to_a_fresh_session_showing_a_dim_placeholder(tmp_path: Path) -> None:
+    """Regression for the fresh-session delivery bug: a never-used Claude Code
+    session renders its input row as a dim placeholder hint. Chitra must reach
+    SENT, not block it as an unsubmitted draft."""
+    projects_root = tmp_path / "projects"
+    session_dir = projects_root / "some-project"
+    session_dir.mkdir(parents=True)
+    transcript = session_dir / "abc123.jsonl"
+    transcript.write_text(json.dumps({"text": "Kick off the build."}) + "\n", encoding="utf-8")
+
+    placeholder_pane = (
+        "Claude Code output\n"
+        "──────────────────────\n"
+        '\x1b[38;5;242m❯\x1b[39m \x1b[2mTry "how does src/foo.py work?"\x1b[22m\n'
+        "──────────────────────\n"
+        "⏵⏵ accept edits on (shift+tab to cycle)\n"
+    )
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return fake_completed(0, placeholder_pane, "")
+        return fake_completed(0, "", "")
+
+    def input_runner(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        return fake_completed(0, "", "")
+
+    order = DispatchOrder(order_id="o1", session_ref="localhost:f3:0.0", nudge="Kick off the build.")
     result = dispatch_to_tmux(
         order,
         runner=runner,
