@@ -6,9 +6,13 @@ This document was previously titled "v1.1" and framed as a wishlist. It's retitl
 
 ## Status (2026-07-10)
 
-Not yet fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](https://github.com/first-polyphony/chitra/pull/24)), the CodeQL-nightly fixes on both this repo ([PR #25](https://github.com/first-polyphony/chitra/pull/25)) and the monorepo ([PR #1975](https://github.com/first-polyphony/polyphony/pull/1975)), the Temporal-workflow-manager decision above ([PR #26](https://github.com/first-polyphony/chitra/pull/26)), and the internal adapter — LoopKit self-tuning loop, Kai reconciliation feed, Introspect promotion pipeline — on the monorepo ([PR #1965](https://github.com/first-polyphony/polyphony/pull/1965)).
+Fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](https://github.com/first-polyphony/chitra/pull/24)), the CodeQL-nightly fixes on both this repo ([PR #25](https://github.com/first-polyphony/chitra/pull/25)) and the monorepo ([PR #1975](https://github.com/first-polyphony/polyphony/pull/1975)), the Temporal-workflow-manager decision above ([PR #26](https://github.com/first-polyphony/chitra/pull/26)), the internal adapter — LoopKit self-tuning loop, Kai reconciliation feed, Introspect promotion pipeline — on the monorepo ([PR #1965](https://github.com/first-polyphony/polyphony/pull/1965)), the mirror-sync porting the new config surface into the flat-layout monorepo mirror ([first-polyphony/polyphony#1984](https://github.com/first-polyphony/polyphony/pull/1984)), and two systemd-unit path fixes caught while bringing the service up for the first time ([#1995](https://github.com/first-polyphony/polyphony/pull/1995), [#1998](https://github.com/first-polyphony/polyphony/pull/1998)).
 
-**Still open:** a mirror-sync PR ([first-polyphony/polyphony#1984](https://github.com/first-polyphony/polyphony/pull/1984)) porting this repo's new `policy_config.py`/`replay_eval.py`/`state_paths.py` into `tools/support/chitra/` — the flat-layout monorepo mirror that the *live* trailhead dispatchd service actually runs — is open, not yet merged. Once it merges, the final step is applying a prepared systemd drop-in and restarting the live service on trailhead so it actually picks up the new policy config; that restart is deliberately held for a moment with the operator present, not run unattended.
+`polyphony-chitra-dispatchd` and `polyphony-chitra-triaged` are now installed, enabled, and running live on trailhead for the first time, reading the new self-tuning `policy.yaml`, verified via clean startup logs.
+
+**Two items remain, both deliberately deferred, not forgotten:**
+- **Run `/simplify` on this repo** now that it's fully complete — not yet scheduled.
+- **Open the PyPI publish** — the gated checklist below is fully specified; the operator has not yet given the go-ahead to actually cut a release or flip the repo from private to public.
 
 ## In progress
 
