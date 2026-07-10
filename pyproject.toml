@@ -31,6 +31,7 @@ test = [
 dispatchd = "chitra.dispatchd:main"
 triaged = "chitra.triaged:main"
 draft-scanner = "chitra.draft_scanner:main"
+chitra-board = "chitra.board:main"
 
 [project.urls]
 Repository = "https://github.com/first-polyphony/chitra"
