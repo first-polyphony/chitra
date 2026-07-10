@@ -42,16 +42,18 @@ from .dispatch import (
     DispatchOrder,
     DispatchResult,
     DispatchStatus,
+    DispatchTuning,
     LaneLock,
     LaneLockError,
     dispatch_to_tmux,
 )
+from .policy_config import PolicyConfig, load_policy_config
 from .routing_config import RoutingConfig, load_routing_config, resolve_routing_hint
+from .state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
 from .taxonomy import load_taxonomy
 
 logger = structlog.get_logger(__name__)
 
-DEFAULT_QUEUE_DIR = Path("/var/lib/chitra/queue")
 DEFAULT_POLL_SECONDS = 1.0
 
 
@@ -83,6 +85,9 @@ def process_one_order(
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
     routing_config: RoutingConfig | None = None,
+    policy: PolicyConfig | None = None,
+    invalid_dir: Path | None = None,
+    tuning: DispatchTuning | None = None,
 ) -> DispatchResult | None:
     """Process a single order file. Returns the result, or None if skipped.
 
@@ -97,29 +102,35 @@ def process_one_order(
     ``routing_hint`` before dispatch — an explicit ``routing_hint`` from the
     caller always wins and skips this lookup entirely.
 
-    Known limitation: an order file that is valid-looking JSON but was left
-    incomplete by a crashed/killed writer (as opposed to outright malformed
-    JSON, e.g. a truncated write) is not distinguishable here from a
-    genuinely malformed order -- both raise on ``model_validate_json`` and
-    are moved to ``processed/`` with no result file, i.e. the order is
-    silently dropped with no redelivery and no retry. This is logged at
-    ERROR level specifically so it is not lost among routine warnings.
+    Invalid orders produce a FAILED result using the source filename stem and
+    are moved to ``invalid/`` (or ``invalid_dir``) so they cannot be retried
+    as ordinary processed work.
     """
+    policy = policy or PolicyConfig()
+    tuning = tuning or DispatchTuning()
     try:
         order = DispatchOrder.model_validate_json(order_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        # ERROR, not warning: an order is being silently lost here (see the
-        # "Known limitation" note above) and this must not blend into
-        # routine warning-level noise.
         logger.error("dispatchd_order_unreadable", path=str(order_path), error=str(exc))
-        # Move aside so a malformed file doesn't spin the loop forever.
-        processed_dir.mkdir(parents=True, exist_ok=True)
+        result = DispatchResult(
+            order_id=order_path.stem,
+            session_ref="",
+            status=DispatchStatus.FAILED,
+            reason=f"invalid-order: {exc}",
+        )
+        _write_result_atomic(results_dir, result)
+        destination = invalid_dir or orders_dir.parent / "invalid"
+        destination.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
-            order_path.replace(processed_dir / order_path.name)
-        return None
+            order_path.replace(destination / order_path.name)
+        return result
 
+    routing_hint_source = "explicit" if order.routing_hint is not None else "unset"
     if order.routing_hint is None and order.task_type is not None:
-        order.routing_hint = resolve_routing_hint(order.task_type, routing_config)
+        resolved_hint = resolve_routing_hint(order.task_type, routing_config)
+        if resolved_hint is not None:
+            order.routing_hint = resolved_hint
+            routing_hint_source = "config"
 
     existing_result = results_dir / f"{order.order_id}.json"
     if existing_result.exists():
@@ -142,7 +153,8 @@ def process_one_order(
             order.nudge,
             order.completion_has_deploy_evidence,
             order.completion_has_live_verify_evidence,
-            load_taxonomy(),
+            load_taxonomy(policy.completion_gate.taxonomy_path),
+            policy=policy.completion_gate,
         )
         if audit.verdict == "COMPLETION_DISPUTE":
             logger.warning(
@@ -156,6 +168,9 @@ def process_one_order(
                 session_ref=order.session_ref,
                 status=DispatchStatus.COMPLETION_DISPUTE,
                 reason=audit.summary,
+                routing_hint=order.routing_hint,
+                task_type=order.task_type,
+                routing_hint_source=routing_hint_source,
             )
             _write_result_atomic(results_dir, result)
             processed_dir.mkdir(parents=True, exist_ok=True)
@@ -170,13 +185,15 @@ def process_one_order(
 
     lock = LaneLock(order.session_ref, lock_dir=lock_dir)
     try:
-        lock.acquire(blocking=True, timeout_seconds=5.0)
+        lock.acquire(blocking=True, timeout_seconds=tuning.lane_lock_timeout_seconds)
     except LaneLockError as exc:
         logger.warning("dispatchd_lane_lock_failed", order_id=order.order_id, session_ref=order.session_ref, error=str(exc))
         result = DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
+            task_type=order.task_type,
+            routing_hint_source=routing_hint_source,
             status=DispatchStatus.BLOCKED,
             reason=f"lane lock unavailable: {exc}",
         )
@@ -185,10 +202,13 @@ def process_one_order(
         return result
 
     try:
-        result = dispatch_to_tmux(order)
+        result = dispatch_to_tmux(order, policy=policy, tuning=tuning)
     finally:
         lock.release()
 
+    result.task_type = order.task_type
+    result.routing_hint_source = routing_hint_source
+    result.routing_hint = order.routing_hint
     logger.info(
         "dispatchd_order_processed",
         order_id=order.order_id,
@@ -208,13 +228,15 @@ def process_one_order(
         # therefore only costs the proof-of-delivery record for this one
         # message -- it can never cause a duplicate send.
         try:
-            key = ledger_mod.load_or_create_signing_key(ledger_key_path or ledger_mod.DEFAULT_KEY_PATH)
+            key = ledger_mod.load_or_create_signing_key(ledger_key_path or default_ledger_key_path())
             ledger_mod.append_entry(
-                ledger_path or ledger_mod.DEFAULT_LEDGER_PATH,
+                ledger_path or default_ledger_path(),
                 order_id=order.order_id,
                 session_ref=order.session_ref,
                 tag=order.tag,
                 routing_hint=order.routing_hint,
+                task_type=order.task_type,
+                routing_hint_source=routing_hint_source,
                 nudge=order.nudge,
                 key=key,
             )
@@ -230,12 +252,15 @@ def process_one_order(
 
 
 def run_once(
-    queue_dir: Path,
+    queue_dir: Path | None = None,
     *,
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
     routing_config_path: Path | None = None,
+    policy_config_path: Path | None = None,
+    invalid_dir: Path | None = None,
+    tuning: DispatchTuning | None = None,
 ) -> list[DispatchResult]:
     """Process every pending order in ``queue_dir/orders`` once, FIFO by mtime.
 
@@ -243,8 +268,10 @@ def run_once(
     unset) is loaded once per call and passed to every ``process_one_order``
     invocation — see ``chitra.routing_config`` for the lookup semantics.
     """
+    queue_dir = queue_dir or default_queue_dir()
     orders_dir, results_dir, processed_dir = _ensure_queue_dirs(queue_dir)
     routing_config = load_routing_config(routing_config_path)
+    policy = load_policy_config(policy_config_path)
     dated: list[tuple[float, Path]] = []
     for order_path in orders_dir.glob("*.json"):
         try:
@@ -266,6 +293,9 @@ def run_once(
             ledger_path=ledger_path,
             ledger_key_path=ledger_key_path,
             routing_config=routing_config,
+            policy=policy,
+            invalid_dir=invalid_dir,
+            tuning=tuning,
         )
         if result is not None:
             out.append(result)
@@ -273,15 +303,19 @@ def run_once(
 
 
 def run_forever(
-    queue_dir: Path,
+    queue_dir: Path | None = None,
     *,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
     routing_config_path: Path | None = None,
+    policy_config_path: Path | None = None,
+    invalid_dir: Path | None = None,
+    tuning: DispatchTuning | None = None,
 ) -> None:
     """Run the daemon loop: drain the queue, sleep, repeat. Runs until killed."""
+    queue_dir = queue_dir or default_queue_dir()
     logger.info("dispatchd_started", queue_dir=str(queue_dir), poll_seconds=poll_seconds)
     while True:
         run_once(
@@ -290,13 +324,16 @@ def run_forever(
             ledger_path=ledger_path,
             ledger_key_path=ledger_key_path,
             routing_config_path=routing_config_path,
+            policy_config_path=policy_config_path,
+            invalid_dir=invalid_dir,
+            tuning=tuning,
         )
         time.sleep(poll_seconds)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dispatchd", description="Deterministic tmux dispatch daemon (chitra phase 1).")
-    parser.add_argument("--queue-dir", type=Path, default=DEFAULT_QUEUE_DIR, help="Order/result/processed queue root.")
+    parser.add_argument("--queue-dir", type=Path, default=None, help="Order/result/processed queue root (default: CHITRA_STATE_DIR/queue).")
     parser.add_argument(
         "--lock-dir",
         type=Path,
@@ -311,6 +348,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to a routing.yaml task_type->routing_hint lookup (env CHITRA_ROUTING_CONFIG, else no config/no-op).",
     )
+    parser.add_argument(
+        "--policy-config-path",
+        type=Path,
+        default=None,
+        help="Path to policy.yaml (env CHITRA_POLICY_CONFIG, else shipped defaults).",
+    )
+    parser.add_argument("--invalid-orders-dir", type=Path, default=None, help="Invalid-order directory (default: <queue-dir>/invalid).")
+    parser.add_argument("--capture-lines", type=int, default=12)
+    parser.add_argument("--post-paste-wait-seconds", type=float, default=0.15)
+    parser.add_argument("--transcript-recency-seconds", type=float, default=300.0)
+    parser.add_argument("--lane-lock-timeout-seconds", type=float, default=5.0)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--once", action="store_true", help="Drain the queue once and exit (for tests/cron), instead of looping forever.")
     return parser
@@ -318,23 +366,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    queue_dir = args.queue_dir or default_queue_dir()
+    tuning = DispatchTuning(
+        capture_lines=args.capture_lines,
+        post_paste_wait_seconds=args.post_paste_wait_seconds,
+        transcript_recency_seconds=args.transcript_recency_seconds,
+        lane_lock_timeout_seconds=args.lane_lock_timeout_seconds,
+    )
     if args.once:
         results = run_once(
-            args.queue_dir,
+            queue_dir,
             lock_dir=args.lock_dir,
             ledger_path=args.ledger_path,
             ledger_key_path=args.ledger_key_path,
             routing_config_path=args.routing_config_path,
+            policy_config_path=args.policy_config_path,
+            invalid_dir=args.invalid_orders_dir,
+            tuning=tuning,
         )
         print(json.dumps([r.model_dump(mode="json") for r in results], indent=2))
         return 0
     run_forever(
-        args.queue_dir,
+        queue_dir,
         poll_seconds=args.poll_seconds,
         lock_dir=args.lock_dir,
         ledger_path=args.ledger_path,
         ledger_key_path=args.ledger_key_path,
         routing_config_path=args.routing_config_path,
+        policy_config_path=args.policy_config_path,
+        invalid_dir=args.invalid_orders_dir,
+        tuning=tuning,
     )
     return 0
 

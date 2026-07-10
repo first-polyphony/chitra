@@ -28,7 +28,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 VALID_STATE_CLS = {"st-you", "st-work", "st-done", "st-stuck", "st-style"}
-REQUIRED_SELFCHECK_KEYS = {"solid", "weak", "unsure"}
+REQUIRED_SELFCHECK_KEYS = frozenset({"solid", "weak", "unsure"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,7 @@ def validate_facts(
     expected_owner: str | None = None,
     valid_hosts: set[str] | None = None,
     valid_state_cls: set[str] | None = None,
+    required_selfcheck_keys: frozenset[str] | None = REQUIRED_SELFCHECK_KEYS,
 ) -> ValidationResult:
     """Validate a facts.json-shaped dict against the board schema constraints.
 
@@ -62,11 +63,12 @@ def validate_facts(
     if expected_owner is not None and facts.get("snapshot_owner") != expected_owner:
         errors.append(f"snapshot_owner must be exactly {expected_owner!r}")
 
-    selfcheck = facts.get("selfcheck")
-    if not isinstance(selfcheck, dict) or not REQUIRED_SELFCHECK_KEYS.issubset(selfcheck.keys()):
-        errors.append(f"selfcheck must be a dict with keys {sorted(REQUIRED_SELFCHECK_KEYS)}")
-    elif not all(isinstance(selfcheck[k], str) for k in REQUIRED_SELFCHECK_KEYS):
-        errors.append("selfcheck values must all be strings")
+    if required_selfcheck_keys is not None:
+        selfcheck = facts.get("selfcheck")
+        if not isinstance(selfcheck, dict) or not required_selfcheck_keys.issubset(selfcheck.keys()):
+            errors.append(f"selfcheck must be a dict with keys {sorted(required_selfcheck_keys)}")
+        elif not all(isinstance(selfcheck[k], str) for k in required_selfcheck_keys):
+            errors.append("selfcheck values must all be strings")
 
     sessions = facts.get("sessions")
     session_ids: set[str] = set()
@@ -106,6 +108,7 @@ def write_facts(
     expected_owner: str | None = None,
     valid_hosts: set[str] | None = None,
     valid_state_cls: set[str] | None = None,
+    required_selfcheck_keys: frozenset[str] | None = REQUIRED_SELFCHECK_KEYS,
 ) -> dict[str, Any]:
     """Validate, backup, write, and (on validator failure) roll back.
 
@@ -124,6 +127,7 @@ def write_facts(
         expected_owner=expected_owner,
         valid_hosts=valid_hosts,
         valid_state_cls=valid_state_cls,
+        required_selfcheck_keys=required_selfcheck_keys,
     )
     if not validation.ok:
         logger.warning("board_updater_validation_failed", errors=validation.errors)

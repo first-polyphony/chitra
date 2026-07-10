@@ -13,7 +13,7 @@ import yaml
 import chitra.dispatchd as dispatchd_mod
 import chitra.ledger as ledger_mod
 from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
-from chitra.dispatchd import process_one_order, run_once
+from chitra.dispatchd import build_arg_parser, process_one_order, run_once
 from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
 
@@ -307,14 +307,15 @@ def test_malformed_order_file_is_moved_aside_not_crashed_on(tmp_path: Path) -> N
 
     results = run_once(queue_dir, lock_dir=tmp_path / "locks")
 
-    assert results == []
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.FAILED
+    assert results[0].reason.startswith("invalid-order:")
     assert not bad.exists()
-    assert (queue_dir / "processed" / "bad.json").exists()
+    assert (queue_dir / "invalid" / "bad.json").exists()
+    assert (queue_dir / "results" / "bad.json").exists()
 
 
-def test_malformed_order_file_is_logged_at_error_level(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_malformed_order_file_is_logged_at_error_level(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An unreadable/incomplete order is a silently-lost order (see the
     'Known limitation' docstring in process_one_order) -- it must be logged
     at ERROR, not buried at WARNING among routine noise. structlog's default
@@ -333,6 +334,21 @@ def test_malformed_order_file_is_logged_at_error_level(
     assert len(lines) == 1
     assert "error" in lines[0].lower()
     assert "warning" not in lines[0].lower()
+
+
+def test_invalid_order_uses_the_configured_invalid_directory_and_result_record(tmp_path: Path) -> None:
+    queue_dir = tmp_path / "queue"
+    orders_dir = queue_dir / "orders"
+    orders_dir.mkdir(parents=True)
+    (orders_dir / "bad.json").write_text("{bad", encoding="utf-8")
+    invalid_dir = tmp_path / "quarantine"
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", invalid_dir=invalid_dir)
+
+    assert results[0].order_id == "bad"
+    assert (invalid_dir / "bad.json").exists()
+    stored = DispatchResult.model_validate_json((queue_dir / "results" / "bad.json").read_text(encoding="utf-8"))
+    assert stored == results[0]
 
 
 def test_run_once_skips_order_file_that_vanishes_before_stat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,9 +401,7 @@ def _fake_dispatch_passthrough(order: DispatchOrder, **kwargs: Any) -> DispatchR
     )
 
 
-def test_routing_config_fills_in_routing_hint_when_task_type_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_routing_config_fills_in_routing_hint_when_task_type_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """task_type set, no explicit routing_hint, config has a matching entry:
     dispatchd fills in routing_hint from the config before dispatch."""
     monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
@@ -485,6 +499,88 @@ def test_explicit_routing_hint_wins_over_config_lookup(tmp_path: Path, monkeypat
 
     assert len(results) == 1
     assert results[0].routing_hint == "caller-chosen-hint"
+
+
+def test_routing_provenance_is_stamped_on_result_and_signed_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+    config_path = tmp_path / "routing.yaml"
+    config_path.write_text(yaml.safe_dump({"defaults": {"code-review": "sonnet"}}), encoding="utf-8")
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(order_id="provenance", session_ref="localhost:s:0.0", nudge="hi", task_type="code-review"),
+    )
+    ledger_path = tmp_path / "ledger.jsonl"
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=ledger_path,
+        ledger_key_path=tmp_path / "ledger.key",
+        routing_config_path=config_path,
+    )[0]
+
+    assert result.task_type == "code-review"
+    assert result.routing_hint_source == "config"
+    entry = ledger_mod.LedgerEntry.model_validate_json(ledger_path.read_text(encoding="utf-8"))
+    assert entry.task_type == "code-review"
+    assert entry.routing_hint_source == "config"
+    assert entry.sig_v == 2
+
+
+def test_policy_file_is_wired_to_completion_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(yaml.safe_dump({"completion_gate": {"required_evidence": []}}), encoding="utf-8")
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(
+            order_id="policy-gate",
+            session_ref="localhost:s:0.0",
+            nudge="complete",
+            completion_todo_items=[],
+            completion_has_deploy_evidence=False,
+            completion_has_live_verify_evidence=False,
+        ),
+    )
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        policy_config_path=policy_path,
+    )[0]
+
+    assert result.status == DispatchStatus.SENT
+
+
+def test_dispatchd_parser_exposes_policy_invalid_order_and_tuning_flags() -> None:
+    args = build_arg_parser().parse_args(
+        [
+            "--policy-config-path",
+            "policy.yaml",
+            "--invalid-orders-dir",
+            "invalid",
+            "--capture-lines",
+            "20",
+            "--post-paste-wait-seconds",
+            "0.25",
+            "--transcript-recency-seconds",
+            "120",
+            "--lane-lock-timeout-seconds",
+            "9",
+        ]
+    )
+    assert args.policy_config_path == Path("policy.yaml")
+    assert args.invalid_orders_dir == Path("invalid")
+    assert (args.capture_lines, args.post_paste_wait_seconds, args.transcript_recency_seconds, args.lane_lock_timeout_seconds) == (
+        20,
+        0.25,
+        120.0,
+        9.0,
+    )
 
 
 def test_malformed_routing_config_raises_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

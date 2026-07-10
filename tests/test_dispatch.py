@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -30,10 +31,13 @@ from chitra.dispatch import (
     pane_input_check,
     paste_nudge_to_local_tmux,
     remote_tmux_paste_command,
+    ssh_command,
     tmux_pane_target,
     transcript_confirms_nudge,
+    transcript_glob,
 )
 from chitra.ledger import append_entry, load_or_create_signing_key
+from chitra.policy_config import DispatchPolicy, PolicyConfig
 
 HAS_TMUX = shutil.which("tmux") is not None
 
@@ -470,6 +474,43 @@ def test_pane_input_check_fails_closed_for_an_unrecognizable_pane_shape() -> Non
     assert check.last_line == "status line"
 
 
+def test_pane_input_check_accepts_a_configured_idle_shape() -> None:
+    check = pane_input_check(["previous output", "READY"], extra_idle_regexes=[re.compile(r"READY")])
+    assert check.ok is True
+    assert check.reason == "idle: matched configured idle pattern"
+
+
+def test_transcript_glob_is_relative_and_rejects_parent_or_absolute_patterns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_TRANSCRIPT_GLOB", "runs/**/*.jsonl")
+    assert transcript_glob() == "runs/**/*.jsonl"
+    monkeypatch.setenv("CHITRA_TRANSCRIPT_GLOB", "../outside/*.jsonl")
+    with pytest.raises(ValueError):
+        transcript_glob()
+
+
+def test_find_recent_transcript_uses_the_configured_glob(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "projects"
+    transcript = root / "runs" / "one" / "two" / "target.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("configured marker", encoding="utf-8")
+    monkeypatch.setenv("CHITRA_TRANSCRIPT_GLOB", "runs/*/*/*.jsonl")
+    assert find_recent_transcript("configured marker", projects_root=root) == transcript
+    monkeypatch.setenv("CHITRA_TRANSCRIPT_GLOB", "/outside/*.jsonl")
+    with pytest.raises(ValueError):
+        transcript_glob()
+
+
+def test_ssh_command_reads_the_configurable_host_key_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_SSH_STRICT_HOST_KEY_CHECKING", "yes")
+    monkeypatch.setenv("CHITRA_SSH_CONNECT_TIMEOUT_SECONDS", "7")
+    command = ssh_command("example", "true")
+    assert "StrictHostKeyChecking=yes" in command
+    assert "ConnectTimeout=7" in command
+    monkeypatch.setenv("CHITRA_SSH_CONNECT_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ValueError):
+        ssh_command("example", "true")
+
+
 # --- dispatch_to_tmux end-to-end (fake runner) ----------------------------
 
 
@@ -530,6 +571,21 @@ def test_dispatch_to_tmux_defaults_routing_hint_to_none() -> None:
 
 def test_directive_voice_violation_none_for_a_clean_instruction() -> None:
     assert directive_voice_violation("Stop editing main and open a PR.") is None
+
+
+def test_dispatch_policy_can_replace_directive_voice_patterns() -> None:
+    policy = PolicyConfig(dispatch=DispatchPolicy(banned_attribution_patterns=[r"forbidden"], extra_idle_input_regexes=[]))
+    order = DispatchOrder(order_id="o1", session_ref="localhost:s:0.0", nudge="The operator asked for this")
+    result = dispatch_to_tmux(order, policy=policy, allowed_hosts=set(), local_extra=set())
+    assert result.status == DispatchStatus.BLOCKED
+    assert not result.reason.startswith("directive-voice:")
+
+
+def test_unconfigured_policy_path_matches_explicit_shipped_policy() -> None:
+    order = DispatchOrder(order_id="o1", session_ref="untrusted:s:0.0", nudge="A normal relay instruction")
+    no_config = dispatch_to_tmux(order, allowed_hosts=set(), local_extra=set())
+    shipped_policy = dispatch_to_tmux(order, policy=PolicyConfig(), allowed_hosts=set(), local_extra=set())
+    assert no_config.model_dump(exclude={"at"}) == shipped_policy.model_dump(exclude={"at"})
 
 
 def test_dispatch_to_tmux_sends_a_clean_order(tmp_path: Path) -> None:

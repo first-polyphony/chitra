@@ -1,0 +1,80 @@
+"""Tests for optional policy.yaml and lazy persistent-state paths."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from chitra.completion_gate import _DEFERRAL_PHRASES
+from chitra.policy_config import POLICY_CONFIG_ENV_VAR, PolicyConfig, load_policy_config
+from chitra.state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
+
+
+def test_unconfigured_policy_is_the_current_shipped_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(POLICY_CONFIG_ENV_VAR, raising=False)
+    policy = load_policy_config()
+    assert policy.completion_gate.deferral_phrases == list(_DEFERRAL_PHRASES)
+    assert policy.completion_gate.complete_todo_statuses == ["done"]
+    assert policy.completion_gate.required_evidence == ["deploy", "live_verify"]
+    assert policy.dispatch.banned_attribution_patterns == [
+        r"\boperator\b",
+        r"\bthe monitor\b",
+        r"\bchitra (wants|says|needs|relays)\b",
+    ]
+    assert policy.dispatch.extra_idle_input_regexes == []
+
+
+def test_policy_explicit_path_wins_over_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    explicit = tmp_path / "explicit.yaml"
+    configured = tmp_path / "configured.yaml"
+    explicit.write_text(yaml.safe_dump({"completion_gate": {"complete_todo_statuses": ["closed"]}}), encoding="utf-8")
+    configured.write_text(yaml.safe_dump({"completion_gate": {"complete_todo_statuses": ["resolved"]}}), encoding="utf-8")
+    monkeypatch.setenv(POLICY_CONFIG_ENV_VAR, str(configured))
+    assert load_policy_config(explicit).completion_gate.complete_todo_statuses == ["closed"]
+
+
+def test_policy_loads_from_environment_when_no_path_is_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    configured = tmp_path / "policy.yaml"
+    configured.write_text(yaml.safe_dump({"dispatch": {"extra_idle_input_regexes": ["READY"]}}), encoding="utf-8")
+    monkeypatch.setenv(POLICY_CONFIG_ENV_VAR, str(configured))
+    assert load_policy_config().dispatch.extra_idle_input_regexes == ["READY"]
+
+
+def test_policy_configured_errors_are_not_silently_ignored(tmp_path: Path) -> None:
+    with pytest.raises(OSError):
+        load_policy_config(tmp_path / "missing.yaml")
+    malformed = tmp_path / "malformed.yaml"
+    malformed.write_text("completion_gate: [", encoding="utf-8")
+    with pytest.raises(yaml.YAMLError):
+        load_policy_config(malformed)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"completion_gate": {"required_evidence": ["unknown"]}},
+        {"dispatch": {"banned_attribution_patterns": ["["]}},
+        {"dispatch": {"extra_idle_input_regexes": ["["]}},
+    ],
+)
+def test_policy_rejects_invalid_schema_values(tmp_path: Path, data: dict[str, object]) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_policy_config(path)
+
+
+def test_state_paths_are_resolved_lazily_from_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CHITRA_STATE_DIR", str(tmp_path / "state"))
+    assert default_queue_dir() == tmp_path / "state" / "queue"
+    assert default_ledger_path() == tmp_path / "state" / "ledger.jsonl"
+    assert default_ledger_key_path() == tmp_path / "state" / "ledger.key"
+
+
+def test_policy_model_defaults_are_independent() -> None:
+    first = PolicyConfig()
+    second = PolicyConfig()
+    first.completion_gate.deferral_phrases.append("custom")
+    assert "custom" not in second.completion_gate.deferral_phrases

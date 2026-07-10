@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
 from chitra.taxonomy import TaxonomyEntry
+
+if TYPE_CHECKING:
+    from chitra.policy_config import GatePolicy
 
 # Deferral-language phrases drawn from the DEFERRAL_STUB cue ("leaves
 # placeholders/TODO/NotImplemented/empty body/'you'll need to...'") plus a
@@ -77,7 +80,7 @@ class TodoItem(BaseModel):
     """A single todo-list item as tracked by the caller (e.g. TodoWrite)."""
 
     text: str
-    status: Literal["open", "in_progress", "done"]
+    status: str
 
 
 class CompletionAudit(BaseModel):
@@ -90,14 +93,14 @@ class CompletionAudit(BaseModel):
     summary: str
 
 
-def check_todo_residue(todo_items: list[TodoItem]) -> list[str]:
+def check_todo_residue(todo_items: list[TodoItem], *, complete_statuses: Sequence[str] = ("done",)) -> list[str]:
     """Return the exact ``text`` of every todo item whose status is not
-    ``"done"``. Pure deterministic logic -- no interpretation of the text's
-    meaning, only its ``status`` field."""
-    return [item.text for item in todo_items if item.status != "done"]
+    a configured complete status. Pure deterministic logic -- no
+    interpretation of the text's meaning, only its ``status`` field."""
+    return [item.text for item in todo_items if item.status not in complete_statuses]
 
 
-def scan_deferral_language(text: str, taxonomy: Sequence[TaxonomyEntry]) -> list[dict[str, str]]:
+def scan_deferral_language(text: str, taxonomy: Sequence[TaxonomyEntry], *, phrases: Sequence[str] | None = None) -> list[dict[str, str]]:
     """Scan ``text`` for deferral-language phrases associated with the
     ``DEFERRAL_STUB``/``FAKE_DONE`` taxonomy codes.
 
@@ -105,7 +108,7 @@ def scan_deferral_language(text: str, taxonomy: Sequence[TaxonomyEntry]) -> list
     classifier. ``taxonomy`` is used only to confirm the codes being matched
     against are present in the shipped ruleset (so this function stays in
     sync with the taxonomy data rather than hardcoding codes independent of
-    it); the phrase list itself is fixed in this module.
+    it). ``phrases=None`` selects the shipped phrase list.
 
     Returns a list of ``{"phrase": ..., "code": ...}`` matches, one per
     phrase found (a phrase found multiple times is reported once).
@@ -115,7 +118,7 @@ def scan_deferral_language(text: str, taxonomy: Sequence[TaxonomyEntry]) -> list
         return []
     lowered = text.lower()
     matches: list[dict[str, str]] = []
-    for phrase in _DEFERRAL_PHRASES:
+    for phrase in phrases if phrases is not None else _DEFERRAL_PHRASES:
         if phrase in lowered:
             code = "DEFERRAL_STUB" if "DEFERRAL_STUB" in available_codes else next(iter(available_codes))
             matches.append({"phrase": phrase, "code": code})
@@ -128,6 +131,8 @@ def evaluate_completion_claim(
     has_deploy_evidence: bool,
     has_live_verify_evidence: bool,
     taxonomy: Sequence[TaxonomyEntry],
+    *,
+    policy: GatePolicy | None = None,
 ) -> CompletionAudit:
     """Audit a "done"/"complete" claim against todo residue, deferral
     language, and deploy+live-verify evidence.
@@ -143,9 +148,15 @@ def evaluate_completion_claim(
     evidence flags true) an operator can use to authorize a close; it is not
     itself a close.
     """
-    todo_residue = check_todo_residue(todo_items)
-    deferral_matches = scan_deferral_language(transcript_text, taxonomy)
-    evidence_gap = not (has_deploy_evidence and has_live_verify_evidence)
+    if policy is None:
+        from chitra.policy_config import GatePolicy
+
+        policy = GatePolicy()
+    todo_residue = check_todo_residue(todo_items, complete_statuses=policy.complete_todo_statuses)
+    deferral_matches = scan_deferral_language(transcript_text, taxonomy, phrases=policy.deferral_phrases)
+    evidence_gap = ("deploy" in policy.required_evidence and not has_deploy_evidence) or (
+        "live_verify" in policy.required_evidence and not has_live_verify_evidence
+    )
 
     if not todo_residue and not deferral_matches and not evidence_gap:
         return CompletionAudit(
@@ -164,9 +175,9 @@ def evaluate_completion_claim(
         gaps.append(f"deferral language detected: {phrases!r}")
     if evidence_gap:
         missing = []
-        if not has_deploy_evidence:
+        if "deploy" in policy.required_evidence and not has_deploy_evidence:
             missing.append("deploy evidence")
-        if not has_live_verify_evidence:
+        if "live_verify" in policy.required_evidence and not has_live_verify_evidence:
             missing.append("live-verify evidence")
         gaps.append(f"missing {', '.join(missing)}")
 

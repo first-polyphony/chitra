@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from chitra.completion_gate import (
 )
 from chitra.dispatch import DispatchOrder, DispatchStatus
 from chitra.dispatchd import process_one_order
+from chitra.policy_config import GatePolicy
 from chitra.taxonomy import Disposition, TaxonomyEntry, load_taxonomy
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,13 @@ def test_load_taxonomy_contains_deferral_stub_and_fake_done() -> None:
 def test_load_taxonomy_codes_are_unique() -> None:
     codes = [entry.code for entry in load_taxonomy()]
     assert len(codes) == len(set(codes))
+
+
+def test_load_taxonomy_can_validate_a_configured_replacement(tmp_path: Path) -> None:
+    path = tmp_path / "taxonomy.json"
+    path.write_text(json.dumps({"entries": [{"code": "DEFERRAL_STUB", "cue": "custom", "disposition": "DECISION"}]}), encoding="utf-8")
+    taxonomy = load_taxonomy(path)
+    assert taxonomy[0].cue == "custom"
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +147,19 @@ def test_deferral_language_disputes_even_with_full_evidence_and_no_todos() -> No
     assert audit.deferral_matches
 
 
+def test_configured_completion_policy_controls_statuses_phrases_and_evidence() -> None:
+    policy = GatePolicy(complete_todo_statuses=["closed"], deferral_phrases=["later phrase"], required_evidence=[])
+    audit = evaluate_completion_claim(
+        [TodoItem(text="release", status="closed")],
+        "The work is done.",
+        False,
+        False,
+        load_taxonomy(),
+        policy=policy,
+    )
+    assert audit.verdict == "CLEAN"
+
+
 # ---------------------------------------------------------------------------
 # CompletionClaimEvent marker
 # ---------------------------------------------------------------------------
@@ -152,9 +174,7 @@ def test_completion_claim_event_marker_value() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dispatchd_blocks_delivery_on_completion_dispute_and_never_calls_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_dispatchd_blocks_delivery_on_completion_dispute_and_never_calls_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     call_count = {"n": 0}
 
     def fake_dispatch(order: DispatchOrder, **kwargs: object) -> None:  # pragma: no cover - must never be called
@@ -194,9 +214,7 @@ def test_dispatchd_blocks_delivery_on_completion_dispute_and_never_calls_dispatc
     assert (queue_dir / "processed" / "ord-audit-1.json").exists()
 
 
-def test_dispatchd_proceeds_to_dispatch_on_clean_completion_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_dispatchd_proceeds_to_dispatch_on_clean_completion_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from chitra.dispatch import DispatchResult
 
     call_count = {"n": 0}
@@ -238,9 +256,7 @@ def test_dispatchd_proceeds_to_dispatch_on_clean_completion_claim(
     assert result.status == DispatchStatus.SENT
 
 
-def test_dispatchd_skips_audit_entirely_when_completion_todo_items_is_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_dispatchd_skips_audit_entirely_when_completion_todo_items_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An order that never opts in to the completion-claim check (the
     default -- completion_todo_items=None) is completely unaffected."""
     from chitra.dispatch import DispatchResult
