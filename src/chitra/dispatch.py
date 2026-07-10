@@ -113,7 +113,12 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 DISPATCH_CAPTURE_LINES: int = 12
-DISPATCH_VERIFY_WAIT_SECONDS: float = 0.15
+# Claude Code writes the submitted user turn to its JSONL transcript
+# asynchronously. The former 150ms allowance was shorter than an observed
+# fresh-session write on Trailhead, producing a FAILED result after a nudge
+# had actually been accepted by Claude. Keep the bound small, but give the
+# transcript writer a full second before declaring a delivery unverified.
+DISPATCH_VERIFY_WAIT_SECONDS: float = 1.0
 PANE_IN_MODE_CANCEL_WAIT_SECONDS: float = 0.3
 DEFAULT_REMOTE_HOSTS: str = ""
 

@@ -39,6 +39,7 @@ import structlog
 from . import ledger as ledger_mod
 from .completion_gate import evaluate_completion_claim
 from .dispatch import (
+    DISPATCH_VERIFY_WAIT_SECONDS,
     DispatchOrder,
     DispatchResult,
     DispatchStatus,
@@ -385,7 +386,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--invalid-orders-dir", type=Path, default=None, help="Invalid-order directory (default: <queue-dir>/invalid).")
     parser.add_argument("--capture-lines", type=int, default=12)
-    parser.add_argument("--post-paste-wait-seconds", type=float, default=0.15)
+    parser.add_argument("--post-paste-wait-seconds", type=float, default=DISPATCH_VERIFY_WAIT_SECONDS)
     parser.add_argument("--transcript-recency-seconds", type=float, default=300.0)
     parser.add_argument("--lane-lock-timeout-seconds", type=float, default=5.0)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
