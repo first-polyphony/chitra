@@ -100,6 +100,23 @@ For real-world naming precedent on what a deployment's `task_type` values might 
 
 ---
 
+## Temporal-based workflow manager (planned, separate consuming tool)
+
+A design study (2026-07-10) was commissioned to answer: could chitra grow into something that matches Claude Code's own workflow/orchestration functionality — multi-step dispatch, fan-out/fan-in, completion gating, retry — while staying agnostic to which agent does the actual work, and able to execute the nine named patterns in [`docs/workflow-pattern-catalog.md`](workflow-pattern-catalog.md) as literal, runnable shapes rather than just naming labels?
+
+The study's own recommendation was a lighter-weight, file-based sequencer built in chitra's existing idiom (durable JSON order queue, lane locks, the completion gate as a step-exit condition), with Temporal declined as the backend — its verdict was that Temporal's workflow-as-code model conflicts with "a shape is data an operator selects," and that a workflow-orchestration server cluster is a poor fit for chitra's small-and-dependency-light identity.
+
+**The operator has decided to proceed with Temporal specifically as the backend**, overriding that recommendation. Scope, consistent with every other item on this page and with the study's own boundary analysis:
+
+- **This is not built inside chitra.** Per chitra's stated design philosophy (`DESIGN.md`: orchestration logic belongs in "a separate, higher-level system that uses chitra as its delivery/dedup layer") and per the study's own scope-boundary finding, the workflow manager is a **separate tool** that consumes chitra's existing artifacts (the order queue, the signed ledger, `evaluate_completion_claim`'s verdicts) rather than new code inside `dispatchd`/`triaged`.
+- **The hybrid concession identified by the study still applies**: chitra itself gains two small, opaque, pass-through fields — `workflow_id` and `step_id` — on `DispatchOrder`/`DispatchResult`/`LedgerEntry`, carried and signed exactly like the existing `tag` and `routing_hint` fields, never interpreted or acted on by chitra. This is what lets the signed ledger double as a workflow-execution audit trail without chitra learning anything about workflows.
+- **Shape coverage, per the study's translation analysis** — of the nine cataloged patterns, three translate cleanly into a deterministic step-DAG (Heartbeat, Orchestrator-Workers, Ratchet), two require mandating structured/enum verdicts rather than free-text votes (Quorum, Compost), two are deterministic but a different machinery class entirely — counters/promotion state and cron-verified predicates, not a DAG (Trust Ledger, Standing Goals) — and two do not fit a deterministic engine at all and should stay agent-internal or fixed-round degraded forms (Sparring, Executor-Advisor/Oracle). The Temporal workflow manager should implement the first five categories as real, versioned shape templates and explicitly document the last two as out of scope rather than force-fitting them.
+- **Every judgment call inside a shape is itself a dispatch to an external agent.** The engine (Temporal or otherwise) walks the DAG, evaluates structured verdicts, and advances state — it never summarizes, scores, or judges content itself. This preserves chitra's zero-LLM-calls invariant at the layer that touches chitra; Temporal's own workflow code is judgment-free plumbing over agent-produced verdicts.
+
+Not yet scheduled or estimated; this section records the decision and scope, not a committed timeline. Implementation should start with the `workflow_id`/`step_id` field addition in chitra (small, reviewable independently) before the separate Temporal tool is built against it.
+
+---
+
 ## beads integration (pull side only)
 
 [beads](https://github.com/steveyegge/beads) (a git-native work tracker) remains a candidate backing store for the read side of a lane-status/decisions ledger: something that wants to know "what's the current state and history of decisions for session X" could query beads instead of re-deriving it. This is explicitly **pull-only** — chitra's own orders and dispatch stay push-based through `dispatchd`'s JSON queue; beads has no push mechanism, and nothing about chitra's delivery path changes. Scope stays narrow: read-side integration for status/ledger queries, nothing else. No code exists for this yet; it remains a pilot candidate, not a committed item, and should stay that way until a concrete consumer needs it — adding it speculatively would violate the "stays lightweight" test every item on this page has to pass.
