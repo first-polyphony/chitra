@@ -24,9 +24,10 @@ chitra delivers to and observes LLM-driven sessions from the outside; its own co
 
 - **`chitra.dispatch`** — a tmux dispatch library. It checks for tmux copy-mode and cancels it, uses `paste-buffer -p` for a proper bracketed-paste wrapper, then confirms delivery by grepping the target session's own transcript rather than trusting a pane screenshot. Includes `LaneLock`, a file-based single-writer lock: only one writer delivers to a given session id at a time.
 - **`chitra.dispatchd`** — a daemon that drains a JSON order queue (`queue/orders/*.json`), delivers each order via `chitra.dispatch` under a `LaneLock`, writes a result JSON, and moves the processed order aside. Once a result file exists for an order, it is never redispatched — but a crash between the paste actually happening and the result file being written is a real gap that can cause a redelivery on restart; see "Crash-safety" below.
-- **`chitra.triaged`** — a daemon that tails an events log and emits a triage event only when a session's state signature changes, not on every repeated poll.
+- **`chitra.triaged`** — a daemon that tails an events log and emits a triage event only when a session's state signature changes, not on every repeated poll. Its receiving compatibility artifacts are `queue.tsv`, deduplicated critical `flags.log`, and `stats.json`.
 - **`chitra.draft_scanner`** — a periodic scan of `host:session:pane` targets for an unsubmitted draft sitting in the tmux input box. Flags only; never submits or discards anything.
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
+- **`chitra.board`** — the deterministic, operator-facing board renderer. It strictly validates the full facts schema, renders the bundled interactive HTML to `index.html` atomically, and records result freshness in `health.json`.
 - **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so any reader can later verify that chitra delivered an exact message at a given time — or that chitra never sent a given message.
 
 ## Tmux injection recipe
@@ -116,7 +117,7 @@ pytest
 
 ## Running the daemons
 
-Two command-line interface (CLI) entrypoints are installed: `dispatchd` and `triaged`, plus `draft-scanner` as an ad-hoc tool. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`. Copy them, edit the placeholders, and install as `chitra-dispatchd.service` / `chitra-triaged.service`.
+Two command-line interface (CLI) entrypoints are installed: `dispatchd` and `triaged`, plus `draft-scanner` as an ad-hoc tool. The board renderer runs as `python -m chitra.board` (or `chitra-board` when installed). Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`. Copy them, edit the placeholders, and install as `chitra-dispatchd.service` / `chitra-triaged.service`.
 
 ## Configuration
 
@@ -137,6 +138,17 @@ All configuration is via CLI flags (see `--help` on each entrypoint) or a small 
 | `CHITRA_SSH_CONNECT_TIMEOUT_SECONDS` | `4` | `chitra.dispatch` | Positive integer passed to ssh's `ConnectTimeout` option |
 | `CHITRA_STATE_DIR` | `/var/lib/chitra` | `chitra.dispatchd`, `chitra.ledger` | Base directory for the default queue, ledger, and ledger key |
 | `CHITRA_POLICY_CONFIG` | *(unset — shipped defaults)* | `chitra.dispatchd` | Optional one-file completion-gate and dispatch policy; see [`docs/policy.yaml.example`](docs/policy.yaml.example) |
+| `CHITRA_TRIAGE_EVENTS_LOG` | `/var/lib/chitra/events.log` | `chitra.triaged` | Events log to consume when no CLI flag is supplied |
+| `CHITRA_TRIAGE_STATE_FILE` | `/var/lib/chitra/triaged-state.json` | `chitra.triaged` | Persistent transition-dedup state |
+| `CHITRA_TRIAGE_LOG` | `/var/lib/chitra/triaged.log` | `chitra.triaged` | JSONL transition log |
+| `CHITRA_TRIAGE_QUEUE_FILE` / `CHITRA_TRIAGE_FLAGS_FILE` / `CHITRA_TRIAGE_STATS_FILE` | alongside the state file | `chitra.triaged` | Receiving compatibility artifacts: queue, interrupt-only flags, and counters |
+| `CHITRA_TRIAGE_ALERT_STATE_FILE` | alongside the state file | `chitra.triaged` | Persistent 15-minute `(lane, rule, statement)` critical-flag dedup state |
+| `CHITRA_BOARD_DIR` | `$CHITRA_STATE_DIR/board` | `chitra.board` | Directory containing `facts.json` and generated `index.html` / `health.json` |
+| `CHITRA_BOARD_TEMPLATE` | bundled template | `chitra.board` | Optional replacement HTML template |
+| `CHITRA_BOARD_LOCAL_HOST` | local hostname | `chitra.board` | Facts host treated as local for tmux tail capture |
+| `CHITRA_BOARD_REMOTE_HOSTS` / `CHITRA_BOARD_SSH_USER` | *(none)* / `ubuntu` | `chitra.board` | Opt-in remote tail capture allowlist and SSH user |
+| `CHITRA_BOARD_SNAPSHOT_OWNER` / `CHITRA_BOARD_VALID_HOSTS` | *(none)* | `chitra.board` | Optional deployment-specific owner and tmux-host schema constraints |
+| `CHITRA_BOARD_CAPACITY_FILE` | *(none)* | `chitra.board` | Optional external capacity snapshot rendered in the lower board strip |
 
 `dispatchd` also accepts `--policy-config-path`, `--invalid-orders-dir`, `--capture-lines`, `--post-paste-wait-seconds`, `--transcript-recency-seconds`, and `--lane-lock-timeout-seconds`; see `dispatchd --help`. The generic replay evaluator and fixture workflow are documented in [`docs/self-tuning.md`](docs/self-tuning.md).
 

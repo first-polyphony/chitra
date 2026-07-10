@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Session Board</title>
+<style>
+  :root {
+    --ground: #131720; --panel: #1a2030; --panel2: #161b28; --line: #2a3247;
+    --text: #edecE4; --muted: #a6aec1; --faint: #828da4;
+    --amber: #eda94a; --red: #e06a58; --green: #5fc492; --slate: #93a1bc; --violet: #bfa0e6;
+    --needbg: rgba(233, 162, 59, .13);
+    --tailbg: #0d1017; --tailtext: #c3cbd9;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground: #ecece6; --panel: #f9f9f5; --panel2: #f1f1ec; --line: #d3d3c9;
+      --text: #23252b; --muted: #4d535f; --faint: #6d7482;
+      --amber: #a86e15; --red: #b23e2e; --green: #2e8a5c; --slate: #556483; --violet: #7d5fa3;
+      --needbg: rgba(168, 110, 21, .10);
+    }
+    .row, a.schip, .fchip, .fitem { --session-ink: color-mix(in srgb, var(--session, #556483) 62%, #23252b); }
+  }
+  :root[data-theme="dark"] {
+    --ground: #131720; --panel: #1a2030; --panel2: #161b28; --line: #2a3247;
+    --text: #edecE4; --muted: #a6aec1; --faint: #828da4;
+    --amber: #eda94a; --red: #e06a58; --green: #5fc492; --slate: #93a1bc; --violet: #bfa0e6;
+    --needbg: rgba(233, 162, 59, .13);
+  }
+  :root[data-theme="dark"] .row, :root[data-theme="dark"] a.schip,
+  :root[data-theme="dark"] .fchip, :root[data-theme="dark"] .fitem { --session-ink: var(--session, var(--muted)); }
+  :root[data-theme="light"] {
+    --ground: #ecece6; --panel: #f9f9f5; --panel2: #f1f1ec; --line: #d3d3c9;
+    --text: #23252b; --muted: #4d535f; --faint: #6d7482;
+    --amber: #a86e15; --red: #b23e2e; --green: #2e8a5c; --slate: #556483; --violet: #7d5fa3;
+    --needbg: rgba(168, 110, 21, .10);
+  }
+  :root[data-theme="light"] .row, :root[data-theme="light"] a.schip,
+  :root[data-theme="light"] .fchip, :root[data-theme="light"] .fitem { --session-ink: color-mix(in srgb, var(--session, #556483) 62%, #23252b); }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  .answer, .needs-summary, .stamp, .needline, .doing, .goal, .ftext, .note { overflow-wrap: anywhere; }
+  body { background: var(--ground); color: var(--text); font-family: var(--sans); line-height: 1.5; }
+  .row, a.schip, .fchip, .fitem { --session-ink: var(--session, var(--muted)); }
+  .hidden { display: none !important; }
+
+  #stale-banner { display: none; background: var(--red); color: #fff; font-family: var(--mono); font-size: 13px; font-weight: 700; padding: 8px 12px; text-align: center; }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 210px minmax(0, 1fr) 320px;
+    grid-template-rows: auto 1fr;
+    grid-template-areas: "left header right" "left main right";
+    gap: 0 26px;
+    padding: 18px 22px 50px;
+    min-height: 100vh;
+  }
+  header.top { grid-area: header; border-bottom: 2px solid var(--line); padding-bottom: 12px; margin-bottom: 12px; }
+  .rail-left { grid-area: left; }
+  main.center { grid-area: main; min-width: 0; }
+  .rail-right { grid-area: right; }
+  .rail-inner { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; padding-right: 2px; }
+  .rail-right .rail-inner { display: flex; flex-direction: column; height: calc(100vh - 24px); overflow: hidden; }
+  .feed { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px;
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent); }
+  .selfcheck { flex: none; }
+
+  .brand { font-family: var(--mono); font-size: 12.5px; font-weight: 700; letter-spacing: .1em; color: var(--muted); margin: 4px 0 14px; line-height: 1.7; }
+  .answer { font-size: 19px; font-weight: 650; margin: 2px 0 6px; text-wrap: balance; }
+  .answer .y { color: var(--amber); }
+  .needs-summary { font-family: var(--mono); font-size: 13px; font-weight: 700; margin: 2px 0 6px; }
+  .needs-summary .y { color: var(--amber); }
+  .needs-summary .quiet { color: var(--faint); font-weight: 400; }
+  .stamp { font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+
+  h2, h3 { font-family: var(--mono); letter-spacing: .1em; color: var(--muted); }
+  h2 { font-size: 12px; margin: 0 0 2px; }
+  h3 { font-size: 11px; margin: 16px 0 6px; }
+  .note { font-size: 12px; color: var(--faint); margin: 0 0 10px; }
+
+  /* ---- interactive affordance: everything boxed is clickable ---- */
+  .btn, .fchip, a.schip {
+    font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--muted); color: var(--text); background: var(--panel2);
+    padding: 3px 10px; cursor: pointer; display: inline-block; border-radius: 3px;
+    list-style: none; user-select: none; text-decoration: none;
+  }
+  .btn:hover, .fchip:hover, a.schip:hover { border-color: var(--amber); color: var(--amber); }
+  .btn:focus-visible, .fchip:focus-visible, a.schip:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .btn::-webkit-details-marker { display: none; }
+  details[open] > summary .btn { border-color: var(--amber); color: var(--amber); }
+
+  /* ---- left rail: theme, filters, legend ---- */
+  #theme-toggle { margin-bottom: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .fchip { font-size: 10.5px; padding: 2px 8px; color: var(--session-ink, var(--muted)); border-color: var(--session, var(--muted)); }
+  .fchip[data-kind="state"] { color: var(--fs, var(--muted)); border-color: var(--fs, var(--muted)); }
+  .fchip:not(.on) { opacity: .38; border-style: dashed; }
+  .legend { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 4px; }
+  .legend p { font-size: 11.5px; color: var(--muted); margin: 6px 0; display: flex; align-items: flex-start; gap: 7px; }
+  .legend .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; display: inline-block; margin-top: 4px; }
+  .legend .btn { font-size: 10px; padding: 1px 6px; cursor: default; }
+
+  /* ---- center: session rows ---- */
+  .cols {
+    display: grid; grid-template-columns: 190px 112px minmax(0, 1fr) 96px; gap: 14px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .12em; color: var(--faint);
+    text-transform: uppercase; padding: 4px 14px 6px;
+  }
+  .rows { display: flex; flex-direction: column; gap: 9px; }
+  .row { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--session, var(--line)); }
+  .row.needs { border-color: var(--amber); border-left-color: var(--session, var(--amber)); box-shadow: 0 0 0 1px var(--amber); }
+  .rowline {
+    display: grid; grid-template-columns: 190px 112px minmax(0, 1fr) 96px; gap: 8px 14px;
+    grid-template-areas: "need need need need" "name state doing btn";
+    padding: 12px 14px; align-items: start; list-style: none; cursor: default;
+  }
+  .rowline > * { min-width: 0; }
+  summary.rowline::marker { content: ""; }
+  .rowline::-webkit-details-marker { display: none; }
+  .needline {
+    grid-area: need; background: var(--needbg); border: 1px solid var(--amber);
+    color: var(--amber); font-size: 13.5px; font-weight: 600; padding: 6px 11px; border-radius: 2px;
+  }
+  .needline .nlabel { font-family: var(--mono); font-size: 12px; font-weight: 700; margin-right: 6px; }
+  .cell-name { grid-area: name; }
+  .sname { font-family: var(--mono); font-size: 15px; font-weight: 700; line-height: 1.25; color: var(--session-ink, var(--text)); overflow-wrap: break-word; }
+  .sid { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 3px; overflow-wrap: break-word; }
+  .state { grid-area: state; font-family: var(--mono); font-size: 11.5px; font-weight: 700; padding-top: 3px; }
+  .st-work { color: var(--slate); } .st-you { color: var(--amber); } .st-done { color: var(--green); } .st-stuck { color: var(--red); } .st-style { color: var(--violet); }
+  .goal { display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; color: var(--faint); margin-bottom: 3px; }
+  .doing { grid-area: doing; font-size: 13.5px; color: var(--text); }
+  .rowline .btn { grid-area: btn; justify-self: end; white-space: nowrap; }
+
+  .detailwrap { border-top: 1px solid var(--line); background: var(--panel2); padding: 10px 16px 12px; }
+  .detailwrap p { font-size: 13px; margin: 5px 0; max-width: 78ch; overflow-wrap: break-word; }
+  .kv { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); display: block; margin-top: 9px; }
+  .tail {
+    background: var(--tailbg); color: var(--tailtext); font-family: var(--mono); font-size: 11.5px;
+    line-height: 1.45; padding: 8px 12px; margin: 6px 0; max-height: 130px;
+    overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+
+  /* ---- right rail: updates feed + self-check ---- */
+  .fitem { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 2px 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .ft { font-family: var(--mono); font-size: 11px; color: var(--faint); padding-top: 3px; }
+  .fitem .schip { font-size: 10px; padding: 1px 7px; justify-self: start; }
+  a.schip { color: var(--session-ink, var(--muted)); border-color: var(--session, var(--line)); font-weight: 700; }
+  span.schip { font-family: var(--mono); font-size: 10px; font-weight: 700; padding: 2px 0; color: var(--muted); }
+  span.schip.closed { color: var(--session-ink, var(--muted)); }
+  .ftext { grid-column: 2; font-size: 12.5px; color: var(--muted); overflow-wrap: break-word; }
+  .selfcheck { margin-top: 22px; border-top: 2px solid var(--line); padding-top: 12px; }
+  .check { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 6px 10px; font-size: 12.5px; }
+  .check .lab { font-family: var(--mono); font-size: 10.5px; font-weight: 700; padding-top: 2px; }
+  .check span { overflow-wrap: break-word; }
+
+  footer.stamp { display: block; margin-top: 28px; }
+
+  /* ---- SubHub capacity strip (full width, below the main zones) ---- */
+  .subhub { border-top: 2px solid var(--line); margin: 0 22px; padding: 14px 0 46px; }
+  .subhub h2 { margin: 0 0 2px; }
+  .subhub h3 { margin: 14px 0 4px; }
+  .submeta { font-family: var(--mono); font-size: 11px; color: var(--faint); margin: 2px 0 0; }
+  .subrows { display: flex; flex-direction: column; }
+  .subrow {
+    display: grid; grid-template-columns: 300px 130px minmax(0, 1fr); gap: 2px 16px;
+    align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 12.5px;
+  }
+  .subrow > * { min-width: 0; }
+  .cell-acct .aname { font-family: var(--mono); font-size: 12px; font-weight: 700; display: block; overflow-wrap: anywhere; }
+  .cell-acct .aacct { font-family: var(--mono); font-size: 10.5px; color: var(--faint); display: block; overflow-wrap: anywhere; }
+  .substate { font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+  .substate.ok { color: var(--green); }
+  .substate.warn { color: var(--amber); }
+  .subusage { color: var(--muted); overflow-wrap: anywhere; }
+  .subusage .pct { color: var(--text); font-weight: 650; font-family: var(--mono); font-size: 12px; }
+  .subusage .stale-tag, .subusage .withheld { color: var(--amber); font-weight: 600; }
+  .apichips { display: flex; flex-wrap: wrap; gap: 4px 22px; font-size: 12px; color: var(--muted); }
+  .apichip { white-space: normal; overflow-wrap: anywhere; }
+  .apichip .dot.ok { color: var(--green); }
+  .apichip .dot.warn { color: var(--amber); }
+  .apichip .pct { color: var(--text); font-weight: 650; font-family: var(--mono); font-size: 11.5px; }
+  .subempty { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--amber); margin: 10px 0 0; }
+
+  @media (max-width: 980px) {
+    .subrow { grid-template-columns: minmax(0, 1fr); gap: 2px 0; padding: 7px 0; }
+  }
+
+  /* ---- middle widths: keep 3 zones, stack the row line ---- */
+  @media (max-width: 1240px) {
+    .shell { grid-template-columns: 176px minmax(0, 1fr) 264px; gap: 0 18px; }
+    .cols { display: none; }
+    .rowline {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas: "need need" "name btn" "state state" "doing doing";
+      gap: 6px 12px;
+    }
+    .state { padding-top: 0; }
+  }
+
+  /* ---- mobile: single column, restacked ---- */
+  @media (max-width: 820px) {
+    .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: "header" "left" "main" "right"; padding: 14px 14px 40px; }
+    .rail-inner { position: static; max-height: none; overflow: visible; }
+    .rail-right .rail-inner { height: auto; overflow: visible; display: block; }
+    .feed { overflow-y: visible; flex: none; mask-image: none; -webkit-mask-image: none; }
+    .rail-left .brand { margin-bottom: 6px; }
+    .rail-left h3 { display: inline-block; margin: 8px 10px 4px 0; }
+    .legend { display: none; }
+    main.center { margin-top: 14px; }
+    .rail-right { margin-top: 26px; border-top: 2px solid var(--line); padding-top: 12px; }
+    .answer { font-size: 16.5px; }
+    .subhub { margin: 0 14px; padding-bottom: 36px; }
+  }
+</style>
+</head>
+<body>
+<div id="stale-banner">The board generator has stalled — what you see may be out of date</div>
+<div class="shell">
+  <header class="top">
+    <p class="answer">{{generated_note_html}}</p>
+    <div class="needs-summary">{{needs_summary_html}}</div>
+    <div class="stamp">updated {{snapshot_stamp}} · this page refreshes itself every 90 seconds · the monitor keeps watching in the background</div>
+  </header>
+
+  <aside class="rail rail-left">
+    <div class="rail-inner">
+      <div class="brand">▞▞ Session watch · fleet</div>
+      <button class="btn" id="theme-toggle">theme: auto</button>
+      <h3>Show by status</h3>
+      <div class="chips">
+        <button class="fchip on" data-kind="state" data-value="needs" style="--fs: var(--amber)">Needs you</button>
+        <button class="fchip on" data-kind="state" data-value="work" style="--fs: var(--slate)">Working</button>
+        <button class="fchip on" data-kind="state" data-value="stuck" style="--fs: var(--red)">Stuck</button>
+      </div>
+      <h3>Show by session</h3>
+      <div class="chips">
+{{session_filter_chips_html}}
+      </div>
+      <div class="legend">
+        <h3>How to read this</h3>
+        <p><span class="sw" style="background: var(--amber)"></span> amber = waiting on your input</p>
+        <p><span class="sw" style="background: var(--slate)"></span> slate = working, leave it alone</p>
+        <p><span class="sw" style="background: var(--red)"></span> red = stuck, monitor is on it</p>
+        <p>each session has its own color, used for its name and its tags</p>
+        <p>rows come from every watched machine — the tag under each name says where it runs</p>
+        <p><span class="btn">boxed</span> anything boxed like this is clickable — nothing else is</p>
+      </div>
+    </div>
+  </aside>
+
+  <main class="center">
+    <div class="cols"><span>session</span><span>status</span><span>what it's doing</span><span></span></div>
+    <div class="rows">
+{{rows_html}}
+    </div>
+    <footer class="stamp">this page is assembled mechanically from the monitor's fact file — no language model writes it</footer>
+  </main>
+
+  <aside class="rail rail-right">
+    <div class="rail-inner">
+      <section class="feed">
+        <h2>Updates</h2>
+        <p class="note">what the monitor has done, newest first — tags jump to the session's row</p>
+{{feed_items_html}}
+      </section>
+      <section class="selfcheck">
+        <h2>Monitor self-check</h2>
+        <p class="note">how reliable the monitor's own picture is — not about your sessions</p>
+        <div class="check">
+          <span class="lab" style="color: var(--green)">Solid</span><span>{{selfcheck_solid}}</span>
+          <span class="lab" style="color: var(--red)">Weak</span><span>{{selfcheck_weak}}</span>
+          <span class="lab" style="color: var(--faint)">Unsure</span><span>{{selfcheck_unsure}}</span>
+        </div>
+      </section>
+    </div>
+  </aside>
+</div>
+<section class="subhub">
+  <h2>SubHub capacity</h2>
+  <p class="note">shared subscription and API-key capacity that agents on every watched machine draw from — subscriptions first, then API keys; unverified numbers are never shown as real capacity</p>
+{{subhub_html}}
+</section>
+<script>
+window.__BOARD_GENERATED_AT_EPOCH={{generated_epoch}};
+(function(){
+  var banner = document.getElementById("stale-banner");
+  var ageSeconds = Math.floor(Date.now() / 1000) - window.__BOARD_GENERATED_AT_EPOCH;
+  if (banner && ageSeconds > 180) banner.style.display = "block";
+
+  var root = document.documentElement;
+  var toggle = document.getElementById("theme-toggle");
+  function effectiveTheme(){
+    if (root.dataset.theme === "light" || root.dataset.theme === "dark") return root.dataset.theme;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  function labelToggle(){ toggle.textContent = "theme: " + effectiveTheme(); }
+  try {
+    var saved = localStorage.getItem("board-theme");
+    if (saved === "light" || saved === "dark") root.dataset.theme = saved;
+  } catch (e) {}
+  labelToggle();
+  toggle.addEventListener("click", function(){
+    var next = effectiveTheme() === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("board-theme", next); } catch (e) {}
+    labelToggle();
+  });
+
+  function applyFilters(){
+    var sessOff = {}, stateOff = {};
+    document.querySelectorAll(".fchip").forEach(function(c){
+      if (!c.classList.contains("on")) {
+        if (c.dataset.kind === "session") sessOff[c.dataset.value] = true;
+        else stateOff[c.dataset.value] = true;
+      }
+    });
+    document.querySelectorAll(".row").forEach(function(r){
+      r.classList.toggle("hidden", !!(sessOff[r.dataset.session] || stateOff[r.dataset.state]));
+    });
+    document.querySelectorAll(".fitem").forEach(function(f){
+      var s = f.dataset.session;
+      f.classList.toggle("hidden", !!(s && sessOff[s]));
+    });
+  }
+  document.querySelectorAll(".fchip").forEach(function(c){
+    c.addEventListener("click", function(){ c.classList.toggle("on"); applyFilters(); });
+  });
+})();
+setTimeout(function(){location.reload()},90000)
+</script>
+</body>
+</html>
+
