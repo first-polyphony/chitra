@@ -4,6 +4,18 @@ chitra is deliberately small. Every item below is scoped to justify itself again
 
 This document was previously titled "v1.1" and framed as a wishlist. It's retitled here because most of what's below isn't a loose set of ideas — it's a consolidation of decisions and research already made across this program (PyPI publishing mechanics, a security audit, a routing-preferences design study) plus the pre-existing pull-only beads plan and the self-improvement observer plan, carried over largely unchanged. There is no committed version number attached to this plan; treat it as "what's next," not a numbered release promise.
 
+## In progress
+
+### Completion gate
+
+A deterministic audit of "done"/"complete" claims against todo residue and
+deploy+live-verify evidence gaps — see `docs/evasion-taxonomy.md` and
+`docs/review.md` for the design rationale. Wired into `dispatchd.py` as an
+opt-in pre-delivery check; never auto-closes anything, only classifies and
+surfaces. See [PR #14](https://github.com/first-polyphony/chitra/pull/14).
+
+## v1.1
+
 ---
 
 ## Landed since v0.2.0
@@ -107,6 +119,8 @@ A related project maintains an internal taxonomy of AI-agent deviance patterns (
 - ["Are Your Agents Upward Deceivers?"](https://arxiv.org/abs/2512.04864) — defines "upward deception" (concealing failure, taking unreported actions) with a dedicated benchmark.
 
 Honest caveat: no external paper currently treats "false blockers claiming human intervention is needed" as its own named, benchmarked category — it's an unlabeled subset scattered across the sources above. Any future work here should synthesize across them rather than expect one canonical citation.
+
+chitra's own shipped taxonomy (`docs/evasion-taxonomy.md`) operationalizes a subset of these patterns — todo-residue-under-a-done-claim and evidence-gap-under-a-done-claim — as a concrete, deterministic ruleset (the completion gate, `src/chitra/completion_gate.py`), rather than leaving deviance-pattern awareness as research-only. That shipped taxonomy is a genericized 24-entry ruleset with only two codes actually operationalized today; it is not the internal taxonomy referenced above, and it does not expose anything proprietary about that internal system.
 
 ### Goal discipline (tracking, not generation)
 

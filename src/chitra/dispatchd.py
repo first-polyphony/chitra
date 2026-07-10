@@ -19,7 +19,11 @@ comment below for exactly where that window sits.
 
 No LLM calls in this module's own code path — it delivers orders to LLM-driven
 sessions, but the content/timing/target of every order is decided by the
-caller before it reaches this module; this module is deterministic plumbing only.
+caller before it reaches this module; this module is deterministic plumbing
+only -- including the optional completion-claim audit
+(``chitra.completion_gate``) run in ``process_one_order`` before delivery,
+which is itself pure keyword/field matching, not reasoning. See
+``docs/evasion-taxonomy.md``.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from pathlib import Path
 import structlog
 
 from . import ledger as ledger_mod
+from .completion_gate import evaluate_completion_claim
 from .dispatch import (
     DispatchOrder,
     DispatchResult,
@@ -42,6 +47,7 @@ from .dispatch import (
     dispatch_to_tmux,
 )
 from .routing_config import RoutingConfig, load_routing_config, resolve_routing_hint
+from .taxonomy import load_taxonomy
 
 logger = structlog.get_logger(__name__)
 
@@ -122,6 +128,45 @@ def process_one_order(
         with contextlib.suppress(OSError):
             order_path.replace(processed_dir / order_path.name)
         return None
+
+    # Completion-claim audit: opt-in via completion_todo_items being set (see
+    # DispatchOrder's docstring). A disputed claim is never delivered as an
+    # ordinary "sent" nudge -- it is surfaced as its own distinct status and
+    # the tmux paste never happens. A clean claim proceeds to normal
+    # dispatch below; the CLEAN audit itself (logged) is the proof an
+    # operator can use to authorize a close -- this daemon never closes
+    # anything itself, only classifies and surfaces.
+    if order.completion_todo_items is not None:
+        audit = evaluate_completion_claim(
+            order.completion_todo_items,
+            order.nudge,
+            order.completion_has_deploy_evidence,
+            order.completion_has_live_verify_evidence,
+            load_taxonomy(),
+        )
+        if audit.verdict == "COMPLETION_DISPUTE":
+            logger.warning(
+                "dispatchd_completion_dispute",
+                order_id=order.order_id,
+                session_ref=order.session_ref,
+                summary=audit.summary,
+            )
+            result = DispatchResult(
+                order_id=order.order_id,
+                session_ref=order.session_ref,
+                status=DispatchStatus.COMPLETION_DISPUTE,
+                reason=audit.summary,
+            )
+            _write_result_atomic(results_dir, result)
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            order_path.replace(processed_dir / order_path.name)
+            return result
+        logger.info(
+            "dispatchd_completion_clean",
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            summary=audit.summary,
+        )
 
     lock = LaneLock(order.session_ref, lock_dir=lock_dir)
     try:

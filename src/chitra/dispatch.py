@@ -67,6 +67,15 @@ reconciler may only ADD tasks or REORDER tasks for which this predicate
 returns ``True`` (chitra-dispatched ones). It must never remove, hold, or
 "correct away" a task for which this predicate returns ``False``. A
 growing task list is not drift.
+
+Completion-claim auditing
+--------------------------
+
+``DispatchOrder`` carries three optional fields (``completion_todo_items``,
+``completion_has_deploy_evidence``, ``completion_has_live_verify_evidence``)
+consumed by ``chitra.completion_gate`` and checked in
+``dispatchd.process_one_order`` before delivery. This module still performs
+no reasoning itself — it only carries the typed inputs the gate needs.
 """
 
 from __future__ import annotations
@@ -90,6 +99,8 @@ from typing import Protocol
 
 import structlog
 from pydantic import BaseModel, Field
+
+from chitra.completion_gate import TodoItem
 
 from . import ledger as ledger_mod
 
@@ -132,6 +143,11 @@ class DispatchStatus(enum.StrEnum):
     SENT = "sent"
     BLOCKED = "blocked"
     FAILED = "failed"
+    # A completion-claim audit (chitra.completion_gate.evaluate_completion_claim)
+    # found a gap (todo residue, deferral language, or missing evidence). The
+    # order was never delivered -- a disputed completion claim must never
+    # silently pass through as "sent". See dispatchd.process_one_order.
+    COMPLETION_DISPUTE = "completion_dispute"
 
 
 class DispatchOrder(BaseModel):
@@ -174,6 +190,18 @@ class DispatchOrder(BaseModel):
     input_seen_hash: str | None = None
     snapshot_tail_hash: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    # Optional completion-claim audit inputs. All three are opt-in: a caller
+    # that leaves ``completion_todo_items`` as None is asserting no
+    # completion-gate check applies to this order (e.g. it isn't a done/
+    # complete claim at all), and dispatchd.process_one_order skips the
+    # audit entirely in that case -- existing callers/orders are unaffected.
+    # When ``completion_todo_items`` IS set, dispatchd runs
+    # chitra.completion_gate.evaluate_completion_claim before delivery; see
+    # that module's docstring and docs/evasion-taxonomy.md.
+    completion_todo_items: list[TodoItem] | None = None
+    completion_has_deploy_evidence: bool = False
+    completion_has_live_verify_evidence: bool = False
 
 
 class DispatchResult(BaseModel):
