@@ -4,6 +4,12 @@ chitra is deliberately small. Every item below is scoped to justify itself again
 
 This document was previously titled "v1.1" and framed as a wishlist. It's retitled here because most of what's below isn't a loose set of ideas — it's a consolidation of decisions and research already made across this program (PyPI publishing mechanics, a security audit, a routing-preferences design study) plus the pre-existing pull-only beads plan and the self-improvement observer plan, carried over largely unchanged. There is no committed version number attached to this plan; treat it as "what's next," not a numbered release promise.
 
+## Status (2026-07-10)
+
+Not yet fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](https://github.com/first-polyphony/chitra/pull/24)), the CodeQL-nightly fixes on both this repo ([PR #25](https://github.com/first-polyphony/chitra/pull/25)) and the monorepo ([PR #1975](https://github.com/first-polyphony/polyphony/pull/1975)), the Temporal-workflow-manager decision above ([PR #26](https://github.com/first-polyphony/chitra/pull/26)), and the internal adapter — internal loop self-tuning loop, predecessor monitor reconciliation feed, internal pipeline promotion pipeline — on the monorepo ([PR #1965](https://github.com/first-polyphony/polyphony/pull/1965)).
+
+**Still open:** a mirror-sync PR ([first-polyphony/polyphony#1984](https://github.com/first-polyphony/polyphony/pull/1984)) porting this repo's new `policy_config.py`/`replay_eval.py`/`state_paths.py` into `tools/support/chitra/` — the flat-layout monorepo mirror that the *live* trailhead dispatchd service actually runs — is open, not yet merged. Once it merges, the final step is applying a prepared systemd drop-in and restarting the live service on trailhead so it actually picks up the new policy config; that restart is deliberately held for a moment with the operator present, not run unattended.
+
 ## In progress
 
 ### Completion gate
