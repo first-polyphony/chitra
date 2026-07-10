@@ -125,6 +125,10 @@ _IDLE_INPUT_LINE_RE = re.compile(
 )
 _CLAUDE_CODE_HORIZONTAL_RULE_RE = re.compile(r"^─+$")
 _CLAUDE_CODE_INPUT_ROW_RE = re.compile(r"^❯(?P<draft>.*)$")
+# SGR (Select Graphic Rendition) escape — the subset of ANSI escapes that
+# carries intensity styling. Used to tell a dim/faint placeholder hint (SGR 2)
+# apart from a normal-intensity operator draft on a Claude Code input row.
+_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 # Directive-voice guard: chitra relays instructions, it never speaks AS the
 # operator or claims the operator's authority. A nudge that attributes itself
@@ -444,9 +448,16 @@ def strip_terminal_controls(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text).strip()
 
 
-def _claude_code_input_row(captured_lines: list[str]) -> tuple[str, str] | None:
-    """Return a Claude Code input row and its draft when its TUI shape matches."""
-    lines = [strip_terminal_controls(str(line)) for line in captured_lines]
+def _claude_code_input_row(captured_lines: list[str]) -> tuple[str, str, str] | None:
+    """Return a Claude Code input row when its TUI shape matches.
+
+    Returns ``(stripped_line, stripped_draft, raw_line)``: the row with
+    terminal controls stripped (for display/matching), the captured draft
+    text, and the original escape-preserving line (so callers can inspect the
+    ANSI styling that distinguishes a dim placeholder hint from a real draft).
+    """
+    raw = [str(line) for line in captured_lines]
+    lines = [strip_terminal_controls(line) for line in raw]
     for index in range(1, len(lines) - 1):
         if not (
             _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index - 1]) and _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index + 1])
@@ -454,8 +465,55 @@ def _claude_code_input_row(captured_lines: list[str]) -> tuple[str, str] | None:
             continue
         match = _CLAUDE_CODE_INPUT_ROW_RE.fullmatch(lines[index])
         if match:
-            return lines[index], match.group("draft")
+            return lines[index], match.group("draft"), raw[index]
     return None
+
+
+def _input_row_draft_is_all_dim(raw_line: str) -> bool:
+    """Return True iff every visible char after the ``❯`` prompt marker is dim.
+
+    Claude Code paints its idle placeholder hint (e.g. ``Try "how does X
+    work?"``) in faint/dim text (ANSI SGR 2), whereas a real unsubmitted
+    operator draft is normal intensity. A plain ``tmux capture-pane`` (no
+    ``-e``) strips color, so the two are indistinguishable by text alone; this
+    reads the escape-aware capture instead.
+
+    Fails closed: returns False when there is no faint styling at all (a
+    normal-intensity draft, or a capture with no escape sequences), so an
+    ambiguous row is treated as a real draft and dispatch stays blocked.
+    """
+    faint = False
+    seen_prompt = False
+    saw_visible = False
+    i = 0
+    n = len(raw_line)
+    while i < n:
+        sgr = _SGR_RE.match(raw_line, i)
+        if sgr:
+            params = sgr.group(1)
+            for code in params.split(";") if params else [""]:
+                if code in ("", "0", "22"):
+                    faint = False
+                elif code == "2":
+                    faint = True
+            i = sgr.end()
+            continue
+        esc = _ANSI_ESCAPE_RE.match(raw_line, i)
+        if esc:
+            i = esc.end()
+            continue
+        ch = raw_line[i]
+        i += 1
+        if not seen_prompt:
+            if ch == "❯":
+                seen_prompt = True
+            continue
+        if ch.isspace():
+            continue
+        saw_visible = True
+        if not faint:
+            return False
+    return saw_visible
 
 
 def normalized_dispatch_text(text: str) -> str:
@@ -498,9 +556,10 @@ def pane_input_check(
     """Check whether a pane is idle and safe to dispatch into.
 
     Returns ``ok=True`` when the tail hash matches a known idle hash, the
-    last line is a bare shell prompt, or a Claude Code TUI input row is empty.
-    Returns ``ok=False`` with a ``blocked:`` reason otherwise — never silently
-    overwrite a draft.
+    last line is a bare shell prompt, or a Claude Code TUI input row is empty
+    or shows only a dim placeholder hint (a fresh session's ghost text, ANSI
+    SGR 2). Returns ``ok=False`` with a ``blocked:`` reason otherwise — never
+    silently overwrite a real, normal-intensity draft.
     """
     current_hash = pane_capture_tail_hash(captured_lines)
     if not captured_lines or not current_hash:
@@ -510,9 +569,11 @@ def pane_input_check(
         return PaneInputCheck(True, "idle: pane capture matches known idle baseline", current_hash, "")
     claude_code_input = _claude_code_input_row(captured_lines)
     if claude_code_input is not None:
-        input_line, draft = claude_code_input
+        input_line, draft, raw_line = claude_code_input
         if not draft.strip():
             return PaneInputCheck(True, "idle: Claude Code TUI input row has no draft input", current_hash, input_line)
+        if _input_row_draft_is_all_dim(raw_line):
+            return PaneInputCheck(True, "idle: Claude Code TUI input row shows only a dim placeholder hint", current_hash, input_line)
         return PaneInputCheck(False, "blocked: unsubmitted operator draft detected", current_hash, input_line)
     last_line = strip_terminal_controls(str(captured_lines[-1]))
     if _IDLE_INPUT_LINE_RE.match(last_line):
@@ -528,10 +589,15 @@ def pane_input_check(
 
 
 def capture_local(pane_id: str, lines: int, runner: TmuxRunner | None = None) -> list[str]:
-    """Capture the tail of a local tmux pane as a list of stripped lines."""
+    """Capture the tail of a local tmux pane as a list of stripped lines.
+
+    ``-e`` preserves ANSI escape sequences so ``pane_input_check`` can tell a
+    dim placeholder hint apart from a real draft; the escapes are stripped
+    downstream wherever plain text is needed (``strip_terminal_controls``).
+    """
     run = runner or run_cmd
     start = "-" if lines < 0 else f"-{lines}"
-    proc = run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", start], timeout=5)
+    proc = run(["tmux", "capture-pane", "-e", "-p", "-t", pane_id, "-S", start], timeout=5)
     if proc.returncode != 0:
         return []
     captured = [line.rstrip() for line in proc.stdout.splitlines() if line.strip()]
@@ -543,7 +609,7 @@ def capture_remote(host: str, pane_id: str, lines: int, runner: TmuxRunner | Non
     run = runner or run_cmd
     quoted_pane = shlex.quote(pane_id)
     start = "-" if lines < 0 else f"-{int(lines)}"
-    cmd = ssh_command(host, f"tmux capture-pane -p -t {quoted_pane} -S {shlex.quote(start)} 2>/dev/null || true")
+    cmd = ssh_command(host, f"tmux capture-pane -e -p -t {quoted_pane} -S {shlex.quote(start)} 2>/dev/null || true")
     proc = run(cmd, timeout=8)
     if proc.returncode != 0:
         return []
