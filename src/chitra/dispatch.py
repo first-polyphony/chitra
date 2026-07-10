@@ -12,13 +12,20 @@ implementation that had two known bugs, both fixed here:
 (b) A pane in tmux copy-mode (``pane_in_mode=1``) silently eats all input.
     The original had no check for this. This module checks
     ``tmux display-message -p -t <target> '#{pane_in_mode}'`` and, if ``1``,
-    runs ``tmux send-keys -X cancel`` and waits ~0.3s before injecting.
+    runs ``tmux send-keys -X cancel`` and waits ~0.3s before injecting. The
+    check runs against the actual target host: a plain local ``tmux`` call
+    for a local target, or the identical command wrapped in ``ssh_command``
+    for a remote one — checking the local tmux server for a remote target's
+    copy-mode state would report on the wrong tmux server entirely.
 
 Post-send verification uses transcript-grep against the target session's
 own ``~/.claude/projects/*/*.jsonl`` transcript (found by recency + content
 match, explicitly excluding the caller's own transcript), replacing the
 weaker pane-capture confirmation: a spinner or status line is not evidence
-that a message was actually received; the transcript is.
+that a message was actually received; the transcript is. For a remote
+target this grep runs over ssh against the **target host's** filesystem
+(``find_recent_transcript_remote``) — the transcript proving a remote
+delivery lives on the remote host, never on the machine chitra runs on.
 
 Single-writer rule
 -----------------
@@ -531,33 +538,54 @@ def capture_dispatch_pane(
 def pane_in_mode(
     pane: str,
     *,
+    host: str = "",
     runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
 ) -> bool:
     """Return True if the target pane is in tmux copy-mode (pane_in_mode=1).
 
     A pane in copy-mode silently eats all input — dispatching into it
     destroys the nudge. This is bug fix (b): the source has no such check.
+
+    ``host`` selects which tmux server is checked: the default (``""``,
+    treated as local) or any host that ``is_local_host`` recognizes as this
+    machine runs the check via a plain local ``tmux`` invocation; any other
+    host runs the identical check over ssh via ``ssh_command``, mirroring
+    ``capture_dispatch_pane``'s local/remote split. Checking the local tmux
+    server for a remote target's copy-mode state is meaningless — it reports
+    on the wrong tmux server entirely.
     """
     run = runner or run_cmd
-    proc = run(["tmux", "display-message", "-p", "-t", pane, "#{pane_in_mode}"], timeout=5)
+    if not host or is_local_host(host, local_extra):
+        cmd = ["tmux", "display-message", "-p", "-t", pane, "#{pane_in_mode}"]
+    else:
+        cmd = ssh_command(host, f"tmux display-message -p -t {shlex.quote(pane)} '#{{pane_in_mode}}'")
+    proc = run(cmd, timeout=5)
     return proc.returncode == 0 and proc.stdout.strip() == "1"
 
 
 def cancel_copy_mode(
     pane: str,
     *,
+    host: str = "",
     runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
     wait_seconds: float = PANE_IN_MODE_CANCEL_WAIT_SECONDS,
 ) -> bool:
     """Cancel tmux copy-mode on a pane and wait briefly.
 
     Returns True if a cancel command was issued. The caller should wait
-    ``wait_seconds`` (default 0.3s) before injecting.
+    ``wait_seconds`` (default 0.3s) before injecting. ``host`` selects local
+    vs ssh-wrapped execution, exactly like ``pane_in_mode``.
     """
     run = runner or run_cmd
-    proc = run(["tmux", "send-keys", "-t", pane, "-X", "cancel"], timeout=5)
+    if not host or is_local_host(host, local_extra):
+        cmd = ["tmux", "send-keys", "-t", pane, "-X", "cancel"]
+    else:
+        cmd = ssh_command(host, f"tmux send-keys -t {shlex.quote(pane)} -X cancel")
+    proc = run(cmd, timeout=5)
     if proc.returncode != 0:
-        logger.warning("cancel_copy_mode_failed", pane=pane, stderr=proc.stderr.strip())
+        logger.warning("cancel_copy_mode_failed", pane=pane, host=host, stderr=proc.stderr.strip())
         return False
     if wait_seconds > 0:
         time.sleep(wait_seconds)
@@ -567,17 +595,21 @@ def cancel_copy_mode(
 def ensure_pane_not_in_mode(
     pane: str,
     *,
+    host: str = "",
     runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
 ) -> bool:
     """Ensure a pane is not in copy-mode; cancel if it is.
 
     Returns True if the pane is dispatch-ready (was never in copy-mode, or
     was and is now cancelled). Returns False if copy-mode was detected and
-    could not be cancelled.
+    could not be cancelled. ``host`` is forwarded to ``pane_in_mode`` /
+    ``cancel_copy_mode`` so the check runs against the actual target host
+    (local or ssh-wrapped) rather than always the local tmux server.
     """
-    if not pane_in_mode(pane, runner=runner):
+    if not pane_in_mode(pane, host=host, runner=runner, local_extra=local_extra):
         return True
-    return cancel_copy_mode(pane, runner=runner)
+    return cancel_copy_mode(pane, host=host, runner=runner, local_extra=local_extra)
 
 
 # ---------------------------------------------------------------------------
@@ -730,20 +762,103 @@ def find_recent_transcript(
     return candidates[0][1]
 
 
+_REMOTE_CLAUDE_PROJECTS_DEFAULT = "~/.claude/projects"
+
+
+def _remote_transcript_grep_command(marker: str, root: str, recency_seconds: float, max_bytes: int = 262144) -> str:
+    """Build a single ssh-safe shell script that finds the most recently
+    modified ``*.jsonl`` transcript(s) under ``root`` (one level of project
+    subdirectories, mirroring ``_candidate_transcript_dirs``) modified within
+    ``recency_seconds``, greps each candidate's tail for ``marker``, and
+    prints ``"<mtime> <path>"`` for every match. Uses ``find -mmin`` (minutes,
+    portable across GNU and BSD ``find``) rather than GNU-only flags, and
+    tries GNU ``stat -c`` then BSD ``stat -f`` so it works whether the remote
+    host is Linux or macOS.
+    """
+    quoted_marker = shlex.quote(marker)
+    quoted_root = shlex.quote(root)
+    minutes = max(1, -(-int(recency_seconds) // 60))  # ceil division, minimum 1 minute
+    return (
+        f"for f in $(find {quoted_root} -mindepth 2 -maxdepth 2 -name '*.jsonl' "
+        f"-mmin -{minutes} 2>/dev/null); do "
+        f"if tail -c {max_bytes} \"$f\" 2>/dev/null | grep -qF -- {quoted_marker}; then "
+        f"stat -c '%Y %n' \"$f\" 2>/dev/null || stat -f '%m %N' \"$f\" 2>/dev/null; "
+        f"fi; done"
+    )
+
+
+def find_recent_transcript_remote(
+    host: str,
+    marker: str,
+    *,
+    root: str | None = None,
+    recency_seconds: float = 300.0,
+    runner: TmuxRunner | None = None,
+) -> str | None:
+    """Remote counterpart to ``find_recent_transcript``: find the most
+    recently modified transcript containing ``marker`` on ``host`` over ssh.
+
+    Returns the remote path as a string (there is no local ``Path`` for it),
+    or ``None`` if no match is found or the ssh call fails.
+    """
+    run = runner or run_cmd
+    remote_root = root or _env("CHITRA_REMOTE_CLAUDE_PROJECTS", _REMOTE_CLAUDE_PROJECTS_DEFAULT)
+    script = _remote_transcript_grep_command(marker, remote_root, recency_seconds)
+    proc = run(ssh_command(host, script), timeout=10)
+    if proc.returncode != 0:
+        return None
+    candidates: list[tuple[float, str]] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        mtime_str, _, path = line.partition(" ")
+        try:
+            candidates.append((float(mtime_str), path))
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return candidates[0][1]
+
+
 def transcript_confirms_nudge(
     nudge: str,
     *,
+    host: str = "",
     projects_root: Path | None = None,
     exclude_paths: set[Path] | None = None,
     recency_seconds: float = 300.0,
     now_ts: float | None = None,
-) -> tuple[bool, Path | None]:
+    runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
+    remote_root: str | None = None,
+) -> tuple[bool, Path | str | None]:
     """Return ``(confirmed, transcript_path)`` by grepping transcripts.
 
     Replaces the source's ``pane_capture_confirms_nudge`` — pane capture is
     weaker evidence (a spinner or status line is not confirmation).
+
+    ``host`` selects local vs remote verification: the default (``""``,
+    treated as local, preserving prior behavior for existing callers) or any
+    host ``is_local_host`` recognizes searches this machine's own
+    ``~/.claude/projects`` (or ``projects_root``). Any other host greps the
+    **target** host's transcripts over ssh instead — a remote delivery's
+    transcript lives on the remote host's filesystem, not the caller's; the
+    local-only search this function used to perform would never confirm a
+    genuine remote delivery.
     """
     marker = nudge_confirmation_marker(nudge)
+    if host and not is_local_host(host, local_extra):
+        remote_path = find_recent_transcript_remote(
+            host,
+            marker,
+            root=remote_root,
+            recency_seconds=recency_seconds,
+            runner=runner,
+        )
+        return (remote_path is not None, remote_path)
     path = find_recent_transcript(
         marker,
         projects_root=projects_root,
@@ -770,20 +885,31 @@ def liveness_check(
     A live lane MUST be dispatched via the tmux-injection recipe, never via
     ``claude -p --resume``. This is the single-writer-rule guard. The actual
     ``-p --resume`` fallback path (for confirmed DETACHED/STOPPED sessions)
-    is out of scope for this build — only the enforcement stub is provided.
+    is out of scope for this build — only the enforcement check is provided.
 
     The check inspects whether the lane's tmux session has any attached
-    client. A more thorough impl (scanning for a running ``claude`` process
-    bound to the session id) is left for the fallback-path build.
+    client — locally via a direct ``tmux list-clients`` call, or over ssh
+    (mirroring ``capture_remote``/``ssh_command``) for a remote host. This
+    used to unconditionally return ``True`` for any remote host ("assume
+    live; the fallback path is not yet built") — that was never a real
+    liveness check, just an enforcement placeholder, and remote dispatch is
+    now chitra's primary path, so a real check is required here. A more
+    thorough impl (scanning for a running ``claude`` process bound to the
+    session id, rather than just an attached tmux client) is left for the
+    fallback-path build.
     """
     run = runner or run_cmd
     parts = session_ref.split(":")
     if len(parts) != 3:
         return False
     host, session, _pane = parts
-    if not is_local_host(host, local_extra):
-        return True  # remote: assume live; the fallback path is not yet built
-    proc = run(["tmux", "list-clients", "-t", session, "-F", "#{session_name}"], timeout=5)
+    if is_local_host(host, local_extra):
+        proc = run(["tmux", "list-clients", "-t", session, "-F", "#{session_name}"], timeout=5)
+    else:
+        proc = run(
+            ssh_command(host, f"tmux list-clients -t {shlex.quote(session)} -F '#{{session_name}}'"),
+            timeout=8,
+        )
     if proc.returncode != 0:
         return False
     return bool(proc.stdout.strip())
@@ -999,8 +1125,11 @@ def dispatch_to_tmux(
             tail_hash=pre_check.tail_hash,
         )
 
-    # Bug fix (b): copy-mode detection + cancel.
-    if not ensure_pane_not_in_mode(pane, runner=run):
+    # Bug fix (b): copy-mode detection + cancel, run against the actual
+    # target host (local or ssh-wrapped) — checking the local tmux server
+    # for a remote target's copy-mode state would report on the wrong tmux
+    # server entirely.
+    if not ensure_pane_not_in_mode(pane, host=host, runner=run, local_extra=local_extra):
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
@@ -1035,10 +1164,16 @@ def dispatch_to_tmux(
     sleep(verify_wait_seconds)
 
     # Transcript-grep verification (replaces pane-capture confirmation).
+    # host-aware: for a remote target, the delivered nudge lands in a
+    # transcript on the remote host, not the local one, so verification
+    # must run over ssh against that host — see transcript_confirms_nudge.
     confirmed, transcript_path = transcript_confirms_nudge(
         order.nudge,
+        host=host,
         projects_root=projects_root,
         exclude_paths=exclude_transcripts,
+        runner=run,
+        local_extra=local_extra,
     )
     marker = nudge_confirmation_marker(order.nudge)
     if confirmed:
