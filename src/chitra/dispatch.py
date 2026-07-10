@@ -104,6 +104,8 @@ _IDLE_INPUT_LINE_RE = re.compile(
     r"(?:[\w.-]+@[\w.-]+(?::[^$#%>]*)?)?\s*"
     r"(?:[$#%>]|>>>|\.\.\.|In \[\d+\]:)\s*$"
 )
+_CLAUDE_CODE_HORIZONTAL_RULE_RE = re.compile(r"^─+$")
+_CLAUDE_CODE_INPUT_ROW_RE = re.compile(r"^❯(?P<draft>.*)$")
 
 # Directive-voice guard: chitra relays instructions, it never speaks AS the
 # operator or claims the operator's authority. A nudge that attributes itself
@@ -374,6 +376,21 @@ def strip_terminal_controls(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text).strip()
 
 
+def _claude_code_input_row(captured_lines: list[str]) -> tuple[str, str] | None:
+    """Return a Claude Code input row and its draft when its TUI shape matches."""
+    lines = [strip_terminal_controls(str(line)) for line in captured_lines]
+    for index in range(1, len(lines) - 1):
+        if not (
+            _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index - 1])
+            and _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index + 1])
+        ):
+            continue
+        match = _CLAUDE_CODE_INPUT_ROW_RE.fullmatch(lines[index])
+        if match:
+            return lines[index], match.group("draft")
+    return None
+
+
 def normalized_dispatch_text(text: str) -> str:
     """Collapse whitespace and strip terminal controls for comparison."""
     return re.sub(r"\s+", " ", strip_terminal_controls(text)).strip()
@@ -412,9 +429,10 @@ def pane_input_check(
 ) -> PaneInputCheck:
     """Check whether a pane is idle and safe to dispatch into.
 
-    Returns ``ok=True`` when the tail hash matches a known idle hash or the
-    last line is a bare prompt with no draft. Returns ``ok=False`` with a
-    ``blocked:`` reason otherwise — never silently overwrite a draft.
+    Returns ``ok=True`` when the tail hash matches a known idle hash, the
+    last line is a bare shell prompt, or a Claude Code TUI input row is empty.
+    Returns ``ok=False`` with a ``blocked:`` reason otherwise — never silently
+    overwrite a draft.
     """
     current_hash = pane_capture_tail_hash(captured_lines)
     if not captured_lines or not current_hash:
@@ -422,6 +440,12 @@ def pane_input_check(
     known_idle_hashes = {str(item).strip() for item in (baseline_hash, snapshot_hash, seen_hash) if str(item or "").strip()}
     if current_hash in known_idle_hashes:
         return PaneInputCheck(True, "idle: pane capture matches known idle baseline", current_hash, "")
+    claude_code_input = _claude_code_input_row(captured_lines)
+    if claude_code_input is not None:
+        input_line, draft = claude_code_input
+        if not draft.strip():
+            return PaneInputCheck(True, "idle: Claude Code TUI input row has no draft input", current_hash, input_line)
+        return PaneInputCheck(False, "blocked: unsubmitted operator draft detected", current_hash, input_line)
     last_line = strip_terminal_controls(str(captured_lines[-1]))
     if _IDLE_INPUT_LINE_RE.match(last_line):
         return PaneInputCheck(True, "idle: prompt line has no draft input", current_hash, last_line)
