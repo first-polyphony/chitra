@@ -23,6 +23,7 @@ from chitra.dispatch import (
     dispatch_to_tmux,
     ensure_pane_not_in_mode,
     find_recent_transcript,
+    find_recent_transcript_remote,
     is_chitra_dispatched_task,
     liveness_check,
     pane_in_mode,
@@ -103,6 +104,53 @@ def test_cancel_copy_mode_returns_false_on_failure() -> None:
     assert cancel_copy_mode("session:0.0", runner=runner, wait_seconds=0) is False
 
 
+def test_pane_in_mode_checks_remote_host_over_ssh_not_local_tmux() -> None:
+    """Regression test for the copy-mode-checks-the-wrong-host bug: a remote
+    target's copy-mode state must be checked via ssh against the remote
+    tmux server, never via a bare local ``tmux`` invocation."""
+    runner = FakeRunner(default=fake_completed(0, "1\n", ""))
+    result = pane_in_mode("f3:0.0", host="otherhost", runner=runner, local_extra={"localhost"})
+    assert result is True
+    assert len(runner.calls) == 1
+    cmd = runner.calls[0]
+    assert cmd[0] == "ssh"
+    assert cmd[-2] == "otherhost"
+    assert "tmux display-message -p -t f3:0.0" in cmd[-1]
+
+
+def test_pane_in_mode_local_host_uses_bare_tmux_call() -> None:
+    runner = FakeRunner(default=fake_completed(0, "0\n", ""))
+    result = pane_in_mode("f3:0.0", host="localhost", runner=runner, local_extra={"localhost"})
+    assert result is False
+    assert runner.calls == [["tmux", "display-message", "-p", "-t", "f3:0.0", "#{pane_in_mode}"]]
+
+
+def test_cancel_copy_mode_cancels_remote_host_over_ssh() -> None:
+    runner = FakeRunner(default=fake_completed(0, "", ""))
+    ok = cancel_copy_mode("f3:0.0", host="otherhost", runner=runner, local_extra={"localhost"}, wait_seconds=0)
+    assert ok is True
+    assert len(runner.calls) == 1
+    cmd = runner.calls[0]
+    assert cmd[0] == "ssh"
+    assert cmd[-2] == "otherhost"
+    assert "tmux send-keys -t f3:0.0 -X cancel" in cmd[-1]
+
+
+def test_ensure_pane_not_in_mode_cancels_remote_host_over_ssh_when_in_copy_mode() -> None:
+    calls: list[list[str]] = []
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[0] == "ssh" and "display-message" in cmd[-1]:
+            return fake_completed(0, "1\n", "")
+        return fake_completed(0, "", "")
+
+    ok = ensure_pane_not_in_mode("f3:0.0", host="otherhost", runner=runner, local_extra={"localhost"})
+    assert ok is True
+    assert all(cmd[0] == "ssh" and cmd[-2] == "otherhost" for cmd in calls)
+    assert any("send-keys" in cmd[-1] and "-X cancel" in cmd[-1] for cmd in calls)
+
+
 # --- (2) -p is present in the constructed paste-buffer command ------------
 
 
@@ -155,6 +203,70 @@ def test_transcript_confirms_nudge_excludes_given_path(tmp_path: Path) -> None:
     )
     assert confirmed is False
     assert path is None
+
+
+def test_find_recent_transcript_remote_parses_matching_line_from_ssh_output() -> None:
+    """Regression test: a remote delivery's transcript lives on the target
+    host's filesystem, not the local one -- verification must grep the
+    remote host over ssh, and this is what dispatch_to_tmux relies on to
+    ever reach SENT (and therefore get a ledger entry) for a remote order."""
+    runner = FakeRunner(default=fake_completed(0, "1720000000 /home/ubuntu/.claude/projects/foo/abc.jsonl\n", ""))
+    path = find_recent_transcript_remote("otherhost", "please check lane f3 status now", runner=runner)
+    assert path == "/home/ubuntu/.claude/projects/foo/abc.jsonl"
+    assert len(runner.calls) == 1
+    cmd = runner.calls[0]
+    assert cmd[0] == "ssh"
+    assert cmd[-2] == "otherhost"
+    assert "please check lane f3 status now" in cmd[-1]
+
+
+def test_find_recent_transcript_remote_picks_most_recent_of_multiple_matches() -> None:
+    stdout = "1000 /old/path.jsonl\n2000 /new/path.jsonl\n"
+    runner = FakeRunner(default=fake_completed(0, stdout, ""))
+    path = find_recent_transcript_remote("otherhost", "marker text", runner=runner)
+    assert path == "/new/path.jsonl"
+
+
+def test_find_recent_transcript_remote_returns_none_on_no_match() -> None:
+    runner = FakeRunner(default=fake_completed(0, "", ""))
+    assert find_recent_transcript_remote("otherhost", "marker text", runner=runner) is None
+
+
+def test_find_recent_transcript_remote_returns_none_on_ssh_failure() -> None:
+    runner = FakeRunner(default=fake_completed(255, "", "ssh: connect timed out"))
+    assert find_recent_transcript_remote("otherhost", "marker text", runner=runner) is None
+
+
+def test_transcript_confirms_nudge_uses_remote_grep_for_a_remote_host() -> None:
+    runner = FakeRunner(default=fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n", ""))
+    confirmed, path = transcript_confirms_nudge(
+        "please check lane f3 status now",
+        host="otherhost",
+        runner=runner,
+        local_extra={"localhost"},
+    )
+    assert confirmed is True
+    assert path == "/remote/projects/foo/abc.jsonl"
+
+
+def test_transcript_confirms_nudge_stays_local_for_a_local_host(tmp_path: Path) -> None:
+    """host="" (default) or a recognized-local host must not change existing
+    local-only behavior."""
+    projects_root = tmp_path / "projects"
+    session_dir = projects_root / "some-project"
+    session_dir.mkdir(parents=True)
+    transcript = session_dir / "abc123.jsonl"
+    transcript.write_text(json.dumps({"text": "please check lane f3 status now"}) + "\n", encoding="utf-8")
+
+    confirmed, path = transcript_confirms_nudge(
+        "please check lane f3 status now",
+        host="localhost",
+        projects_root=projects_root,
+        local_extra={"localhost"},
+        now_ts=time.time(),
+    )
+    assert confirmed is True
+    assert path == transcript
 
 
 def test_find_recent_transcript_respects_recency_window(tmp_path: Path) -> None:
@@ -226,12 +338,28 @@ def test_liveness_check_returns_false_for_malformed_session_ref() -> None:
     assert runner.calls == []
 
 
-def test_liveness_check_assumes_remote_host_is_live() -> None:
-    runner = FakeRunner()
+def test_liveness_check_true_when_remote_session_has_attached_client() -> None:
+    runner = FakeRunner(default=fake_completed(0, "sess\n", ""))
     result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
     assert result is True
-    # Remote path never shells out to inspect the (inaccessible) session.
-    assert runner.calls == []
+    # Real ssh-wrapped check, not the old "assume remote is live" stub.
+    assert len(runner.calls) == 1
+    cmd = runner.calls[0]
+    assert cmd[0] == "ssh"
+    assert cmd[-2] == "otherhost"
+    assert "tmux list-clients -t sess" in cmd[-1]
+
+
+def test_liveness_check_false_when_remote_session_has_no_attached_client() -> None:
+    runner = FakeRunner(default=fake_completed(0, "", ""))
+    result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
+    assert result is False
+
+
+def test_liveness_check_false_when_remote_ssh_call_fails() -> None:
+    runner = FakeRunner(default=fake_completed(255, "", "ssh: connect to host otherhost port 22: Connection refused"))
+    result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
+    assert result is False
 
 
 def test_liveness_check_true_when_local_session_has_attached_client() -> None:
@@ -429,6 +557,39 @@ def test_dispatch_to_tmux_sends_a_clean_order(tmp_path: Path) -> None:
         sleep=lambda _seconds: None,
     )
     assert result.status == DispatchStatus.SENT
+
+
+def test_dispatch_to_tmux_sends_a_clean_order_to_a_remote_host() -> None:
+    """End-to-end: chitra's real deployment dispatches FROM one host (e.g.
+    trailhead) and delivers over ssh into another (e.g. otherhost). Every step
+    -- copy-mode check, paste, and transcript verification -- must run
+    against the remote host, never the local one, for a remote target to
+    ever legitimately reach SENT."""
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        assert cmd[0] == "ssh", f"remote target must never shell out locally: {cmd}"
+        assert cmd[-2] == "otherhost"
+        remote_cmd = cmd[-1]
+        if "capture-pane" in remote_cmd:
+            return fake_completed(0, "ubuntu@otherhost:~$ ", "")
+        if "display-message" in remote_cmd:
+            return fake_completed(0, "0\n", "")
+        if "paste-buffer" in remote_cmd:
+            return fake_completed(0, "", "")
+        if "find " in remote_cmd:
+            return fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n", "")
+        return fake_completed(0, "", "")
+
+    order = DispatchOrder(order_id="o1", session_ref="otherhost:f3:0.0", nudge="Stop editing main and open a PR.")
+    result = dispatch_to_tmux(
+        order,
+        runner=runner,
+        local_extra={"localhost"},
+        allowed_hosts={"otherhost"},
+        sleep=lambda _seconds: None,
+    )
+    assert result.status == DispatchStatus.SENT
+    assert result.transcript_path == "/remote/projects/foo/abc.jsonl"
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,57 @@ def test_run_once_processes_pending_orders_and_moves_them(tmp_path: Path, monkey
     assert (queue_dir / "results" / "ord-1.json").exists()
     # A successful send is signed and logged automatically, no extra step.
     assert (tmp_path / "ledger.jsonl").exists()
+
+
+def test_remote_delivery_writes_a_ledger_entry_same_as_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remote deliveries are chitra's primary path now, not a rarely-used
+    side path -- a SENT result for a remote-host order must sign and append
+    a ledger entry exactly like a local one. Runs the real dispatch_to_tmux
+    (not mocked) against a fake ssh-wrapped runner so this also exercises the
+    remote copy-mode-check / paste / transcript-verify path end to end."""
+    import chitra.dispatch as dispatch_mod
+
+    def fake_completed(returncode: int, stdout: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+    def fake_runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        assert cmd[0] == "ssh", f"remote target must never shell out locally: {cmd}"
+        assert cmd[-2] == "otherhost"
+        remote_cmd = cmd[-1]
+        if "capture-pane" in remote_cmd:
+            return fake_completed(0, "ubuntu@otherhost:~$ ")
+        if "display-message" in remote_cmd:
+            return fake_completed(0, "0\n")
+        if "paste-buffer" in remote_cmd:
+            return fake_completed(0, "")
+        if "find " in remote_cmd:
+            return fake_completed(0, "1720000000 /remote/projects/foo/abc.jsonl\n")
+        return fake_completed(0, "")
+
+    # dispatch_to_tmux resolves its default runner (run_cmd) as a module
+    # global at call time, so patching it here reaches the real (unmocked)
+    # dispatch_to_tmux invoked by process_one_order -- this is an end-to-end
+    # test of the fix, not a re-mock of dispatch_to_tmux itself.
+    monkeypatch.setattr(dispatch_mod, "run_cmd", fake_runner)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-remote-1", session_ref="otherhost:f3:0.0", nudge="Stop editing main and open a PR.")
+    _write_order(queue_dir / "orders", order)
+
+    monkeypatch.setenv("REMOTE_DISPATCH_HOSTS", "otherhost")
+    ledger_path = tmp_path / "ledger.jsonl"
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=ledger_path,
+        ledger_key_path=tmp_path / "ledger.key",
+    )
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+    assert ledger_path.exists()
+    entry = ledger_mod.LedgerEntry.model_validate_json(ledger_path.read_text(encoding="utf-8").splitlines()[0])
+    assert entry.session_ref == "otherhost:f3:0.0"
 
 
 def test_partially_processed_order_is_not_reprocessed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
