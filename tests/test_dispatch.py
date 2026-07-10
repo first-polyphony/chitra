@@ -26,6 +26,7 @@ from chitra.dispatch import (
     is_chitra_dispatched_task,
     liveness_check,
     pane_in_mode,
+    pane_input_check,
     paste_nudge_to_local_tmux,
     remote_tmux_paste_command,
     tmux_pane_target,
@@ -289,6 +290,56 @@ def test_dispatch_to_tmux_qualifies_pane_with_session_before_any_tmux_call() -> 
 
     assert seen_targets, "expected at least one -t target to have been recorded"
     assert all(t == "f3:0.0" for t in seen_targets), seen_targets
+
+
+# --- pane_input_check ------------------------------------------------------
+
+
+def test_pane_input_check_allows_an_empty_claude_code_tui_input_row() -> None:
+    check = pane_input_check(
+        [
+            "Claude Code output",
+            "  ──────────────────────",
+            "    ❯    ",
+            "  ──────────────────────",
+            "⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+    )
+
+    assert check.ok is True
+    assert check.last_line == "❯"
+
+
+def test_pane_input_check_blocks_a_claude_code_tui_draft() -> None:
+    check = pane_input_check(
+        [
+            "Claude Code output",
+            "──────────────────────",
+            "❯ some text",
+            "──────────────────────",
+            "⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+    )
+
+    assert check.ok is False
+    assert check.reason == "blocked: unsubmitted operator draft detected"
+    assert check.last_line == "❯ some text"
+
+
+@pytest.mark.parametrize("prompt", ["ubuntu@host:~$ ", "(venv) user@host:~$ ", ">>> "])
+def test_pane_input_check_keeps_shell_prompt_idle_detection(prompt: str) -> None:
+    check = pane_input_check(["previous output", prompt])
+
+    assert check.ok is True
+    assert check.last_line == prompt.strip()
+
+
+def test_pane_input_check_fails_closed_for_an_unrecognizable_pane_shape() -> None:
+    check = pane_input_check(["Claude Code output", "❯ ", "status line"])
+
+    assert check.ok is False
+    assert check.reason == "blocked: unsubmitted operator draft detected"
+    assert check.last_line == "status line"
 
 
 # --- dispatch_to_tmux end-to-end (fake runner) ----------------------------
