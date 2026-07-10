@@ -113,3 +113,11 @@ def test_write_facts_creates_board_dir_if_missing(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert (board_dir / "facts.json").exists()
     assert result["backup"] is None
+
+
+def test_required_selfcheck_keys_can_be_customized_or_disabled() -> None:
+    facts = _valid_facts()
+    facts["selfcheck"] = {"custom": "ok"}
+    assert validate_facts(facts, required_selfcheck_keys=frozenset({"custom"})).ok is True
+    facts.pop("selfcheck")
+    assert validate_facts(facts, required_selfcheck_keys=None).ok is True

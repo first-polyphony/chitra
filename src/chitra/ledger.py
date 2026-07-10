@@ -43,8 +43,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-DEFAULT_KEY_PATH = Path("/var/lib/chitra/ledger.key")
-DEFAULT_LEDGER_PATH = Path("/var/lib/chitra/ledger.jsonl")
+from .state_paths import default_ledger_key_path
+
 _KEY_BYTES = 32
 
 
@@ -60,6 +60,9 @@ class LedgerEntry(BaseModel):
     session_ref: str
     tag: str
     routing_hint: str | None = None
+    task_type: str | None = None
+    routing_hint_source: str = "unset"
+    sig_v: int = 1
     message_hash: str
     sent_at: str
     signature: str
@@ -70,11 +73,12 @@ def message_hash(nudge: str) -> str:
     return hashlib.sha256(nudge.encode("utf-8", errors="replace")).hexdigest()
 
 
-def load_or_create_signing_key(key_path: Path = DEFAULT_KEY_PATH) -> bytes:
+def load_or_create_signing_key(key_path: Path | None = None) -> bytes:
     """Load the HMAC signing key, generating and persisting a new one
     (mode 0600) on first use. Idempotent and safe under concurrent daemons —
     a race to create the key resolves to whichever writer's ``open`` with
     ``O_EXCL`` wins; the loser simply re-reads the winner's key."""
+    key_path = key_path or default_ledger_key_path()
     key_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(key_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -86,14 +90,30 @@ def load_or_create_signing_key(key_path: Path = DEFAULT_KEY_PATH) -> bytes:
     return key
 
 
-def sign(key: bytes, *, session_ref: str, tag: str, digest: str, sent_at: str, routing_hint: str | None = None) -> str:
+def sign(
+    key: bytes,
+    *,
+    session_ref: str,
+    tag: str,
+    digest: str,
+    sent_at: str,
+    routing_hint: str | None = None,
+    task_type: str | None = None,
+    routing_hint_source: str = "unset",
+    sig_v: int = 2,
+) -> str:
     """HMAC-SHA256 signature over (sent_at, session_ref, tag, message_hash,
     routing_hint), hex-encoded. The canonical string is a fixed, unambiguous
     field order — changing any field changes the signature. ``routing_hint``
     is part of the signed payload (an empty placeholder when absent) since
     it is part of the record being attested to, same as every other field
     here."""
-    canonical = "|".join([sent_at, session_ref, tag, digest, routing_hint or ""]).encode("utf-8")
+    fields = [sent_at, session_ref, tag, digest, routing_hint or ""]
+    if sig_v >= 2:
+        fields.extend([task_type or "", routing_hint_source])
+    elif sig_v != 1:
+        raise ValueError(f"unsupported signature version: {sig_v}")
+    canonical = "|".join(fields).encode("utf-8")
     return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
 
@@ -106,18 +126,32 @@ def append_entry(
     nudge: str,
     key: bytes,
     routing_hint: str | None = None,
+    task_type: str | None = None,
+    routing_hint_source: str = "unset",
     sent_at: str | None = None,
 ) -> LedgerEntry:
     """Sign and append one delivery record. Append-only: never rewrites or
     truncates existing entries."""
     stamp = sent_at or datetime.now(UTC).isoformat()
     digest = message_hash(nudge)
-    signature = sign(key, session_ref=session_ref, tag=tag, digest=digest, sent_at=stamp, routing_hint=routing_hint)
+    signature = sign(
+        key,
+        session_ref=session_ref,
+        tag=tag,
+        digest=digest,
+        sent_at=stamp,
+        routing_hint=routing_hint,
+        task_type=task_type,
+        routing_hint_source=routing_hint_source,
+    )
     entry = LedgerEntry(
         order_id=order_id,
         session_ref=session_ref,
         tag=tag,
         routing_hint=routing_hint,
+        task_type=task_type,
+        routing_hint_source=routing_hint_source,
+        sig_v=2,
         message_hash=digest,
         sent_at=stamp,
         signature=signature,
@@ -138,6 +172,9 @@ def verify_entry(entry: LedgerEntry, *, key: bytes) -> bool:
         digest=entry.message_hash,
         sent_at=entry.sent_at,
         routing_hint=entry.routing_hint,
+        task_type=entry.task_type,
+        routing_hint_source=entry.routing_hint_source,
+        sig_v=entry.sig_v,
     )
     return hmac.compare_digest(expected, entry.signature)
 

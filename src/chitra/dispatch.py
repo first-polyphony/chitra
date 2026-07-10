@@ -91,7 +91,7 @@ import socket
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -101,6 +101,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from chitra.completion_gate import TodoItem
+from chitra.policy_config import PolicyConfig
 
 from . import ledger as ledger_mod
 
@@ -130,6 +131,7 @@ _CLAUDE_CODE_INPUT_ROW_RE = re.compile(r"^❯(?P<draft>.*)$")
 # to "the operator" or "the monitor", or has chitra claim to want/say/need/
 # relay something in its own voice, is a directive-voice violation.
 _BANNED = re.compile(r"\boperator\b|\bthe monitor\b|\bchitra (wants|says|needs|relays)\b", re.I)
+_TRANSCRIPT_GLOB_DEFAULT = "*/*.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +221,8 @@ class DispatchResult(BaseModel):
     tail_hash: str = ""
     transcript_path: str | None = None
     routing_hint: str | None = None
+    task_type: str | None = None
+    routing_hint_source: str = "unset"
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -241,6 +245,16 @@ class PaneInputCheck:
     reason: str
     tail_hash: str
     last_line: str
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchTuning:
+    """Dispatch reliability bounds, carried together through the daemon."""
+
+    capture_lines: int = DISPATCH_CAPTURE_LINES
+    post_paste_wait_seconds: float = DISPATCH_VERIFY_WAIT_SECONDS
+    transcript_recency_seconds: float = 300.0
+    lane_lock_timeout_seconds: float = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +386,7 @@ def tmux_pane_target(session: str, pane: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def directive_voice_violation(nudge: str) -> str | None:
+def directive_voice_violation(nudge: str, *, patterns: Sequence[re.Pattern[str]] | None = None) -> str | None:
     """Return the banned attribution phrase found in ``nudge``, or ``None``.
 
     Pure regex predicate: chitra relays instructions, it never speaks as
@@ -380,8 +394,14 @@ def directive_voice_violation(nudge: str) -> str | None:
     ``operator`` token, ``the monitor``, or chitra claiming to
     want/say/need/relay something in its own voice. Case-insensitive.
     """
-    m = _BANNED.search(nudge)
-    return m.group(0) if m else None
+    if patterns is None:
+        m = _BANNED.search(nudge)
+        return m.group(0) if m else None
+    for pattern in patterns:
+        m = pattern.search(nudge)
+        if m:
+            return m.group(0)
+    return None
 
 
 def is_chitra_dispatched_task(
@@ -416,8 +436,7 @@ def _claude_code_input_row(captured_lines: list[str]) -> tuple[str, str] | None:
     lines = [strip_terminal_controls(str(line)) for line in captured_lines]
     for index in range(1, len(lines) - 1):
         if not (
-            _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index - 1])
-            and _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index + 1])
+            _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index - 1]) and _CLAUDE_CODE_HORIZONTAL_RULE_RE.fullmatch(lines[index + 1])
         ):
             continue
         match = _CLAUDE_CODE_INPUT_ROW_RE.fullmatch(lines[index])
@@ -461,6 +480,7 @@ def pane_input_check(
     baseline_hash: str | None = None,
     snapshot_hash: str | None = None,
     seen_hash: str | None = None,
+    extra_idle_regexes: Sequence[re.Pattern[str]] = (),
 ) -> PaneInputCheck:
     """Check whether a pane is idle and safe to dispatch into.
 
@@ -484,6 +504,8 @@ def pane_input_check(
     last_line = strip_terminal_controls(str(captured_lines[-1]))
     if _IDLE_INPUT_LINE_RE.match(last_line):
         return PaneInputCheck(True, "idle: prompt line has no draft input", current_hash, last_line)
+    if any(pattern.match(last_line) for pattern in extra_idle_regexes):
+        return PaneInputCheck(True, "idle: matched configured idle pattern", current_hash, last_line)
     return PaneInputCheck(False, "blocked: unsubmitted operator draft detected", current_hash, last_line)
 
 
@@ -518,14 +540,22 @@ def capture_remote(host: str, pane_id: str, lines: int, runner: TmuxRunner | Non
 
 def ssh_command(target: str, remote_command: str) -> list[str]:
     """Build a BatchMode ssh command (mirrors the source, parameterized)."""
+    strict_host_key_checking = _env("CHITRA_SSH_STRICT_HOST_KEY_CHECKING", "accept-new")
+    timeout_raw = _env("CHITRA_SSH_CONNECT_TIMEOUT_SECONDS", "4")
+    try:
+        connect_timeout = int(timeout_raw)
+    except ValueError as exc:
+        raise ValueError("CHITRA_SSH_CONNECT_TIMEOUT_SECONDS must be a positive integer") from exc
+    if connect_timeout <= 0:
+        raise ValueError("CHITRA_SSH_CONNECT_TIMEOUT_SECONDS must be a positive integer")
     cmd = [
         "ssh",
         "-o",
         "BatchMode=yes",
         "-o",
-        "StrictHostKeyChecking=accept-new",
+        f"StrictHostKeyChecking={strict_host_key_checking}",
         "-o",
-        "ConnectTimeout=4",
+        f"ConnectTimeout={connect_timeout}",
     ]
     config = _env("CHITRA_SSH_CONFIG")
     if config:
@@ -729,14 +759,19 @@ def remote_tmux_paste_command(pane: str, nudge: str) -> str:
 
 def _candidate_transcript_dirs(projects_root: Path | None = None) -> list[Path]:
     """Return candidate ``~/.claude/projects/*`` transcript directories."""
-    root = (
-        projects_root
-        if projects_root is not None
-        else Path(_env("CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
-    )
+    root = projects_root if projects_root is not None else Path(_env("CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
     if not root.is_dir():
         return []
     return [p for p in root.iterdir() if p.is_dir()]
+
+
+def transcript_glob() -> str:
+    """Return the configured relative transcript glob, validating its scope."""
+    pattern = _env("CHITRA_TRANSCRIPT_GLOB", _TRANSCRIPT_GLOB_DEFAULT) or _TRANSCRIPT_GLOB_DEFAULT
+    path = Path(pattern)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("CHITRA_TRANSCRIPT_GLOB must be relative and must not contain '..'")
+    return pattern
 
 
 def _read_transcript_tail(path: Path, max_bytes: int = 262144) -> str:
@@ -771,19 +806,19 @@ def find_recent_transcript(
     exclude = exclude_paths or set()
     now = now_ts if now_ts is not None else time.time()
     candidates: list[tuple[float, Path]] = []
-    for d in _candidate_transcript_dirs(projects_root):
-        for jsonl in d.glob("*.jsonl"):
-            if jsonl in exclude:
-                continue
-            try:
-                mtime = jsonl.stat().st_mtime
-            except OSError:
-                continue
-            if now - mtime > recency_seconds:
-                continue
-            tail = _read_transcript_tail(jsonl)
-            if marker_norm in normalized_dispatch_text(tail):
-                candidates.append((mtime, jsonl))
+    root = projects_root if projects_root is not None else Path(_env("CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
+    for jsonl in root.glob(transcript_glob()):
+        if jsonl in exclude:
+            continue
+        try:
+            mtime = jsonl.stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime > recency_seconds:
+            continue
+        tail = _read_transcript_tail(jsonl)
+        if marker_norm in normalized_dispatch_text(tail):
+            candidates.append((mtime, jsonl))
     if not candidates:
         return None
     candidates.sort(key=lambda pair: pair[0], reverse=True)
@@ -804,12 +839,14 @@ def _remote_transcript_grep_command(marker: str, root: str, recency_seconds: flo
     host is Linux or macOS.
     """
     quoted_marker = shlex.quote(marker)
-    quoted_root = shlex.quote(root)
+    pattern = transcript_glob()
+    depth = pattern.count("/") + 1
+    root_pattern = f"{root}/{pattern}"
     minutes = max(1, -(-int(recency_seconds) // 60))  # ceil division, minimum 1 minute
     return (
-        f"for f in $(find {quoted_root} -mindepth 2 -maxdepth 2 -name '*.jsonl' "
+        f"for f in $(find {shlex.quote(root)} -mindepth {depth} -maxdepth {depth} -path {shlex.quote(root_pattern)} "
         f"-mmin -{minutes} 2>/dev/null); do "
-        f"if tail -c {max_bytes} \"$f\" 2>/dev/null | grep -qF -- {quoted_marker}; then "
+        f'if tail -c {max_bytes} "$f" 2>/dev/null | grep -qF -- {quoted_marker}; then '
         f"stat -c '%Y %n' \"$f\" 2>/dev/null || stat -f '%m %N' \"$f\" 2>/dev/null; "
         f"fi; done"
     )
@@ -1076,7 +1113,9 @@ def dispatch_to_tmux(
     allowed_hosts: set[str] | None = None,
     projects_root: Path | None = None,
     exclude_transcripts: set[Path] | None = None,
-    verify_wait_seconds: float = DISPATCH_VERIFY_WAIT_SECONDS,
+    verify_wait_seconds: float | None = None,
+    tuning: DispatchTuning | None = None,
+    policy: PolicyConfig | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> DispatchResult:
     """Dispatch a nudge into a tmux pane using the verified recipe.
@@ -1093,12 +1132,25 @@ def dispatch_to_tmux(
     """
     run = runner or run_cmd
     run_in = input_runner or run_cmd_input
+    tuning = tuning or DispatchTuning()
+    if verify_wait_seconds is not None:
+        tuning = DispatchTuning(
+            capture_lines=tuning.capture_lines,
+            post_paste_wait_seconds=verify_wait_seconds,
+            transcript_recency_seconds=tuning.transcript_recency_seconds,
+            lane_lock_timeout_seconds=tuning.lane_lock_timeout_seconds,
+        )
+    voice_patterns = (
+        [re.compile(pattern, re.IGNORECASE) for pattern in policy.dispatch.banned_attribution_patterns] if policy is not None else None
+    )
+    extra_idle_regexes = [re.compile(pattern) for pattern in policy.dispatch.extra_idle_input_regexes] if policy is not None else ()
     parts = order.session_ref.split(":")
     if len(parts) != 3:
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
+            task_type=order.task_type,
             status=DispatchStatus.FAILED,
             reason="unsupported session_ref (expected host:session:pane)",
         )
@@ -1108,12 +1160,14 @@ def dispatch_to_tmux(
     # Directive-voice guard: reject before anything is pasted. A BLOCKED
     # voice violation must never touch the pane and must never generate a
     # delivery-ledger entry (dispatchd only signs/logs on SENT).
-    bad = directive_voice_violation(order.nudge)
+    bad = directive_voice_violation(order.nudge, patterns=voice_patterns)
     if bad is not None:
         logger.info("tmux_dispatch_blocked_directive_voice", session_ref=order.session_ref, phrase=bad)
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
+            routing_hint=order.routing_hint,
+            task_type=order.task_type,
             status=DispatchStatus.BLOCKED,
             reason=f"directive-voice: banned attribution phrase {bad!r}",
         )
@@ -1124,17 +1178,19 @@ def dispatch_to_tmux(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
+            task_type=order.task_type,
             status=DispatchStatus.BLOCKED,
             reason=f"remote dispatch to {host} not in allowlist",
         )
 
     # Pre-dispatch idle/draft check (safety net from the source).
-    pre_capture = capture_dispatch_pane(host, pane, runner=run, local_extra=local_extra)
+    pre_capture = capture_dispatch_pane(host, pane, lines=tuning.capture_lines, runner=run, local_extra=local_extra)
     pre_check = pane_input_check(
         pre_capture,
         baseline_hash=order.input_baseline_hash,
         snapshot_hash=order.snapshot_tail_hash,
         seen_hash=order.input_seen_hash,
+        extra_idle_regexes=extra_idle_regexes,
     )
     if not pre_check.ok:
         logger.info(
@@ -1148,6 +1204,7 @@ def dispatch_to_tmux(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
+            task_type=order.task_type,
             status=DispatchStatus.BLOCKED,
             reason=pre_check.reason,
             tail_hash=pre_check.tail_hash,
@@ -1162,6 +1219,7 @@ def dispatch_to_tmux(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
+            task_type=order.task_type,
             status=DispatchStatus.BLOCKED,
             reason="blocked: pane in copy-mode and cancel failed",
         )
@@ -1174,6 +1232,7 @@ def dispatch_to_tmux(
                 order_id=order.order_id,
                 session_ref=order.session_ref,
                 routing_hint=order.routing_hint,
+                task_type=order.task_type,
                 status=DispatchStatus.FAILED,
                 reason=proc.stderr.strip() or proc.stdout.strip() or f"tmux paste-buffer failed rc={proc.returncode}",
             )
@@ -1185,11 +1244,12 @@ def dispatch_to_tmux(
                 order_id=order.order_id,
                 session_ref=order.session_ref,
                 routing_hint=order.routing_hint,
+                task_type=order.task_type,
                 status=DispatchStatus.FAILED,
                 reason=proc.stderr.strip() or proc.stdout.strip() or f"remote tmux paste-buffer failed rc={proc.returncode}",
             )
 
-    sleep(verify_wait_seconds)
+    sleep(tuning.post_paste_wait_seconds)
 
     # Transcript-grep verification (replaces pane-capture confirmation).
     # host-aware: for a remote target, the delivered nudge lands in a
@@ -1200,6 +1260,7 @@ def dispatch_to_tmux(
         host=host,
         projects_root=projects_root,
         exclude_paths=exclude_transcripts,
+        recency_seconds=tuning.transcript_recency_seconds,
         runner=run,
         local_extra=local_extra,
     )
@@ -1215,6 +1276,7 @@ def dispatch_to_tmux(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
+            task_type=order.task_type,
             status=DispatchStatus.SENT,
             reason="sent: confirmed via transcript-grep",
             marker=marker,
@@ -1229,6 +1291,7 @@ def dispatch_to_tmux(
         order_id=order.order_id,
         session_ref=order.session_ref,
         routing_hint=order.routing_hint,
+        task_type=order.task_type,
         status=DispatchStatus.FAILED,
         reason="send-failed-no-confirmation (transcript-grep found no marker)",
         marker=marker,

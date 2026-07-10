@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from chitra.ledger import (
+    LedgerEntry,
     append_entry,
     load_or_create_signing_key,
     message_hash,
@@ -148,3 +149,38 @@ def test_verify_entry_fails_if_routing_hint_tampered(tmp_path: Path) -> None:
     )
     tampered = entry.model_copy(update={"routing_hint": "sonnet"})
     assert verify_entry(tampered, key=key) is False
+
+
+def test_existing_v1_ledger_entry_still_verifies() -> None:
+    key = b"0" * 32
+    digest = message_hash("old message")
+    sent_at = "2026-07-09T00:00:00Z"
+    entry = LedgerEntry(
+        order_id="legacy",
+        session_ref="localhost:s:0.0",
+        tag="[C]",
+        routing_hint="legacy-hint",
+        message_hash=digest,
+        sent_at=sent_at,
+        signature=sign(key, session_ref="localhost:s:0.0", tag="[C]", digest=digest, sent_at=sent_at, routing_hint="legacy-hint", sig_v=1),
+    )
+    assert entry.sig_v == 1
+    assert verify_entry(entry, key=key) is True
+
+
+def test_new_v2_ledger_entry_signs_provenance_and_rejects_tampering(tmp_path: Path) -> None:
+    key = load_or_create_signing_key(tmp_path / "ledger.key")
+    entry = append_entry(
+        tmp_path / "ledger.jsonl",
+        order_id="new",
+        session_ref="localhost:s:0.0",
+        tag="[C]",
+        nudge="new message",
+        key=key,
+        task_type="code-review",
+        routing_hint_source="config",
+    )
+    assert entry.sig_v == 2
+    assert verify_entry(entry, key=key) is True
+    assert verify_entry(entry.model_copy(update={"task_type": "different"}), key=key) is False
+    assert verify_entry(entry.model_copy(update={"routing_hint_source": "explicit"}), key=key) is False

@@ -1,0 +1,37 @@
+# Optional chitra policy. Point CHITRA_POLICY_CONFIG or dispatchd's
+# --policy-config-path at a copy of this file. With no policy file, these
+# shipped defaults are used unchanged.
+completion_gate:
+  # Case-insensitive literal phrases that dispute a completion claim.
+  deferral_phrases:
+    - "you'll need to"
+    - "you will need to"
+    - todo
+    - "not implemented"
+    - notimplemented
+    - "out of scope"
+    - "leaving for"
+    - "leave for"
+    - deferred
+    - deferring
+    - "close follow-up"
+    - "close follow-ups"
+    - "follow-up items"
+    - "left as an exercise"
+    - "in a future pr"
+    - "future work"
+  # Todo statuses treated as complete; all others are residue.
+  complete_todo_statuses: [done]
+  # Allowed values are deploy and live_verify. An empty list disables this check.
+  required_evidence: [deploy, live_verify]
+  # Optional path to a replacement taxonomy.json; null uses chitra's packaged taxonomy.
+  taxonomy_path: null
+
+dispatch:
+  # Case-insensitive regexes blocked before a nudge is pasted.
+  banned_attribution_patterns:
+    - '\boperator\b'
+    - '\bthe monitor\b'
+    - '\bchitra (wants|says|needs|relays)\b'
+  # Case-sensitive regexes that identify additional idle pane input rows.
+  extra_idle_input_regexes: []
