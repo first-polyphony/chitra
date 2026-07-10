@@ -26,6 +26,32 @@ surfaces. See [PR #14](https://github.com/first-polyphony/chitra/pull/14).
 
 ## v1.1
 
+### Deferred: capabilities from the retired predecessor monitor session-monitor
+
+When predecessor monitor's fleet-nudging role was decommissioned in favour of chitra, an audit found two capabilities that lived in
+predecessor monitor's monitor but have no equivalent in chitra. They are recorded here as
+candidates, **not committed** — and each must clear chitra's own scope test
+before it lands, because both add state or reasoning to what is otherwise a
+thin, stateless relay:
+
+- **Crash recovery / checkpointing** — predecessor monitor's `checkpoint` /
+  `checkpoint-restore` / `recovery-list` / `recovery-resume` /
+  `manual-takeover` subcommands let a watcher snapshot a lane and resume it
+  after a crash. This is the most distinctive thing predecessor monitor's monitor did that
+  chitra doesn't. It adds persistent per-lane state, so by this document's own
+  rule it likely belongs in a **consumer** of chitra's ledger/feed, not in the
+  core daemons.
+- **Session↔goal binding** — predecessor monitor's `enroll` / `auto-enroll` / `list-goals` /
+  `revise-goal` / `close-goal` bind a session to an explicit goal record and
+  generate checkpoint-first bounded nudges. Chitra's `DispatchOrder` carries a
+  `nudge` and `routing_hint` but no goal object; adding an optional `goal`
+  field to the order would let the queued path *carry* a goal without the
+  daemons *reasoning* about it — that narrow slice may fit core; the
+  goal-generation/reasoning does not.
+
+Deliberately left out of scope: predecessor monitor's LLM-reasoner nudge generation. Reasoning
+belongs in a consuming tool, per the scope statement at the top of this file.
+
 ---
 
 ## Landed since v0.2.0
