@@ -31,6 +31,8 @@ def _payload(**changes: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "session_ref": "tophand:feeds:0.0",
         "program": "Feeds digest redesign (F2)",
+        "subject": "Feeds digest compiler",
+        "progress": "implementation-ready; final interface choice pending",
         "stage": "The implementation is ready for the final interface choice.",
         "category": "decision",
         "decision": "Should the digest ship as one combined feed?",
@@ -58,9 +60,37 @@ def test_valid_brief_round_trip_render_log_and_read_back(tmp_path: Path) -> None
     entries = entries_for_thread(tmp_path / "conversation.jsonl", thread_id)
     assert [entry.kind for entry in entries] == ["session_msg", "operator_brief"]
     assert entries[0].payload == {"text": "Full raw session message.", "source_ref": brief.source_ref}
+    assert entries[1].schema_ == "chitra.convlog.v2"
     assert validate_brief(entries[1].payload["brief"]) == brief
+    assert entries[1].payload["brief"]["subject"] == "Feeds digest compiler"
+    assert entries[1].payload["brief"]["progress"] == "implementation-ready; final interface choice pending"
     assert entries[1].payload["rendered"] == render_brief(brief)
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_v1_entry_loads_with_empty_grounding_fields(tmp_path: Path) -> None:
+    path = tmp_path / "conversation.jsonl"
+    legacy_brief = _payload()
+    legacy_brief.pop("subject")
+    legacy_brief.pop("progress")
+    legacy_entry = {
+        "schema": "chitra.convlog.v1",
+        "thread_id": "legacy-thread",
+        "seq": 1,
+        "kind": "operator_brief",
+        "at": "2026-07-11T12:00:00+00:00",
+        "session_ref": "tophand:feeds:0.0",
+        "payload": {"brief": legacy_brief, "rendered": "legacy rendered brief"},
+    }
+    path.write_text(json.dumps(legacy_entry) + "\n", encoding="utf-8")
+
+    entries = read_entries(path)
+
+    assert entries[0].schema_ == "chitra.convlog.v1"
+    loaded_brief = validate_brief(entries[0].payload["brief"])
+    assert loaded_brief.subject == ""
+    assert loaded_brief.progress == ""
+    assert render_brief(loaded_brief).splitlines()[0] == "This is Feeds digest redesign (F2) (tophand:feeds:0.0)."
 
 
 @pytest.mark.parametrize("program", ["F2", "fix-6", "1-109", "tophand:F2:1"])
@@ -94,11 +124,13 @@ def test_category_decision_requires_decision_but_milestone_may_ask() -> None:
         _brief(decision=None)
 
     milestone = _brief(category="milestone")
-    assert render_brief(milestone).startswith("🔴 ")
+    assert render_brief(milestone).splitlines()[1].startswith("🔴 ")
 
 
 def test_render_snapshots() -> None:
     assert render_brief(_brief()) == (
+        "This is Feeds digest redesign (F2) (tophand:feeds:0.0) working on Feeds digest compiler: "
+        "implementation-ready; final interface choice pending.\n"
         "🔴 Feeds digest redesign (F2) (tophand:feeds:0.0) — needs you: Should the digest ship as one combined feed?\n"
         "Stage: The implementation is ready for the final interface choice.\n"
         "Recommendation: Ship one combined feed because the tested readers preferred it.\n"
@@ -111,12 +143,23 @@ def test_render_snapshots() -> None:
     )
     fyi = _brief(category="fyi", decision=None, recommendation="", options=[])
     assert render_brief(fyi) == (
-        "🟦 Feeds digest redesign (F2) (tophand:feeds:0.0) — fyi\n"
+        "This is Feeds digest redesign (F2) (tophand:feeds:0.0) working on Feeds digest compiler: "
+        "implementation-ready; final interface choice pending.\n"
+        "🟦 Feeds digest redesign (F2) (tophand:feeds:0.0) — fyi; nothing to answer yet.\n"
         "Stage: The implementation is ready for the final interface choice.\n"
         "— from the session, verbatim —\n"
         "> The combined prototype passed the reader test.\n"
         "> I need the operator's product decision."
     )
+
+
+def test_decisionless_brief_says_nothing_is_ready_to_answer() -> None:
+    brief = _brief(category="milestone", decision=None, recommendation="I will return with a recommendation.", options=[])
+
+    rendered = render_brief(brief)
+
+    assert "nothing to answer yet" in rendered
+    assert "needs you:" not in rendered
 
 
 def test_render_group_numbers_briefs(tmp_path: Path) -> None:
@@ -128,8 +171,9 @@ def test_render_group_numbers_briefs(tmp_path: Path) -> None:
 
     assert first_thread in {thread.thread_id for thread in pending_threads(tmp_path / "conversation.jsonl")}
     assert second_thread in {thread.thread_id for thread in pending_threads(tmp_path / "conversation.jsonl")}
-    assert grouped.startswith("[1] — open 0m\n  🔴")
-    assert "\n\n[2] — open 0m\n  🔴" in grouped
+    assert grouped.startswith("[1] — open 0m\n  This is")
+    assert "\n  🔴" in grouped
+    assert "\n\n[2] — open 0m\n  This is" in grouped
 
 
 def test_cli_four_rung_lifecycle_show_list_and_pending(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -138,7 +182,7 @@ def test_cli_four_rung_lifecycle_show_list_and_pending(tmp_path: Path, capsys: p
     json_path.write_text(json.dumps(_payload()), encoding="utf-8")
     assert main(["brief", "--convlog-path", str(path), "--session-ref", "tophand:feeds:0.0", "--json", str(json_path), "--raw", "raw"]) == 0
     captured = capsys.readouterr()
-    assert captured.out.startswith("🔴")
+    assert captured.out.startswith("This is")
     thread_id = captured.err.strip().removeprefix("thread=")
 
     assert main(["pending", "--convlog-path", str(path)]) == 0
