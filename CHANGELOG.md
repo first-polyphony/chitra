@@ -4,6 +4,11 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-11
+
+### Added
+- `chitra.usage`: account-aware evaluation that attributes fresh rate-limit snapshots to every session on the same account, including stale siblings.
+
 ## [0.4.0] - 2026-07-10
 
 ### Added
