@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
+from chitra.artifacts import ARTIFACT_URL_PREFIX, ArtifactRecord, ReviewStatus
 from chitra.board import (
     compute_marker,
     marker_for,
@@ -32,6 +33,25 @@ def _record(
         now=now,
         open_asks=open_asks,
         needs=needs,
+    )
+
+
+def _artifact(
+    suffix: str,
+    title: str,
+    published_at: str,
+    *,
+    review_status: ReviewStatus = "unreviewed",
+) -> ArtifactRecord:
+    return ArtifactRecord(
+        url=f"{ARTIFACT_URL_PREFIX}{suffix}",
+        title=title,
+        kind="page",
+        source="tophand:/var/lib/chitra/artifact.html",
+        published_at=published_at,
+        updated_at=published_at,
+        review_status=review_status,
+        reviewed_at="2026-07-11T00:00:00+00:00" if review_status == "reviewed" else "",
     )
 
 
@@ -185,3 +205,40 @@ def test_render_roster_wraps_long_needs_content_intact(monkeypatch: pytest.Monke
 def test_roster_omits_an_empty_awaiting_ruling_block() -> None:
     rendered = render_roster([_record("host:lane:0.0", "working")])
     assert "AWAITING RULING" not in rendered
+
+
+@pytest.mark.parametrize("fmt", ("cards", "box", "markdown"))
+def test_roster_lists_each_unreviewed_artifact_with_its_full_copyable_url(
+    monkeypatch: pytest.MonkeyPatch, fmt: Literal["cards", "box", "markdown"]
+) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    artifact = _artifact("long-" + "x" * 180, "Operator-ready artifact", "2026-07-11T00:00:00+00:00")
+
+    rendered = render_roster(
+        [_record("host:lane:0.0", "working")],
+        fmt=fmt,
+        artifacts=[artifact],
+    )
+
+    assert f"{artifact.title} — {artifact.url}" in rendered
+    assert any(artifact.url in line for line in rendered.splitlines())
+    assert rendered.count(artifact.url) == 1
+
+
+def test_roster_artifacts_are_oldest_first_and_exclude_reviewed() -> None:
+    older = _artifact("older", "Older unreviewed", "2026-07-11T00:00:00+00:00")
+    newer = _artifact("newer", "Newer unreviewed", "2026-07-11T00:01:00+00:00")
+    reviewed = _artifact("reviewed", "Reviewed artifact", "2026-07-11T00:02:00+00:00", review_status="reviewed")
+
+    rendered = render_roster([], artifacts=[newer, reviewed, older])
+
+    assert rendered.index(older.title) < rendered.index(newer.title)
+    assert reviewed.title not in rendered
+    assert rendered == render_roster([], artifacts=[older, newer, reviewed])
+
+
+def test_roster_does_not_render_an_empty_artifact_count() -> None:
+    rendered = render_roster([_record("host:lane:0.0", "working")], artifacts=[])
+
+    assert "UNREVIEWED ARTIFACTS" not in rendered
+    assert "0 unreviewed" not in rendered.lower()

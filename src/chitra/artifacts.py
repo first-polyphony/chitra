@@ -194,6 +194,11 @@ def list_artifacts(root: Path | None = None) -> list[ArtifactRecord]:
     return sorted(load_artifacts(root), key=lambda record: (record.published_at, record.url))
 
 
+def list_unreviewed_artifacts(root: Path | None = None) -> list[ArtifactRecord]:
+    """Return unreviewed records in deterministic publish-time and URL order."""
+    return [record for record in list_artifacts(root) if record.review_status == "unreviewed"]
+
+
 def upsert_artifact(root: Path | None, rec: ArtifactRecord) -> ArtifactRecord:
     """Atomically record an artifact, resetting its review state on every upsert."""
     issues = validate_artifact(rec)
@@ -282,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
             for record in list_artifacts(args.root):
                 print(json.dumps(record.to_dict(), separators=(",", ":"), sort_keys=True))
         elif args.command == "unreviewed":
-            records = [record for record in list_artifacts(args.root) if record.review_status == "unreviewed"]
+            records = list_unreviewed_artifacts(args.root)
             if records:
                 print("UNREVIEWED ARTIFACTS")
                 for record in records:
