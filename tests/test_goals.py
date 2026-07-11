@@ -36,6 +36,7 @@ def _record(**changes: str) -> GoalRecord:
         "status": "working",
         "now": "writing tests",
         "last_verified": "",
+        "needs": "",
     }
     values.update(changes)
     return GoalRecord(
@@ -46,11 +47,12 @@ def _record(**changes: str) -> GoalRecord:
         status=cast(GoalStatus, values["status"]),
         now=values["now"],
         last_verified=values["last_verified"],
+        needs=values["needs"],
     )
 
 
 def test_store_round_trip_and_atomic_write(tmp_path: Path) -> None:
-    stored = upsert_goal(tmp_path, _record())
+    stored = upsert_goal(tmp_path, _record(needs="you: run the interview"))
 
     assert stored.created_at
     assert stored.updated_at
@@ -60,6 +62,7 @@ def test_store_round_trip_and_atomic_write(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("*.tmp"))
     payload = json.loads((tmp_path / "goals.json").read_text(encoding="utf-8"))
     assert payload["schema"] == "chitra.goals.v1"
+    assert payload["goals"][0]["needs"] == "you: run the interview"
 
 
 def test_upsert_preserves_created_timestamp_and_recomputes_updated(tmp_path: Path) -> None:
@@ -130,16 +133,21 @@ def test_load_old_record_without_open_asks_is_backward_compatible(tmp_path: Path
     (tmp_path / "goals.json").write_text(json.dumps(payload), encoding="utf-8")
 
     assert load_goals(tmp_path)[0].open_asks == ()
+    assert load_goals(tmp_path)[0].needs == ""
 
 
-def test_goal_cli_outputs_open_asks_and_scan_recording_requires_a_lane(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    stored = upsert_goal(tmp_path, _record())
+def test_goal_cli_outputs_open_asks_needs_and_scan_recording_requires_a_lane(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    stored = upsert_goal(tmp_path, _record(needs="you: approve release"))
     add_ask(tmp_path, stored.session_ref, "1. Approve release?")
 
     assert main(["get", "--root", str(tmp_path), "--session-ref", stored.session_ref]) == 0
-    assert '"open_asks": [' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert '"open_asks": [' in output
+    assert '"needs": "you: approve release"' in output
     assert main(["list", "--root", str(tmp_path), "--json"]) == 0
-    assert '"open_asks": [' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert '"open_asks": [' in output
+    assert '"needs": "you: approve release"' in output
     assert main(["list", "--root", str(tmp_path)]) == 0
     assert "1. Approve release?" in capsys.readouterr().out
     assert main(["scan-asks", "--transcript", str(tmp_path / "none.jsonl"), "--record"]) == 1
@@ -186,6 +194,31 @@ def test_goal_cli_seeds_clears_and_scans_open_asks(tmp_path: Path, capsys: pytes
     cleared = get_goal(tmp_path, record.session_ref)
     assert cleared is not None
     assert cleared.open_asks == ()
+
+
+def test_goal_cli_set_preserves_needs_when_omitted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    record = _record()
+    set_args = [
+        "set",
+        "--root",
+        str(tmp_path),
+        "--session-ref",
+        record.session_ref,
+        "--goal",
+        record.goal,
+        "--done-when",
+        record.done_when,
+        "--source",
+        record.source,
+    ]
+
+    assert main([*set_args, "--needs", "you: run the interview"]) == 0
+    capsys.readouterr()
+    assert main([*set_args, "--status", "blocked"]) == 0
+    stored = get_goal(tmp_path, record.session_ref)
+
+    assert stored is not None
+    assert stored.needs == "you: run the interview"
 
 
 @pytest.mark.parametrize(

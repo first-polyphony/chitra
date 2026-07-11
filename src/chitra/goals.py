@@ -22,10 +22,11 @@ from chitra.state_paths import state_dir
 
 logger = structlog.get_logger(__name__)
 
-GoalStatus = Literal["working", "held", "blocked", "done-pending-verification", "done-pending-close"]
+GoalStatus = Literal["working", "held", "idle", "blocked", "done-pending-verification", "done-pending-close"]
 GOAL_STATUSES: tuple[GoalStatus, ...] = (
     "working",
     "held",
+    "idle",
     "blocked",
     "done-pending-verification",
     "done-pending-close",
@@ -55,6 +56,7 @@ class GoalRecord:
     created_at: str = ""
     updated_at: str = ""
     open_asks: tuple[str, ...] = ()
+    needs: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -68,6 +70,7 @@ class GoalRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "open_asks": list(self.open_asks),
+            "needs": self.needs,
         }
 
 
@@ -128,6 +131,7 @@ def _record_from_dict(payload: object) -> GoalRecord:
         created_at=values["created_at"],
         updated_at=values["updated_at"],
         open_asks=_open_asks_from_payload(payload),
+        needs=_needs_from_payload(payload),
     )
 
 
@@ -137,6 +141,14 @@ def _open_asks_from_payload(payload: dict[str, object]) -> tuple[str, ...]:
     if not isinstance(raw_open_asks, list) or not all(isinstance(ask, str) for ask in raw_open_asks):
         raise ValueError("goal record open_asks must be a list of strings")
     return tuple(raw_open_asks)
+
+
+def _needs_from_payload(payload: dict[str, object]) -> str:
+    """Read the optional unblock text retained by older persisted records."""
+    needs = payload.get("needs", "")
+    if not isinstance(needs, str):
+        raise ValueError("goal record needs must be a string")
+    return needs
 
 
 def load_goals(root: Path | None = None) -> list[GoalRecord]:
@@ -198,6 +210,7 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
         created_at=existing.created_at if existing is not None else now,
         updated_at=now,
         open_asks=open_asks,
+        needs=rec.needs,
     )
     records = [record for record in load_goals(root) if record.session_ref != rec.session_ref]
     records.append(stored)
@@ -287,6 +300,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     set_command.add_argument("--status", choices=GOAL_STATUSES, default="working")
     set_command.add_argument("--now", default="")
     set_command.add_argument("--last-verified", default="")
+    set_command.add_argument("--needs", default=None, help="Specific human action required to unblock this lane.")
     asks_group = set_command.add_mutually_exclusive_group()
     asks_group.add_argument("--open-ask", action="append", default=[])
     asks_group.add_argument("--clear-asks", action="store_true")
@@ -333,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     try:
         if args.command == "set":
+            existing = get_goal(args.root, args.session_ref)
             requested_record = GoalRecord(
                 session_ref=args.session_ref,
                 goal=args.goal,
@@ -342,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 now=args.now,
                 last_verified=args.last_verified,
                 open_asks=tuple(args.open_ask),
+                needs=args.needs if args.needs is not None else (existing.needs if existing is not None else ""),
             )
             _print_record(upsert_goal(args.root, requested_record, clear_open_asks=args.clear_asks))
         elif args.command == "get":
