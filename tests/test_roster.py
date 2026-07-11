@@ -70,19 +70,26 @@ def test_compute_marker_rejects_unknown_status() -> None:
         compute_marker(_record("host:lane:0.0", cast(GoalStatus, "unknown")))
 
 
-def test_render_roster_includes_every_lane_columns_markers_and_stable_order() -> None:
+def test_cards_default_shows_every_lane_full_content_markers_and_stable_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "100")
+    long_goal = "This is a deliberately long durable objective that must survive in full."
     records = [
-        _record("zeta:build:0.0", "blocked"),
+        _record("zeta:build:0.0", "blocked", goal=long_goal),
         _record("alpha:zeta:0.0", "done-pending-close"),
         _record("alpha:alpha:0.0", "held"),
     ]
-    rendered = render_roster(records)
+    rendered = render_roster(records)  # default fmt is cards
 
-    assert rendered.index("Session") < rendered.index("Goal") < rendered.index("Now") < rendered.index("Needs")
+    # Labelled stanzas, not a table: no box-drawing, has field labels.
+    assert "┌" not in rendered and "│" not in rendered
+    assert "Goal" in rendered and "Now" in rendered
     assert all(name in rendered for name in ("build", "zeta", "alpha"))
     assert all(marker in rendered for marker in ("🔴", "🟡", "🟢"))
     assert rendered.index("alpha") < rendered.index("zeta") < rendered.index("build")
     assert rendered == render_roster(list(reversed(records)))
+    # Full content survives — no truncation.
+    assert "…" not in rendered
+    assert all(word in " ".join(rendered.split()) for word in long_goal.split())
 
 
 def test_box_wraps_long_cells_instead_of_truncating(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,14 +99,12 @@ def test_box_wraps_long_cells_instead_of_truncating(monkeypatch: pytest.MonkeyPa
         _record("host:one:0.0", "working", goal=long_goal, now="short"),
         _record("other:two:0.0", "done-pending-verification"),
     ]
-    box = render_roster(records)
+    box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
 
     assert "┌" in box and "│" in box
     assert markdown.startswith("|  | Session | Goal | Now | Needs |")
     assert all(name in box and name in markdown for name in ("one", "two"))
-    # Wrapping, not truncation: no ellipsis, and every word of the long goal
-    # is present somewhere in the box (reassembled across wrapped lines).
     assert "…" not in box
     box_text = " ".join(box.split())
     assert all(word in box_text for word in long_goal.split())
@@ -114,10 +119,9 @@ def test_box_lines_are_display_width_aligned_and_terminal_aware(monkeypatch: pyt
     ]
     for columns, expected in (("120", 120), ("150", 150)):
         monkeypatch.setenv("COLUMNS", columns)
-        box = render_roster(records)
+        box = render_roster(records, fmt="box")
         frame = [line for line in box.splitlines() if line and line[0] in "┌├│└"]
         widths = {display_width(line) for line in frame}
-        # Every framed line — borders and multi-line emoji rows — is one width.
         assert widths == {expected}, (columns, sorted(widths))
 
 
@@ -125,25 +129,26 @@ def test_render_roster_empty_store_is_a_small_no_crash_line() -> None:
     assert render_roster([]) == "no lanes recorded"
 
 
-def test_roster_surfaces_every_open_ask_below_the_five_column_table() -> None:
+def test_roster_surfaces_every_open_ask_below_the_table_in_every_format() -> None:
     records = [
         _record("zeta:build:0.0", "blocked", open_asks=("1. Decide release window?",)),
         _record("alpha:review:0.0", "working", open_asks=("1. Approve tenancy.", "2. Choose rollback owner.")),
     ]
 
-    box = render_roster(records)
+    cards = render_roster(records)
+    box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
-    for rendered in (box, markdown):
-        assert "Session" in rendered and "Goal" in rendered and "Now" in rendered and "Needs" in rendered
+    for rendered in (cards, box, markdown):
         assert "AWAITING RULING — surfaced every report until you rule" in rendered
         assert all(ask in rendered for record in records for ask in record.open_asks)
         assert rendered.index("alpha:review:0.0: 1. Approve tenancy.") < rendered.index("zeta:build:0.0: 1. Decide release window?")
+    assert "  • alpha:review:0.0: 1. Approve tenancy." in cards
     assert "  • alpha:review:0.0: 1. Approve tenancy." in box
     assert "- alpha:review:0.0: 1. Approve tenancy." in markdown
 
 
-def test_render_roster_has_five_columns_needs_and_idle_by_design_markers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COLUMNS", "160")  # wide enough that the short needs strings stay one line
+def test_markers_and_needs_present_across_formats(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "160")
     records = [
         _record("host:working:0.0", "working"),
         _record("host:idle:0.0", "idle"),
@@ -152,23 +157,22 @@ def test_render_roster_has_five_columns_needs_and_idle_by_design_markers(monkeyp
         _record("host:ask:0.0", "working", open_asks=("you: where does F2 live?",)),
     ]
 
-    box = render_roster(records)
+    cards = render_roster(records)
+    box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
-    for rendered in (box, markdown):
+    for rendered in (cards, box, markdown):
         assert "🟢" in rendered and rendered.count("🟡") >= 2 and rendered.count("🔴") >= 2
         assert "you: run the interview" in rendered
         assert "you: where does F2 live?" in rendered
-        assert "—" in rendered
     assert markdown.startswith("|  | Session | Goal | Now | Needs |")
     idle_line = next(line for line in box.splitlines() if " idle " in line)
-    assert "🟡" in idle_line
-    assert "🟢" not in idle_line
+    assert "🟡" in idle_line and "🟢" not in idle_line
 
 
 def test_render_roster_wraps_long_needs_content_intact(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COLUMNS", "120")
     long = "unblock " * 20
-    rendered = render_roster([_record("host:blocked:0.0", "blocked", needs=long, goal=long, now=long)])
+    rendered = render_roster([_record("host:blocked:0.0", "blocked", needs=long, goal=long, now=long)], fmt="box")
 
     # Every physical row line is a well-formed 6-bar box line; nothing truncated.
     box_lines = [line for line in rendered.splitlines() if line.startswith("│")]

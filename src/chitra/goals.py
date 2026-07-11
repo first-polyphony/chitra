@@ -338,7 +338,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     roster_command = commands.add_parser("roster", help="Render the operator roster table.")
     add_root(roster_command)
-    roster_command.add_argument("--format", choices=("box", "markdown"), default="box")
+    roster_command.add_argument("--format", choices=("cards", "box", "markdown"), default="cards")
     roster_command.add_argument("--lint", action="store_true", help="Print optional board roster-lint advice to stderr.")
     return parser
 
