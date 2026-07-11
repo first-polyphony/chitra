@@ -4,6 +4,9 @@ The renderer is deliberately a consumer of ``facts.json``: it performs no
 classification or language-model work.  It renders the bundled, accessible
 template atomically, records success/failure in ``health.json``, and can show
 short tmux tails for configured local or remote hosts.
+
+A lane with unresolved open asks is an operator-attention item; doctrine owns
+the marker, while this module surfaces every stored ask in every roster.
 """
 
 from __future__ import annotations
@@ -78,6 +81,9 @@ class RosterRecord(Protocol):
     @property
     def now(self) -> str: ...
 
+    @property
+    def open_asks(self) -> tuple[str, ...]: ...
+
 
 def marker_for(status: GoalStatus) -> str:
     """Return the prescribed marker, rejecting status outside the five states."""
@@ -114,6 +120,28 @@ def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, s
     ]
 
 
+def _ordered_roster_records(records: Sequence[RosterRecord]) -> list[RosterRecord]:
+    """Return records in the stable host, session, then full-reference order."""
+    return sorted(
+        records,
+        key=lambda record: (
+            session_host(record.session_ref),
+            session_name(record.session_ref),
+            record.session_ref,
+        ),
+    )
+
+
+def _awaiting_ruling_lines(records: Sequence[RosterRecord], *, fmt: Literal["box", "markdown"]) -> list[str]:
+    """Render every stored ask below the table, preserving stable lane order."""
+    asks = [(record.session_ref, ask) for record in _ordered_roster_records(records) for ask in record.open_asks]
+    if not asks:
+        return []
+    if fmt == "markdown":
+        return ["**AWAITING RULING — surfaced every report until you rule:**", "", *(f"- {session}: {ask}" for session, ask in asks)]
+    return ["AWAITING RULING — surfaced every report until you rule:", *(f"  • {session}: {ask}" for session, ask in asks)]
+
+
 def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markdown"] = "box") -> str:
     """Render every stored lane in fixed roster columns.
 
@@ -130,7 +158,7 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
 
         rendered = ["| " + " | ".join(headers) + " |", "| --- | --- | --- | --- |"]
         rendered.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
-        return "\n".join(rendered)
+        return "\n".join([*rendered, *_awaiting_ruling_lines(records, fmt="markdown")])
     if fmt != "box":
         raise ValueError(f"unknown roster format: {fmt}")
     widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
@@ -141,7 +169,7 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
     def line(row: tuple[str, str, str, str]) -> str:
         return "│" + "│".join(f" {cell:<{widths[index]}} " for index, cell in enumerate(row)) + "│"
 
-    return "\n".join(
+    table = "\n".join(
         (
             border("┌", "┬", "┐", "─"),
             line(headers),
@@ -150,6 +178,8 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
             border("└", "┴", "┘", "─"),
         )
     )
+    awaiting_ruling = _awaiting_ruling_lines(records, fmt="box")
+    return "\n\n".join((table, "\n".join(awaiting_ruling))) if awaiting_ruling else table
 
 
 def _env_path(name: str, default: Path) -> Path:

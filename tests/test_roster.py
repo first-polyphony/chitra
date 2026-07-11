@@ -16,6 +16,7 @@ def _record(
     *,
     goal: str = "Keep this durable roster objective clear and verifiable.",
     now: str = "running checks",
+    open_asks: tuple[str, ...] = (),
 ) -> GoalRecord:
     return GoalRecord(
         session_ref=session_ref,
@@ -24,6 +25,7 @@ def _record(
         source="branch",
         status=status,
         now=now,
+        open_asks=open_asks,
     )
 
 
@@ -72,3 +74,25 @@ def test_box_and_markdown_include_all_sessions_and_truncate_cells() -> None:
 
 def test_render_roster_empty_store_is_a_small_no_crash_line() -> None:
     assert render_roster([]) == "no lanes recorded"
+
+
+def test_roster_surfaces_every_open_ask_below_the_unchanged_four_column_table() -> None:
+    records = [
+        _record("zeta:build:0.0", "blocked", open_asks=("1. Decide release window?",)),
+        _record("alpha:review:0.0", "working", open_asks=("1. Approve tenancy.", "2. Choose rollback owner.")),
+    ]
+
+    box = render_roster(records)
+    markdown = render_roster(records, fmt="markdown")
+    for rendered in (box, markdown):
+        assert "status-marker" in rendered and "Session" in rendered and "Goal" in rendered and "Now" in rendered
+        assert "AWAITING RULING — surfaced every report until you rule" in rendered
+        assert all(ask in rendered for record in records for ask in record.open_asks)
+        assert rendered.index("alpha:review:0.0: 1. Approve tenancy.") < rendered.index("zeta:build:0.0: 1. Decide release window?")
+    assert "  • alpha:review:0.0: 1. Approve tenancy." in box
+    assert "- alpha:review:0.0: 1. Approve tenancy." in markdown
+
+
+def test_roster_omits_an_empty_awaiting_ruling_block() -> None:
+    rendered = render_roster([_record("host:lane:0.0", "working")])
+    assert "AWAITING RULING" not in rendered
