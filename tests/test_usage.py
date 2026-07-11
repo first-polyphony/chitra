@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
+from base64 import urlsafe_b64encode
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from chitra.usage import CodexSnapshotError, UsageSnapshot, UsageWindow, codex_snapshot, evaluate, main, read_snapshots
+from chitra.policy_config import UsagePolicy
+from chitra.usage import (
+    CodexSnapshotError,
+    UsageSnapshot,
+    UsageWindow,
+    codex_snapshot,
+    evaluate,
+    evaluate_grouped,
+    main,
+    read_snapshots,
+)
 
 _DEFAULT_FIVE_HOUR = UsageWindow(10, 1_700_000_100)
 _DEFAULT_SEVEN_DAY = UsageWindow(10, 1_700_000_200)
@@ -20,6 +31,7 @@ def _snapshot(
     seven_day: UsageWindow | None = _DEFAULT_SEVEN_DAY,
     ts: str = "2026-07-10T12:00:00+00:00",
     session_id: str = "lane-1",
+    account: str = "",
 ) -> UsageSnapshot:
     return UsageSnapshot(
         kind="claude",
@@ -28,18 +40,23 @@ def _snapshot(
         tmux_session="fleet-1",
         five_hour=five_hour,
         seven_day=seven_day,
+        account=account,
     )
 
 
 def test_snapshot_from_dict_is_strict_and_round_trips() -> None:
-    snapshot = _snapshot()
+    snapshot = _snapshot(account="account@example.com")
     assert UsageSnapshot.from_dict(snapshot.to_dict()) == snapshot
+    old_payload = snapshot.to_dict()
+    del old_payload["account"]
+    assert UsageSnapshot.from_dict(old_payload).account == ""
     for payload in (
         {},
         {**snapshot.to_dict(), "ts": "2026-07-10T12:00:00+01:00"},
         {**snapshot.to_dict(), "kind": "other"},
         {**snapshot.to_dict(), "five_hour": {"pct": 101, "resets_at": 1}},
         {**snapshot.to_dict(), "five_hour": {"pct": True, "resets_at": 1}},
+        {**snapshot.to_dict(), "account": 1},
     ):
         with pytest.raises(ValueError):
             UsageSnapshot.from_dict(payload)
@@ -157,15 +174,27 @@ def _process_factory(process: _FakeCodexProcess):
     return factory
 
 
-def test_codex_snapshot_sequences_exchange_and_maps_payload_variants() -> None:
+def _jwt(claims: dict[str, object]) -> str:
+    payload = urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{payload}.signature"
+
+
+def _write_auth(path: Path, claims: dict[str, object]) -> None:
+    path.write_text(json.dumps({"tokens": {"id_token": _jwt(claims)}}), encoding="utf-8")
+
+
+def test_codex_snapshot_sequences_exchange_and_maps_payload_variants(tmp_path: Path) -> None:
     now = datetime(2026, 7, 10, 12, tzinfo=UTC)
+    auth_path = tmp_path / "auth.json"
+    _write_auth(auth_path, {"email": "first@example.com"})
 
     snake_process = _FakeCodexProcess(
         {"rateLimits": {"primary": {"used_percent": 81, "resets_at": 99}, "secondary": None}}
     )
-    first = codex_snapshot(now=now, process_factory=_process_factory(snake_process))
+    first = codex_snapshot(now=now, process_factory=_process_factory(snake_process), auth_path=auth_path)
     assert first.five_hour == UsageWindow(81.0, 99)
     assert first.seven_day is None
+    assert first.account == "first@example.com"
     assert snake_process.requests == [
         {"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "chitra-usage", "version": "1"}}},
         {"method": "initialized"},
@@ -180,39 +209,94 @@ def test_codex_snapshot_sequences_exchange_and_maps_payload_variants() -> None:
             }
         }
     )
-    second = codex_snapshot(now=now, process_factory=_process_factory(camel_process))
+    _write_auth(auth_path, {"https://api.openai.com/profile": {"email": "second@example.com"}})
+    second = codex_snapshot(now=now, process_factory=_process_factory(camel_process), auth_path=auth_path)
     assert second.five_hour == UsageWindow(71.0, int(now.timestamp()) + 60)
     assert second.seven_day == UsageWindow(91.0, 123)
+    assert second.account == "second@example.com"
 
     assert camel_process.stdin.closed
     assert camel_process.stdout.closed
 
 
-def test_codex_snapshot_errors_for_deadline_missing_binary_missing_result_and_nonzero_exit() -> None:
+def test_codex_snapshot_missing_auth_file_uses_empty_account(tmp_path: Path) -> None:
+    process = _FakeCodexProcess(
+        {"rateLimits": {"primary": {"used_percent": 10, "resets_at": 99}, "secondary": None}}
+    )
+    assert codex_snapshot(process_factory=_process_factory(process), auth_path=tmp_path / "missing.json").account == ""
+
+
+def test_codex_snapshot_errors_for_deadline_missing_binary_missing_result_and_nonzero_exit(tmp_path: Path) -> None:
+    auth_path = tmp_path / "missing.json"
     deadline_process = _FakeCodexProcess(None, respond=False)
     clock_values = iter((0.0, 0.0, 0.0, 15.0))
     with pytest.raises(CodexSnapshotError, match="within 15 seconds"):
-        codex_snapshot(process_factory=_process_factory(deadline_process), clock=lambda: next(clock_values))
+        codex_snapshot(process_factory=_process_factory(deadline_process), clock=lambda: next(clock_values), auth_path=auth_path)
 
     def missing_factory(command: object) -> _FakeCodexProcess:
         raise FileNotFoundError
 
     with pytest.raises(CodexSnapshotError, match="not found"):
-        codex_snapshot(process_factory=missing_factory)
+        codex_snapshot(process_factory=missing_factory, auth_path=auth_path)
 
     missing_result_process = _FakeCodexProcess(None)
     with pytest.raises(CodexSnapshotError, match="returned no account/rateLimits/read response"):
-        codex_snapshot(process_factory=_process_factory(missing_result_process))
+        codex_snapshot(process_factory=_process_factory(missing_result_process), auth_path=auth_path)
 
     nonzero_process = _FakeCodexProcess(None, returncode=7)
     with pytest.raises(CodexSnapshotError, match=r"failed \(7\)"):
-        codex_snapshot(process_factory=_process_factory(nonzero_process))
+        codex_snapshot(process_factory=_process_factory(nonzero_process), auth_path=auth_path)
+
+
+def test_evaluate_grouped_attributes_fresh_account_verdicts_to_stale_siblings() -> None:
+    hot_one = _snapshot(session_id="hot-one", account="hot@example.com", five_hour=UsageWindow(91, 10))
+    hot_two = _snapshot(session_id="hot-two", account="hot@example.com", five_hour=UsageWindow(91, 10))
+    both_fresh = evaluate_grouped([(hot_one, True), (hot_two, True)], policy=UsagePolicy())
+    assert [(item.level, item.self_fresh, item.account_attributed) for item in both_fresh] == [
+        ("pause", True, False),
+        ("pause", True, False),
+    ]
+
+    stale = _snapshot(session_id="stale", account="hot@example.com", five_hour=UsageWindow(1, 10))
+    propagated = evaluate_grouped([(hot_one, True), (stale, False)], policy=UsagePolicy())
+    assert [(item.level, item.self_fresh, item.account_attributed) for item in propagated] == [
+        ("pause", True, False),
+        ("pause", False, True),
+    ]
+
+
+def test_evaluate_grouped_keeps_accounts_separate_and_unknown_without_fresh_readings() -> None:
+    stale = _snapshot(session_id="stale", account="stale@example.com", five_hour=UsageWindow(99, 10))
+    hot = _snapshot(session_id="hot", account="hot@example.com", five_hour=UsageWindow(91, 10))
+    okay = _snapshot(session_id="okay", account="okay@example.com", five_hour=UsageWindow(10, 10))
+    empty = _snapshot(session_id="empty", account="", five_hour=UsageWindow(10, 10))
+    grouped = evaluate_grouped([(stale, False), (hot, True), (okay, True), (empty, False)], policy=UsagePolicy())
+    assert [(item.account, item.level) for item in grouped] == [
+        ("", "unknown"),
+        ("hot@example.com", "pause"),
+        ("okay@example.com", "ok"),
+        ("stale@example.com", "unknown"),
+    ]
+
+
+def test_evaluate_grouped_propagates_approaching_verdict() -> None:
+    fresh = _snapshot(session_id="fresh", account="shared@example.com", five_hour=UsageWindow(70, 10))
+    stale = _snapshot(session_id="stale", account="shared@example.com", five_hour=UsageWindow(1, 10))
+    grouped = evaluate_grouped([(fresh, True), (stale, False)], policy=UsagePolicy())
+    assert [(item.level, item.account_attributed) for item in grouped] == [("approaching", False), ("approaching", True)]
 
 
 def test_usage_cli_evaluate_policy_and_flag_precedence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     current = datetime.now(UTC)
-    fresh = _snapshot(five_hour=UsageWindow(75, 1_700_000_100), ts=current.isoformat(), session_id="fresh")
-    stale = _snapshot(five_hour=UsageWindow(99, 1_700_000_100), ts=(current - timedelta(hours=1)).isoformat(), session_id="stale")
+    fresh = _snapshot(
+        five_hour=UsageWindow(75, 1_700_000_100), ts=current.isoformat(), session_id="fresh", account="shared@example.com"
+    )
+    stale = _snapshot(
+        five_hour=UsageWindow(99, 1_700_000_100),
+        ts=(current - timedelta(hours=1)).isoformat(),
+        session_id="stale",
+        account="shared@example.com",
+    )
     (tmp_path / "fresh.json").write_text(json.dumps(fresh.to_dict()), encoding="utf-8")
     (tmp_path / "stale.json").write_text(json.dumps(stale.to_dict()), encoding="utf-8")
     policy = tmp_path / "policy.yaml"
@@ -225,11 +309,13 @@ def test_usage_cli_evaluate_policy_and_flag_precedence(tmp_path: Path, capsys: p
         "session_id": "stale",
         "tmux_session": "fleet-1",
         "kind": "claude",
-        "level": "unknown",
-        "stale": True,
-        "binding_window": "",
+        "account": "shared@example.com",
+        "level": "approaching",
+        "binding_window": "5h",
         "resume_at_epoch": 0,
         "resume_at_iso": "",
+        "self_fresh": False,
+        "account_attributed": True,
     }
 
     assert main(["evaluate", "--dir", str(tmp_path), "--policy-config", str(policy), "--pause-5h", "70"]) == 0

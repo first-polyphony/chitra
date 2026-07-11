@@ -7,6 +7,7 @@ does not pause, resume, dispatch to, or otherwise make decisions for sessions.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import select
 import subprocess
@@ -23,9 +24,11 @@ from chitra.policy_config import UsagePolicy, load_policy_config
 SCHEMA = "chitra.usage.v1"
 UsageKind = Literal["claude", "codex"]
 VerdictLevel = Literal["ok", "approaching", "pause"]
+AccountedVerdictLevel = Literal["unknown", "ok", "approaching", "pause"]
 CodexProcessFactory = Callable[..., subprocess.Popen[str]]
 CodexClock = Callable[[], float]
 DEFAULT_USAGE_POLICY = UsagePolicy()
+DEFAULT_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 
 class CodexSnapshotError(RuntimeError):
@@ -65,6 +68,7 @@ class UsageSnapshot:
     tmux_session: str
     five_hour: UsageWindow | None
     seven_day: UsageWindow | None
+    account: str = ""
 
     @classmethod
     def from_dict(cls, payload: object) -> UsageSnapshot:
@@ -89,6 +93,7 @@ class UsageSnapshot:
             tmux_session=values["tmux_session"],
             five_hour=_window_from_payload(payload, "five_hour"),
             seven_day=_window_from_payload(payload, "seven_day"),
+            account=_account_from_payload(payload),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -98,6 +103,7 @@ class UsageSnapshot:
             "ts": self.ts,
             "session_id": self.session_id,
             "tmux_session": self.tmux_session,
+            "account": self.account,
             "five_hour": None if self.five_hour is None else self.five_hour.to_dict(),
             "seven_day": None if self.seven_day is None else self.seven_day.to_dict(),
         }
@@ -110,6 +116,21 @@ class Verdict:
     level: VerdictLevel
     binding_window: Literal["", "5h", "7d"]
     resume_at_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
+class AccountedVerdict:
+    """One session's verdict after attributing fresh usage to its account."""
+
+    session_id: str
+    tmux_session: str
+    kind: UsageKind
+    account: str
+    level: AccountedVerdictLevel
+    binding_window: Literal["", "5h", "7d"]
+    resume_at_epoch: int
+    self_fresh: bool
+    account_attributed: bool
 
 
 def _parse_utc_timestamp(value: str) -> datetime:
@@ -128,6 +149,14 @@ def _window_from_payload(payload: dict[str, object], field_name: str) -> UsageWi
     if raw_window is None:
         return None
     return UsageWindow.from_dict(raw_window, field_name=field_name)
+
+
+def _account_from_payload(payload: dict[str, object]) -> str:
+    """Read optional account identity retained by older persisted snapshots."""
+    account = payload.get("account", "")
+    if not isinstance(account, str):
+        raise ValueError("usage snapshot account must be a string")
+    return account
 
 
 def read_snapshots(
@@ -204,6 +233,66 @@ def evaluate(
     if warn_binding:
         return Verdict(level="approaching", binding_window=warn_binding, resume_at_epoch=0)
     return Verdict(level="ok", binding_window="", resume_at_epoch=0)
+
+
+def _verdict_binding_pct(snapshot: UsageSnapshot, verdict: Verdict) -> float:
+    if verdict.binding_window == "5h":
+        assert snapshot.five_hour is not None
+        return snapshot.five_hour.pct
+    if verdict.binding_window == "7d":
+        assert snapshot.seven_day is not None
+        return snapshot.seven_day.pct
+    return 0
+
+
+def evaluate_grouped(
+    items: list[tuple[UsageSnapshot, bool]], *, policy: UsagePolicy
+) -> list[AccountedVerdict]:
+    """Evaluate fresh readings by account, sorted by account then input order.
+
+    Every input session receives its account's verdict, including stale siblings
+    whose sidecar snapshots no longer refresh.
+    """
+    groups: dict[str, list[tuple[UsageSnapshot, bool]]] = {}
+    for item in items:
+        groups.setdefault(item[0].account, []).append(item)
+
+    results: list[AccountedVerdict] = []
+    severity = {"ok": 0, "approaching": 1, "pause": 2}
+    for account in sorted(groups):
+        group = groups[account]
+        candidates = [(snapshot, evaluate(snapshot, policy=policy)) for snapshot, fresh in group if fresh]
+        if candidates:
+            _, account_verdict = max(
+                candidates,
+                key=lambda item: (
+                    severity[item[1].level],
+                    _verdict_binding_pct(item[0], item[1]),
+                    item[1].binding_window == "7d",
+                ),
+            )
+            level: AccountedVerdictLevel = account_verdict.level
+            binding_window = account_verdict.binding_window
+            resume_at_epoch = account_verdict.resume_at_epoch
+        else:
+            level = "unknown"
+            binding_window = ""
+            resume_at_epoch = 0
+        for snapshot, fresh in group:
+            results.append(
+                AccountedVerdict(
+                    session_id=snapshot.session_id,
+                    tmux_session=snapshot.tmux_session,
+                    kind=snapshot.kind,
+                    account=account,
+                    level=level,
+                    binding_window=binding_window,
+                    resume_at_epoch=resume_at_epoch,
+                    self_fresh=fresh,
+                    account_attributed=not fresh and level in ("pause", "approaching"),
+                )
+            )
+    return results
 
 
 def _start_codex(command: Sequence[str]) -> subprocess.Popen[str]:
@@ -306,12 +395,36 @@ def _codex_window(payload: object, *, now_epoch: int, label: str) -> UsageWindow
     raise CodexSnapshotError(f"codex rate-limit {label} reset time is missing or invalid")
 
 
+def _codex_account(auth_path: Path) -> str:
+    """Read the account email from Codex's local JWT without affecting usage reads."""
+    try:
+        auth = json.loads(auth_path.read_text(encoding="utf-8"))
+        token = auth["tokens"]["id_token"]
+        if not isinstance(token, str):
+            return ""
+        segments = token.split(".")
+        if len(segments) != 3:
+            return ""
+        payload = segments[1] + "=" * (-len(segments[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        if not isinstance(claims, dict):
+            return ""
+        email = claims.get("email")
+        if isinstance(email, str):
+            return email
+        profile = claims.get("https://api.openai.com/profile")
+        return profile.get("email", "") if isinstance(profile, dict) and isinstance(profile.get("email"), str) else ""
+    except (KeyError, OSError, TypeError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return ""
+
+
 def codex_snapshot(
     *,
     codex_bin: Path | str = "codex",
     now: datetime | None = None,
     process_factory: CodexProcessFactory = _start_codex,
     clock: CodexClock = time.monotonic,
+    auth_path: Path = DEFAULT_CODEX_AUTH_PATH,
 ) -> UsageSnapshot:
     """Read the local Codex account's two rate-limit windows through app-server."""
     if now is not None and now.tzinfo is None:
@@ -344,6 +457,7 @@ def codex_snapshot(
         tmux_session="",
         five_hour=_codex_window(rate_limits.get("primary"), now_epoch=int(current.timestamp()), label="primary"),
         seven_day=_codex_window(rate_limits.get("secondary"), now_epoch=int(current.timestamp()), label="secondary"),
+        account=_codex_account(auth_path),
     )
 
 
@@ -353,27 +467,21 @@ def _snapshot_with_fresh(snapshot: UsageSnapshot, fresh: bool) -> dict[str, obje
     return payload
 
 
-def _evaluation_output(snapshot: UsageSnapshot, fresh: bool, policy: UsagePolicy) -> dict[str, object]:
-    result: dict[str, object] = {
-        "session_id": snapshot.session_id,
-        "tmux_session": snapshot.tmux_session,
-        "kind": snapshot.kind,
+def _evaluation_output(verdict: AccountedVerdict) -> dict[str, object]:
+    return {
+        "session_id": verdict.session_id,
+        "tmux_session": verdict.tmux_session,
+        "kind": verdict.kind,
+        "account": verdict.account,
+        "level": verdict.level,
+        "binding_window": verdict.binding_window,
+        "resume_at_epoch": verdict.resume_at_epoch,
+        "resume_at_iso": datetime.fromtimestamp(verdict.resume_at_epoch, UTC).isoformat()
+        if verdict.resume_at_epoch
+        else "",
+        "self_fresh": verdict.self_fresh,
+        "account_attributed": verdict.account_attributed,
     }
-    if not fresh:
-        result.update({"level": "unknown", "stale": True, "binding_window": "", "resume_at_epoch": 0, "resume_at_iso": ""})
-        return result
-    verdict = evaluate(snapshot, policy=policy)
-    result.update(
-        {
-            "level": verdict.level,
-            "binding_window": verdict.binding_window,
-            "resume_at_epoch": verdict.resume_at_epoch,
-            "resume_at_iso": datetime.fromtimestamp(verdict.resume_at_epoch, UTC).isoformat()
-            if verdict.resume_at_epoch
-            else "",
-        }
-    )
-    return result
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -438,8 +546,8 @@ def main(argv: list[str] | None = None) -> int:
             snapshots = read_snapshots(args.dir, staleness_seconds=args.staleness_seconds)
             if args.codex:
                 snapshots.append((codex_snapshot(codex_bin=args.codex_bin), True))
-            for snapshot, fresh in snapshots:
-                print(json.dumps(_evaluation_output(snapshot, fresh, policy), sort_keys=True))
+            for verdict in evaluate_grouped(snapshots, policy=policy):
+                print(json.dumps(_evaluation_output(verdict), sort_keys=True))
     except (CodexSnapshotError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"chitra-usage: {exc}", file=sys.stderr)
         return 1
