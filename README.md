@@ -34,6 +34,13 @@ chitra delivers to and observes LLM-driven sessions from the outside; its own co
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
 - **`chitra.board`** — the deterministic, operator-facing board renderer. It strictly validates the full facts schema, renders the bundled interactive HTML to `index.html` atomically, and records result freshness in `health.json`.
 - **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so any reader can later verify that chitra delivered an exact message at a given time — or that chitra never sent a given message.
+- **`chitra.convlog`** — a deterministic operator-brief validator, BLUF renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
+
+## Operator brief conversation log
+
+`chitra-convo` records one four-state exchange in a plain JSONL conversation log: the full raw upward session message, the caller-composed and chitra-rendered operator brief, the operator's explicit ruling, and the lane directive sent down (optionally linked to its dispatch ledger order id). The caller, normally the monitor harness LLM, owns interpretation and composition; chitra only validates the declared schema, renders the fixed bottom-line-up-front layout, and records exact text.
+
+A thread is pending exactly when its latest operator brief contains a decision and no later operator ruling exists. Brief revisions are allowed, and the latest revision is authoritative; silence never retires a pending ask. `chitra-convo pending` renders all such threads as one numbered message, oldest first.
 
 ## Tmux injection recipe
 
