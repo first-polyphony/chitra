@@ -493,9 +493,10 @@ def main(argv: list[str] | None = None) -> int:
                     add_ask(args.root, args.session_ref, ask)
         else:
             from chitra import board
+            from chitra.artifacts import list_unreviewed_artifacts
 
             records = list_goals(args.root)
-            print(board.render_roster(records, fmt=args.format))
+            print(board.render_roster(records, fmt=args.format, artifacts=list_unreviewed_artifacts(args.root)))
             if args.lint:
                 roster_lint = getattr(board, "roster_lint", None)
                 if roster_lint is not None:

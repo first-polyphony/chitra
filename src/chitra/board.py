@@ -102,6 +102,22 @@ class RosterRecord(Protocol):
     def needs(self) -> str: ...
 
 
+class ArtifactRosterRecord(Protocol):
+    """The published-artifact fields rendered in the operator roster."""
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def url(self) -> str: ...
+
+    @property
+    def published_at(self) -> str: ...
+
+    @property
+    def review_status(self) -> Literal["unreviewed", "reviewed"]: ...
+
+
 def marker_for(status: GoalStatus) -> str:
     """Return the status-only marker, rejecting status outside the six states."""
     try:
@@ -226,6 +242,22 @@ def _awaiting_ruling_lines(records: Sequence[RosterRecord], *, fmt: Literal["box
     return ["AWAITING RULING — surfaced every report until you rule:", *(f"  • {session}: {ask}" for session, ask in asks)]
 
 
+def _unreviewed_artifact_block(
+    artifacts: Sequence[ArtifactRosterRecord], *, fmt: Literal["cards", "box", "markdown"]
+) -> str:
+    """Render each injected unreviewed artifact on one unwrapped, copyable line."""
+    unreviewed = sorted(
+        (artifact for artifact in artifacts if artifact.review_status == "unreviewed"),
+        key=lambda artifact: (artifact.published_at, artifact.url),
+    )
+    if not unreviewed:
+        return ""
+    prefix = "- " if fmt == "markdown" else "  • "
+    return "\n".join(
+        ("UNREVIEWED ARTIFACTS:", *(f"{prefix}{artifact.title} — {artifact.url}" for artifact in unreviewed))
+    )
+
+
 ROSTER_CARD_LABEL_WIDTH = 6
 
 
@@ -261,16 +293,25 @@ def _render_cards(records: Sequence[RosterRecord]) -> str:
     return "\n\n".join((body, "\n".join(awaiting))) if awaiting else body
 
 
-def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["cards", "box", "markdown"] = "cards") -> str:
+def render_roster(
+    records: Sequence[RosterRecord],
+    *,
+    fmt: Literal["cards", "box", "markdown"] = "cards",
+    artifacts: Sequence[ArtifactRosterRecord] = (),
+) -> str:
     """Render every stored lane, stable order (host, session name, full ref).
 
     Default ``cards``: one labelled stanza per lane (readable full sentences).
     ``box``: the fixed-column table. ``markdown``: a client-rendered table.
+    Artifact records are injected by the caller; their URLs are emitted in a
+    separate unwrapped block so operators can copy each complete URL.
     """
-    if not records:
+    artifact_block = _unreviewed_artifact_block(artifacts, fmt=fmt)
+    if not records and not artifact_block:
         return "no lanes recorded"
     if fmt == "cards":
-        return _render_cards(records)
+        roster = _render_cards(records) if records else "no lanes recorded"
+        return "\n\n".join((roster, artifact_block)) if artifact_block else roster
     headers = ("", "Session", "Goal", "Now", "Needs")
     rows = _roster_rows(records)
     if fmt == "markdown":
@@ -279,7 +320,8 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["cards", "box
 
         rendered = ["| " + " | ".join(headers) + " |", "| --- | --- | --- | --- | --- |"]
         rendered.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
-        return "\n".join([*rendered, *_awaiting_ruling_lines(records, fmt="markdown")])
+        roster = "\n".join([*rendered, *_awaiting_ruling_lines(records, fmt="markdown")])
+        return "\n\n".join((roster, artifact_block)) if artifact_block else roster
     if fmt != "box":
         raise ValueError(f"unknown roster format: {fmt}")
     widths = _roster_column_widths(rows)
@@ -321,7 +363,8 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["cards", "box
         )
     )
     awaiting_ruling = _awaiting_ruling_lines(records, fmt="box")
-    return "\n\n".join((table, "\n".join(awaiting_ruling))) if awaiting_ruling else table
+    roster = "\n\n".join((table, "\n".join(awaiting_ruling))) if awaiting_ruling else table
+    return "\n\n".join((roster, artifact_block)) if artifact_block else roster
 
 
 def _terminal_width() -> int:
