@@ -34,7 +34,7 @@ from chitra.state_paths import default_convlog_path
 
 logger = structlog.get_logger(__name__)
 
-SCHEMA = "chitra.convlog.v1"
+SCHEMA: Literal["chitra.convlog.v2"] = "chitra.convlog.v2"
 type EntryKind = Literal["session_msg", "operator_brief", "operator_ruling", "lane_directive"]
 type BriefCategory = Literal["decision", "incident", "milestone", "fyi"]
 type RecommendationBasis = Literal["research", "operator-preference"]
@@ -68,6 +68,8 @@ class OperatorBrief(BaseModel):
 
     session_ref: str = Field(min_length=1)
     program: str = Field(min_length=1)
+    subject: str = ""
+    progress: str = ""
     stage: str = Field(min_length=1, max_length=140)
     category: BriefCategory
     decision: str | None = None
@@ -133,7 +135,7 @@ class OperatorBrief(BaseModel):
 class ConversationEntry(BaseModel):
     """One append-only record in the four-rung operator conversation log."""
 
-    schema_: Literal["chitra.convlog.v1"] = Field(default="chitra.convlog.v1", alias="schema")
+    schema_: Literal["chitra.convlog.v1", "chitra.convlog.v2"] = Field(default=SCHEMA, alias="schema")
     thread_id: str = Field(min_length=1)
     seq: int = Field(ge=1)
     kind: EntryKind
@@ -207,10 +209,24 @@ def _validated_payload(entry: ConversationEntry) -> dict[str, Any]:
             return _LaneDirectivePayload.model_validate(entry.payload).model_dump(mode="json")
 
 
+def _grounding_line(brief: OperatorBrief) -> str:
+    """Render the v2 context lead-in while keeping v1 records readable."""
+    line = f"This is {brief.program} ({brief.session_ref})"
+    if brief.subject.strip():
+        line = f"{line} working on {brief.subject}"
+    if brief.progress.strip():
+        line = f"{line}: {brief.progress}"
+    return f"{line}."
+
+
 def render_brief(brief: OperatorBrief) -> str:
     """Render one brief in the fixed plain-text BLUF layout."""
     if brief.decision is not None:
-        lines = [f"🔴 {brief.program} ({brief.session_ref}) — needs you: {brief.decision}", f"Stage: {brief.stage}"]
+        lines = [
+            _grounding_line(brief),
+            f"🔴 {brief.program} ({brief.session_ref}) — needs you: {brief.decision}",
+            f"Stage: {brief.stage}",
+        ]
         if brief.recommendation_basis == "operator-preference":
             recommendation = "Recommendation: your call — no research applies."
             if brief.recommendation:
@@ -223,7 +239,11 @@ def render_brief(brief: OperatorBrief) -> str:
             lines.extend(f"  {index}. {option.label} — {option.consequence}" for index, option in enumerate(brief.options, start=1))
     else:
         marker = {"incident": "🟧", "milestone": "✅", "fyi": "🟦"}[brief.category]
-        lines = [f"{marker} {brief.program} ({brief.session_ref}) — {brief.category}", f"Stage: {brief.stage}"]
+        lines = [
+            _grounding_line(brief),
+            f"{marker} {brief.program} ({brief.session_ref}) — {brief.category}; nothing to answer yet.",
+            f"Stage: {brief.stage}",
+        ]
         if brief.recommendation:
             lines.append(f"Recommendation: {brief.recommendation}")
     lines.append("— from the session, verbatim —")
