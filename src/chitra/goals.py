@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -54,8 +54,9 @@ class GoalRecord:
     last_verified: str = ""
     created_at: str = ""
     updated_at: str = ""
+    open_asks: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "session_ref": self.session_ref,
             "goal": self.goal,
@@ -66,6 +67,7 @@ class GoalRecord:
             "last_verified": self.last_verified,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "open_asks": list(self.open_asks),
         }
 
 
@@ -125,7 +127,16 @@ def _record_from_dict(payload: object) -> GoalRecord:
         last_verified=values["last_verified"],
         created_at=values["created_at"],
         updated_at=values["updated_at"],
+        open_asks=_open_asks_from_payload(payload),
     )
+
+
+def _open_asks_from_payload(payload: dict[str, object]) -> tuple[str, ...]:
+    """Read optional persisted asks, retaining compatibility with v1 records."""
+    raw_open_asks = payload.get("open_asks", [])
+    if not isinstance(raw_open_asks, list) or not all(isinstance(ask, str) for ask in raw_open_asks):
+        raise ValueError("goal record open_asks must be a list of strings")
+    return tuple(raw_open_asks)
 
 
 def load_goals(root: Path | None = None) -> list[GoalRecord]:
@@ -161,13 +172,21 @@ def _write_goals(root: Path | None, records: list[GoalRecord]) -> None:
             os.unlink(tmp_name)
 
 
-def upsert_goal(root: Path | None, rec: GoalRecord) -> GoalRecord:
-    """Validate and atomically insert or update one record by ``session_ref``."""
+def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = False) -> GoalRecord:
+    """Validate and atomically insert or update one record by ``session_ref``.
+
+    An update with no incoming asks preserves any stored asks, so routine
+    status or ``now`` revisions cannot silently retire an operator request.
+    Pass ``clear_open_asks=True`` only for an explicit retirement path.
+    """
     issues = validate_goal(rec)
     if issues:
         raise GoalValidationError("; ".join(issues))
     existing = get_goal(root, rec.session_ref)
     now = _utc_now()
+    open_asks = rec.open_asks
+    if existing is not None and not open_asks and existing.open_asks and not clear_open_asks:
+        open_asks = existing.open_asks
     stored = GoalRecord(
         session_ref=rec.session_ref,
         goal=rec.goal,
@@ -178,12 +197,52 @@ def upsert_goal(root: Path | None, rec: GoalRecord) -> GoalRecord:
         last_verified=rec.last_verified,
         created_at=existing.created_at if existing is not None else now,
         updated_at=now,
+        open_asks=open_asks,
     )
     records = [record for record in load_goals(root) if record.session_ref != rec.session_ref]
     records.append(stored)
     _write_goals(root, records)
     logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
     return stored
+
+
+def add_ask(root: Path | None, session_ref: str, ask: str) -> GoalRecord:
+    """Persist one exact open operator ask for an existing lane, once only."""
+    existing = get_goal(root, session_ref)
+    if existing is None:
+        raise GoalNotFoundError(session_ref)
+    if ask in existing.open_asks:
+        return existing
+    return upsert_goal(root, replace(existing, open_asks=(*existing.open_asks, ask)))
+
+
+def resolve_ask(
+    root: Path | None,
+    session_ref: str,
+    *,
+    ask: str | None = None,
+    index: int | None = None,
+    all: bool = False,
+) -> GoalRecord:
+    """Explicitly remove one matching ask, one indexed ask, or every ask."""
+    selector_count = int(ask is not None) + int(index is not None) + int(all)
+    if selector_count != 1:
+        raise ValueError("select exactly one of ask, index, or all")
+    existing = get_goal(root, session_ref)
+    if existing is None:
+        raise GoalNotFoundError(session_ref)
+    if all:
+        remaining: tuple[str, ...] = ()
+    elif ask is not None:
+        if ask not in existing.open_asks:
+            raise ValueError("open ask was not found")
+        remaining = tuple(item for item in existing.open_asks if item != ask)
+    else:
+        assert index is not None
+        if index < 0 or index >= len(existing.open_asks):
+            raise ValueError("open ask index is out of range")
+        remaining = existing.open_asks[:index] + existing.open_asks[index + 1 :]
+    return upsert_goal(root, replace(existing, open_asks=remaining), clear_open_asks=True)
 
 
 def get_goal(root: Path | None, session_ref: str) -> GoalRecord | None:
@@ -228,6 +287,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     set_command.add_argument("--status", choices=GOAL_STATUSES, default="working")
     set_command.add_argument("--now", default="")
     set_command.add_argument("--last-verified", default="")
+    asks_group = set_command.add_mutually_exclusive_group()
+    asks_group.add_argument("--open-ask", action="append", default=[])
+    asks_group.add_argument("--clear-asks", action="store_true")
 
     get_command = commands.add_parser("get", help="Print one lane goal as JSON.")
     add_root(get_command)
@@ -240,6 +302,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     close_command = commands.add_parser("close", help="Remove a closed lane goal.")
     add_root(close_command)
     close_command.add_argument("--session-ref", required=True)
+
+    add_ask_command = commands.add_parser("add-ask", help="Add one persistent open operator ask to a lane.")
+    add_root(add_ask_command)
+    add_ask_command.add_argument("--session-ref", required=True)
+    add_ask_command.add_argument("--ask", required=True)
+
+    resolve_ask_command = commands.add_parser("resolve-ask", help="Explicitly retire persisted open operator asks.")
+    add_root(resolve_ask_command)
+    resolve_ask_command.add_argument("--session-ref", required=True)
+    selectors = resolve_ask_command.add_mutually_exclusive_group(required=True)
+    selectors.add_argument("--ask")
+    selectors.add_argument("--index", type=int)
+    selectors.add_argument("--all", action="store_true")
+
+    scan_asks_command = commands.add_parser("scan-asks", help="Extract verbatim open asks from a lane transcript.")
+    add_root(scan_asks_command)
+    scan_asks_command.add_argument("--transcript", type=Path, required=True)
+    scan_asks_command.add_argument("--session-ref")
+    scan_asks_command.add_argument("--record", action="store_true")
 
     roster_command = commands.add_parser("roster", help="Render the operator roster table.")
     add_root(roster_command)
@@ -260,8 +341,9 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 now=args.now,
                 last_verified=args.last_verified,
+                open_asks=tuple(args.open_ask),
             )
-            _print_record(upsert_goal(args.root, requested_record))
+            _print_record(upsert_goal(args.root, requested_record, clear_open_asks=args.clear_asks))
         elif args.command == "get":
             found_record = get_goal(args.root, args.session_ref)
             if found_record is None:
@@ -273,9 +355,24 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps([record.to_dict() for record in records], indent=2, sort_keys=True))
             else:
                 for record in records:
-                    print(f"{record.session_ref}\t{record.status}\t{record.goal}")
+                    print(f"{record.session_ref}\t{record.status}\t{record.goal}\t{json.dumps(list(record.open_asks))}")
         elif args.command == "close":
             _print_record(close_goal(args.root, args.session_ref))
+        elif args.command == "add-ask":
+            _print_record(add_ask(args.root, args.session_ref, args.ask))
+        elif args.command == "resolve-ask":
+            _print_record(resolve_ask(args.root, args.session_ref, ask=args.ask, index=args.index, all=args.all))
+        elif args.command == "scan-asks":
+            if args.record and args.session_ref is None:
+                raise ValueError("--record requires --session-ref")
+            from chitra.lane_read import extract_open_asks, read_last_assistant_message
+
+            asks = extract_open_asks(read_last_assistant_message(args.transcript))
+            for ask in asks:
+                print(ask)
+                if args.record:
+                    assert args.session_ref is not None
+                    add_ask(args.root, args.session_ref, ask)
         else:
             from chitra import board
 
