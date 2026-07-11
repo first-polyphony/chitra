@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -15,11 +17,14 @@ from chitra.goals import (
     GoalValidationError,
     add_ask,
     close_goal,
+    due_goals,
     get_goal,
+    hold_goal,
     list_goals,
     load_goals,
     main,
     resolve_ask,
+    resume_goal,
     session_host,
     session_name,
     upsert_goal,
@@ -134,6 +139,49 @@ def test_load_old_record_without_open_asks_is_backward_compatible(tmp_path: Path
 
     assert load_goals(tmp_path)[0].open_asks == ()
     assert load_goals(tmp_path)[0].needs == ""
+    assert load_goals(tmp_path)[0].hold_reason == ""
+    assert load_goals(tmp_path)[0].resume_at == ""
+
+
+def test_hold_resume_due_and_upsert_hold_metadata_preservation(tmp_path: Path) -> None:
+    stored = upsert_goal(tmp_path, _record())
+    held = hold_goal(tmp_path, stored.session_ref, reason="rate-limit:5h", resume_at="2026-07-10T12:00:00Z")
+
+    assert held.status == "held"
+    assert held.goal == stored.goal
+    assert held.hold_reason == "rate-limit:5h"
+    assert held.resume_at == "2026-07-10T12:00:00Z"
+
+    revised = upsert_goal(tmp_path, replace(held, now="waiting", hold_reason="", resume_at=""))
+    assert revised.hold_reason == "rate-limit:5h"
+    assert revised.resume_at == "2026-07-10T12:00:00Z"
+    assert due_goals(tmp_path, now=datetime(2026, 7, 10, 11, 59, tzinfo=UTC)) == []
+    assert due_goals(tmp_path, now=datetime(2026, 7, 10, 12, tzinfo=UTC)) == [revised]
+
+    resumed = resume_goal(tmp_path, stored.session_ref)
+    assert resumed.status == "working"
+    assert resumed.hold_reason == ""
+    assert resumed.resume_at == ""
+
+
+def test_hold_resume_due_errors_and_cli_validation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    stored = upsert_goal(tmp_path, _record())
+    with pytest.raises(GoalNotFoundError):
+        hold_goal(tmp_path, "missing:lane", reason="operator")
+    with pytest.raises(ValueError, match="not held"):
+        resume_goal(tmp_path, stored.session_ref)
+
+    hold_goal(tmp_path, stored.session_ref, reason="operator")
+    second = upsert_goal(tmp_path, _record(session_ref="host:second:0.0"))
+    hold_goal(tmp_path, second.session_ref, reason="rate-limit:7d", resume_at="2026-07-10T10:00:00+00:00")
+    hold_goal(tmp_path, stored.session_ref, reason="rate-limit:5h", resume_at="2026-07-10T09:00:00+00:00")
+    assert [record.session_ref for record in due_goals(tmp_path, now=datetime(2026, 7, 10, 11, tzinfo=UTC))] == [
+        stored.session_ref,
+        second.session_ref,
+    ]
+
+    assert main(["hold", "--root", str(tmp_path), "--session-ref", second.session_ref, "--reason", "operator", "--resume-at", "nope"]) == 1
+    assert "ISO8601" in capsys.readouterr().err
 
 
 def test_goal_cli_outputs_open_asks_needs_and_scan_recording_requires_a_lane(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

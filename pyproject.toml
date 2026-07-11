@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chitra"
-version = "0.3.0"
+version = "0.4.0"
 description = "Deterministic tmux relay/dedup daemons for AI-agent fleet monitoring"
 readme = "README.md"
 license = "MIT"
@@ -33,6 +33,7 @@ triaged = "chitra.triaged:main"
 draft-scanner = "chitra.draft_scanner:main"
 chitra-board = "chitra.board:main"
 chitra-goals = "chitra.goals:main"
+chitra-usage = "chitra.usage:main"
 
 [project.urls]
 Repository = "https://github.com/first-polyphony/chitra"

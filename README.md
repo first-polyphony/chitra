@@ -22,6 +22,11 @@ BrowserStack's `chitragupta-node` and `chitragupta-rails` are open-source SDKs t
 
 chitra delivers to and observes LLM-driven sessions from the outside; its own code path makes no LLM calls — no drafting, no judgment calls, deterministic relay/plumbing only.
 
+### Session-management primitives
+
+- **`chitra.usage`** — strict reader for Claude statusline sidecar and Codex account usage snapshots, plus pure rate-limit threshold evaluation. It reports facts (`ok`, `approaching`, `pause`, or stale/unknown) and never pauses a lane or chooses an action.
+- **`chitra.goals`** — a deterministic per-lane goal store. Its `hold`, `resume`, and `due` subcommands record the monitor's hold bookkeeping while preserving the stated goal; the caller decides whether and how to act on a due record.
+
 - **`chitra.dispatch`** — a tmux dispatch library. It checks for tmux copy-mode and cancels it, uses `paste-buffer -p` for a proper bracketed-paste wrapper, then confirms delivery by grepping the target session's own transcript rather than trusting a pane screenshot. Includes `LaneLock`, a file-based single-writer lock: only one writer delivers to a given session id at a time.
 - **`chitra.dispatchd`** — a daemon that drains a JSON order queue (`queue/orders/*.json`), delivers each order via `chitra.dispatch` under a `LaneLock`, writes a result JSON, and moves the processed order aside. Once a result file exists for an order, it is never redispatched — but a crash between the paste actually happening and the result file being written is a real gap that can cause a redelivery on restart; see "Crash-safety" below.
 - **`chitra.triaged`** — a daemon that tails an events log and emits a triage event only when a session's state signature changes, not on every repeated poll. Its receiving compatibility artifacts are `queue.tsv`, deduplicated critical `flags.log`, and `stats.json`.
