@@ -52,11 +52,14 @@ PROVIDER_LABELS = {
     "tavily": "Tavily API key",
     "github": "GitHub OAuth",
 }
-ROSTER_GOAL_MAX_WIDTH = 60
-ROSTER_NOW_MAX_WIDTH = 50
+ROSTER_SESSION_MAX_WIDTH = 24
+ROSTER_GOAL_MAX_WIDTH = 34
+ROSTER_NOW_MAX_WIDTH = 28
+ROSTER_NEEDS_MAX_WIDTH = 26
 ROSTER_MARKERS: dict[GoalStatus, str] = {
     "blocked": "🔴",
     "held": "🟡",
+    "idle": "🟡",
     "working": "🟢",
     "done-pending-verification": "🟢",
     "done-pending-close": "🟢",
@@ -84,13 +87,33 @@ class RosterRecord(Protocol):
     @property
     def open_asks(self) -> tuple[str, ...]: ...
 
+    @property
+    def needs(self) -> str: ...
+
 
 def marker_for(status: GoalStatus) -> str:
-    """Return the prescribed marker, rejecting status outside the five states."""
+    """Return the status-only marker, rejecting status outside the six states."""
     try:
         return ROSTER_MARKERS[status]
     except KeyError as exc:
         raise ValueError(f"unknown goal status: {status}") from exc
+
+
+def compute_marker(record: RosterRecord) -> str:
+    """Return the deterministic roster marker with this precedence.
+
+    Open asks or ``blocked`` are red first because they need a named human
+    unblock. ``held`` and ``idle`` are yellow because they are idle by design.
+    ``working`` and the active Chitra completion states are green. Any other
+    status is uncolorable.
+    """
+    if record.open_asks or record.status == "blocked":
+        return "🔴"
+    if record.status in ("held", "idle"):
+        return "🟡"
+    if record.status in ("working", "done-pending-verification", "done-pending-close"):
+        return "🟢"
+    raise ValueError(f"uncolorable status: {record.status}")
 
 
 def _roster_cell(value: str, limit: int) -> str:
@@ -99,7 +122,7 @@ def _roster_cell(value: str, limit: int) -> str:
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
-def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, str]]:
+def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, str, str]]:
     """Build rows sorted host, session name, then full ref for stable output."""
     ordered = sorted(
         records,
@@ -109,15 +132,20 @@ def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, s
             record.session_ref,
         ),
     )
-    return [
-        (
-            marker_for(record.status),
-            session_name(record.session_ref),
-            _roster_cell(f"{record.goal} — done: {record.done_when}", ROSTER_GOAL_MAX_WIDTH),
-            _roster_cell(record.now, ROSTER_NOW_MAX_WIDTH),
+    rows: list[tuple[str, str, str, str, str]] = []
+    for record in ordered:
+        marker = compute_marker(record)
+        needs = record.needs or "; ".join(record.open_asks) or "(name the block)" if marker == "🔴" else "—"
+        rows.append(
+            (
+                marker,
+                _roster_cell(session_name(record.session_ref), ROSTER_SESSION_MAX_WIDTH),
+                _roster_cell(f"{record.goal} — done: {record.done_when}", ROSTER_GOAL_MAX_WIDTH),
+                _roster_cell(record.now, ROSTER_NOW_MAX_WIDTH),
+                _roster_cell(needs, ROSTER_NEEDS_MAX_WIDTH),
+            )
         )
-        for record in ordered
-    ]
+    return rows
 
 
 def _ordered_roster_records(records: Sequence[RosterRecord]) -> list[RosterRecord]:
@@ -150,13 +178,13 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
     """
     if not records:
         return "no lanes recorded"
-    headers = ("status-marker", "Session", "Goal", "Now")
+    headers = ("marker", "Session", "Goal", "Now", "Needs")
     rows = _roster_rows(records)
     if fmt == "markdown":
         def markdown_cell(value: str) -> str:
             return value.replace("|", "\\|")
 
-        rendered = ["| " + " | ".join(headers) + " |", "| --- | --- | --- | --- |"]
+        rendered = ["| " + " | ".join(headers) + " |", "| --- | --- | --- | --- | --- |"]
         rendered.extend("| " + " | ".join(markdown_cell(cell) for cell in row) + " |" for row in rows)
         return "\n".join([*rendered, *_awaiting_ruling_lines(records, fmt="markdown")])
     if fmt != "box":
@@ -166,7 +194,7 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
     def border(left: str, middle: str, right: str, fill: str) -> str:
         return left + middle.join(fill * (width + 2) for width in widths) + right
 
-    def line(row: tuple[str, str, str, str]) -> str:
+    def line(row: tuple[str, str, str, str, str]) -> str:
         return "│" + "│".join(f" {cell:<{widths[index]}} " for index, cell in enumerate(row)) + "│"
 
     table = "\n".join(
