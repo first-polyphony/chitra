@@ -33,6 +33,7 @@ triaged = "chitra.triaged:main"
 draft-scanner = "chitra.draft_scanner:main"
 chitra-board = "chitra.board:main"
 chitra-goals = "chitra.goals:main"
+chitra-artifacts = "chitra.artifacts:main"
 chitra-usage = "chitra.usage:main"
 chitra-convo = "chitra.convlog:main"
 
