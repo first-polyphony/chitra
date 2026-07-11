@@ -226,14 +226,51 @@ def _awaiting_ruling_lines(records: Sequence[RosterRecord], *, fmt: Literal["box
     return ["AWAITING RULING — surfaced every report until you rule:", *(f"  • {session}: {ask}" for session, ask in asks)]
 
 
-def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markdown"] = "box") -> str:
-    """Render every stored lane in fixed roster columns.
+ROSTER_CARD_LABEL_WIDTH = 6
 
-    The monitor specification gives no ordering, so this renderer adds a
-    documented stable rule: host, then session name, then full session ref.
+
+def _render_cards(records: Sequence[RosterRecord]) -> str:
+    """Render each lane as a labelled stanza rather than a table.
+
+    Goal/Now are full sentences, which never fit table columns cleanly (wrap =
+    noisy, truncate = useless). A card puts the marker + session on a header
+    line and the full fields beneath, wrapped to the terminal with a hanging
+    indent. Nothing truncated, no column/emoji-width alignment to break — the
+    markers down the left edge are the scan surface.
+    """
+    indent = " " * (ROSTER_MARKER_WIDTH + 1)  # align field labels under the session name
+    avail = max(24, _terminal_width() - len(indent) - ROSTER_CARD_LABEL_WIDTH)
+
+    def field(label: str, text: str) -> list[str]:
+        lines = textwrap.wrap(" ".join(text.split()), width=avail, break_long_words=True, break_on_hyphens=False) or [""]
+        head = f"{indent}{label:<{ROSTER_CARD_LABEL_WIDTH}}{lines[0]}"
+        tail = [f"{indent}{'':<{ROSTER_CARD_LABEL_WIDTH}}{line}" for line in lines[1:]]
+        return [head, *tail]
+
+    blocks: list[str] = []
+    for record in _ordered_roster_records(records):
+        marker = compute_marker(record)
+        block = [f"{marker} {session_name(record.session_ref)}"]
+        block += field("Goal", f"{record.goal}  ·  done: {record.done_when}")
+        block += field("Now", record.now)
+        if marker == "🔴":
+            block += field("Needs", _roster_needs(record, marker))
+        blocks.append("\n".join(block))
+    body = "\n\n".join(blocks)
+    awaiting = _awaiting_ruling_lines(records, fmt="box")
+    return "\n\n".join((body, "\n".join(awaiting))) if awaiting else body
+
+
+def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["cards", "box", "markdown"] = "cards") -> str:
+    """Render every stored lane, stable order (host, session name, full ref).
+
+    Default ``cards``: one labelled stanza per lane (readable full sentences).
+    ``box``: the fixed-column table. ``markdown``: a client-rendered table.
     """
     if not records:
         return "no lanes recorded"
+    if fmt == "cards":
+        return _render_cards(records)
     headers = ("", "Session", "Goal", "Now", "Needs")
     rows = _roster_rows(records)
     if fmt == "markdown":
