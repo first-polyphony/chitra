@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 
+from chitra.artifacts import ARTIFACT_URL_PREFIX, ArtifactRecord, upsert_artifact
 from chitra.goals import (
     GoalNotFoundError,
     GoalRecord,
@@ -319,3 +320,23 @@ def test_validate_goal_reports_each_doctrine_violation() -> None:
 def test_roster_command_works_with_an_empty_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["roster", "--root", str(tmp_path)]) == 0
     assert capsys.readouterr().out.strip() == "no lanes recorded"
+
+
+def test_roster_command_reads_unreviewed_artifacts_from_the_shared_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    artifact = upsert_artifact(
+        tmp_path,
+        ArtifactRecord(
+            url=f"{ARTIFACT_URL_PREFIX}operator-copyable-link",
+            title="Operator artifact",
+            kind="page",
+            source="tophand:/var/lib/chitra/artifact.html",
+        ),
+    )
+    capsys.readouterr()
+
+    assert main(["roster", "--root", str(tmp_path)]) == 0
+    rendered = capsys.readouterr().out
+
+    assert f"{artifact.title} — {artifact.url}" in rendered
