@@ -19,7 +19,9 @@ import os
 import re
 import socket
 import subprocess
+import textwrap
 import time
+import unicodedata
 from collections.abc import Sequence
 from importlib.resources import files
 from pathlib import Path
@@ -52,10 +54,19 @@ PROVIDER_LABELS = {
     "tavily": "Tavily API key",
     "github": "GitHub OAuth",
 }
-ROSTER_SESSION_MAX_WIDTH = 24
+# Minimum column widths (display columns). Cells WRAP to multiple lines rather
+# than truncate, so nothing is lost; these are floors for the terminal-width-
+# aware allocation, and the Session column caps here.
+ROSTER_SESSION_MAX_WIDTH = 20
 ROSTER_GOAL_MAX_WIDTH = 34
 ROSTER_NOW_MAX_WIDTH = 28
 ROSTER_NEEDS_MAX_WIDTH = 26
+ROSTER_GOAL_MIN_WIDTH = 24
+ROSTER_NOW_MIN_WIDTH = 18
+ROSTER_NEEDS_MIN_WIDTH = 8
+ROSTER_MARKER_WIDTH = 2  # emoji markers render 2 terminal columns
+ROSTER_DEFAULT_TERM_WIDTH = 100
+ROSTER_MAX_TERM_WIDTH = 160
 ROSTER_MARKERS: dict[GoalStatus, str] = {
     "blocked": "🔴",
     "held": "🟡",
@@ -116,33 +127,78 @@ def compute_marker(record: RosterRecord) -> str:
     raise ValueError(f"uncolorable status: {record.status}")
 
 
-def _roster_cell(value: str, limit: int) -> str:
-    """Keep one physical table row by collapsing whitespace and truncating."""
-    compact = " ".join(value.split())
-    return compact if len(compact) <= limit else compact[: limit - 1] + "…"
+_ZERO_WIDTH_CHARS = frozenset(("️", "︎", "‍"))
+
+
+def _char_width(char: str) -> int:
+    """Display width of a single character in terminal columns.
+
+    Variation selectors / ZWJ and combining marks are zero-width; East-Asian
+    wide/fullwidth and the emoji blocks (which the status markers live in)
+    render two columns. Everything else is one.
+    """
+    if char in _ZERO_WIDTH_CHARS or unicodedata.combining(char):
+        return 0
+    if unicodedata.east_asian_width(char) in ("W", "F"):
+        return 2
+    code = ord(char)
+    if 0x1F000 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF:
+        return 2
+    return 1
+
+
+def display_width(text: str) -> int:
+    """Terminal display width of a string (emoji/CJK-aware, unlike ``len``)."""
+    return sum(_char_width(char) for char in text)
+
+
+def _pad(text: str, width: int) -> str:
+    """Right-pad ``text`` to ``width`` DISPLAY columns (not code points)."""
+    return text + " " * max(0, width - display_width(text))
+
+
+def _wrap_cell(text: str, width: int) -> list[str]:
+    """Word-wrap collapsed ``text`` into lines no wider than ``width`` columns.
+
+    Wrapping (never single-line truncation) so a Goal's done-condition and a
+    long Now/Needs survive intact — they just flow onto more lines. Overlong
+    unbroken tokens are hard-split so a row can never exceed its column width.
+    """
+    compact = " ".join(text.split())
+    if not compact:
+        return [""]
+    lines = textwrap.wrap(
+        compact,
+        width=max(1, width),
+        break_long_words=True,
+        break_on_hyphens=False,
+    )
+    return lines or [""]
+
+
+def _roster_needs(record: RosterRecord, marker: str) -> str:
+    """The Needs cell: for a red lane, the named unblock; otherwise a dash."""
+    if marker == "🔴":
+        return record.needs or "; ".join(record.open_asks) or "(name the block)"
+    return "—"
 
 
 def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, str, str]]:
-    """Build rows sorted host, session name, then full ref for stable output."""
-    ordered = sorted(
-        records,
-        key=lambda record: (
-            session_host(record.session_ref),
-            session_name(record.session_ref),
-            record.session_ref,
-        ),
-    )
+    """Build FULL (untruncated) cell rows in stable host/session/ref order.
+
+    Truncation/wrapping is the renderer's job (box wraps; markdown lets the
+    client wrap), so the cells here carry the complete text.
+    """
     rows: list[tuple[str, str, str, str, str]] = []
-    for record in ordered:
+    for record in _ordered_roster_records(records):
         marker = compute_marker(record)
-        needs = record.needs or "; ".join(record.open_asks) or "(name the block)" if marker == "🔴" else "—"
         rows.append(
             (
                 marker,
-                _roster_cell(session_name(record.session_ref), ROSTER_SESSION_MAX_WIDTH),
-                _roster_cell(f"{record.goal} — done: {record.done_when}", ROSTER_GOAL_MAX_WIDTH),
-                _roster_cell(record.now, ROSTER_NOW_MAX_WIDTH),
-                _roster_cell(needs, ROSTER_NEEDS_MAX_WIDTH),
+                session_name(record.session_ref),
+                f"{record.goal} — done: {record.done_when}",
+                record.now,
+                _roster_needs(record, marker),
             )
         )
     return rows
@@ -178,7 +234,7 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
     """
     if not records:
         return "no lanes recorded"
-    headers = ("marker", "Session", "Goal", "Now", "Needs")
+    headers = ("", "Session", "Goal", "Now", "Needs")
     rows = _roster_rows(records)
     if fmt == "markdown":
         def markdown_cell(value: str) -> str:
@@ -189,25 +245,79 @@ def render_roster(records: Sequence[RosterRecord], *, fmt: Literal["box", "markd
         return "\n".join([*rendered, *_awaiting_ruling_lines(records, fmt="markdown")])
     if fmt != "box":
         raise ValueError(f"unknown roster format: {fmt}")
-    widths = [max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)]
+    widths = _roster_column_widths(rows)
 
     def border(left: str, middle: str, right: str, fill: str) -> str:
         return left + middle.join(fill * (width + 2) for width in widths) + right
 
-    def line(row: tuple[str, str, str, str, str]) -> str:
-        return "│" + "│".join(f" {cell:<{widths[index]}} " for index, cell in enumerate(row)) + "│"
+    def physical_lines(row: tuple[str, str, str, str, str]) -> list[str]:
+        # Marker is a single glyph in a fixed slot (never wrapped); the text
+        # columns wrap to as many lines as they need. Pad every segment by
+        # DISPLAY width so emoji/CJK never shift a column.
+        wrapped = [
+            [row[0]] if index == 0 else _wrap_cell(row[index], widths[index])
+            for index in range(len(row))
+        ]
+        height = max(len(cell) for cell in wrapped)
+        out: list[str] = []
+        for r in range(height):
+            segments = [
+                " " + _pad(cell[r] if r < len(cell) else "", widths[index]) + " "
+                for index, cell in enumerate(wrapped)
+            ]
+            out.append("│" + "│".join(segments) + "│")
+        return out
+
+    body: list[str] = []
+    for position, row in enumerate(rows):
+        if position:
+            body.append(border("├", "┼", "┤", "─"))  # rule between multi-line lanes
+        body.extend(physical_lines(row))
 
     table = "\n".join(
         (
             border("┌", "┬", "┐", "─"),
-            line(headers),
+            *physical_lines(headers),
             border("├", "┼", "┤", "─"),
-            *(line(row) for row in rows),
+            *body,
             border("└", "┴", "┘", "─"),
         )
     )
     awaiting_ruling = _awaiting_ruling_lines(records, fmt="box")
     return "\n\n".join((table, "\n".join(awaiting_ruling))) if awaiting_ruling else table
+
+
+def _terminal_width() -> int:
+    """Usable terminal width in columns, clamped to a sane band."""
+    try:
+        cols = int(os.environ.get("COLUMNS", "") or 0)
+    except ValueError:
+        cols = 0
+    if cols <= 0:
+        cols = ROSTER_DEFAULT_TERM_WIDTH
+    return max(80, min(cols, ROSTER_MAX_TERM_WIDTH))
+
+
+def _roster_column_widths(rows: Sequence[tuple[str, str, str, str, str]]) -> list[int]:
+    """Allocate the five column widths to the terminal, wrapping absorbs the rest.
+
+    marker + Session are fixed; Goal / Now / Needs split the remainder by
+    priority (Goal widest), each floored so nothing collapses to a sliver.
+    Because cells wrap, a narrow terminal just makes taller rows — content is
+    never dropped.
+    """
+    term = _terminal_width()
+    # box overhead: one leading '│', then per column '│ … ' → (ncols+1) bars + ncols*2 spaces
+    overhead = (5 + 1) + 5 * 2
+    budget = max(40, term - overhead)
+    marker_w = ROSTER_MARKER_WIDTH
+    session_source = [display_width("Session"), *(display_width(row[1]) for row in rows)]
+    session_w = max(display_width("Session"), min(max(session_source), ROSTER_SESSION_MAX_WIDTH))
+    remaining = max(ROSTER_GOAL_MIN_WIDTH + ROSTER_NOW_MIN_WIDTH + ROSTER_NEEDS_MIN_WIDTH, budget - marker_w - session_w)
+    goal_w = max(ROSTER_GOAL_MIN_WIDTH, int(remaining * 0.46))
+    now_w = max(ROSTER_NOW_MIN_WIDTH, int(remaining * 0.32))
+    needs_w = max(ROSTER_NEEDS_MIN_WIDTH, remaining - goal_w - now_w)
+    return [marker_w, session_w, goal_w, now_w, needs_w]
 
 
 def _env_path(name: str, default: Path) -> Path:
