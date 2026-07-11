@@ -29,25 +29,31 @@ surfaces. See [PR #14](https://github.com/first-polyphony/chitra/pull/14).
 ### Deferred: capabilities from the retired predecessor monitor session-monitor
 
 When predecessor monitor's fleet-nudging role was decommissioned in favour of chitra, an audit found two capabilities that lived in
-predecessor monitor's monitor but have no equivalent in chitra. They are recorded here as
-candidates, **not committed** — and each must clear chitra's own scope test
-before it lands, because both add state or reasoning to what is otherwise a
-thin, stateless relay:
+predecessor monitor's monitor but had no equivalent in chitra. One of the two — session↔goal
+binding — has since been built (see below); crash recovery / checkpointing is
+the one that remains deferred, and it still must clear chitra's own scope test
+before it lands, because it adds persistent per-lane state to what is otherwise
+a thin relay:
 
-- **Crash recovery / checkpointing** — predecessor monitor's `checkpoint` /
+- **Crash recovery / checkpointing (still deferred)** — predecessor monitor's `checkpoint` /
   `checkpoint-restore` / `recovery-list` / `recovery-resume` /
   `manual-takeover` subcommands let a watcher snapshot a lane and resume it
   after a crash. This is the most distinctive thing predecessor monitor's monitor did that
   chitra doesn't. It adds persistent per-lane state, so by this document's own
   rule it likely belongs in a **consumer** of chitra's ledger/feed, not in the
-  core daemons.
-- **Session↔goal binding** — predecessor monitor's `enroll` / `auto-enroll` / `list-goals` /
-  `revise-goal` / `close-goal` bind a session to an explicit goal record and
-  generate checkpoint-first bounded nudges. Chitra's `DispatchOrder` carries a
-  `nudge` and `routing_hint` but no goal object; adding an optional `goal`
-  field to the order would let the queued path *carry* a goal without the
-  daemons *reasoning* about it — that narrow slice may fit core; the
-  goal-generation/reasoning does not.
+  core daemons. Recorded here as a candidate, **not committed**.
+
+**Session↔goal binding — built (no longer deferred).** The deterministic
+goal store and roster landed in `chitra.goals` / the `chitra-goals` CLI via
+[PR #38](https://github.com/first-polyphony/chitra/pull/38) (goal store +
+roster), [#39](https://github.com/first-polyphony/chitra/pull/39) (persist open
+asks, full-transcript read) and [#40](https://github.com/first-polyphony/chitra/pull/40)
+(roster color legend / `Needs` column). A per-lane goal record now binds a
+session to an explicit goal, completion condition, and status — the equivalent
+of predecessor monitor's `enroll` / `list-goals` / `revise-goal` / `close-goal`. This stays
+inside chitra's scope test because the store is deterministic with no LLM call
+in its own code path (it records the monitor's stated goal; it does not
+generate or reason about one).
 
 Deliberately left out of scope: predecessor monitor's LLM-reasoner nudge generation. Reasoning
 belongs in a consuming tool, per the scope statement at the top of this file.

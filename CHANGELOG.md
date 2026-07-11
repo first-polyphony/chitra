@@ -4,10 +4,22 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
-### Changed
-- Renamed the `POLYPHONY_CHITRA_*` environment variables to `CHITRA_*` (e.g. `CHITRA_LOCAL_HOST`, `CHITRA_LANE_LOCK_DIR`) and the default `/var/lib/polyphony-chitra/` state paths to `/var/lib/chitra/`, so the tool's public interface no longer names an internal project affiliation. If you set any `POLYPHONY_CHITRA_*` variable or rely on the old default paths, update to the `CHITRA_*` names / `/var/lib/chitra/` paths.
+## [0.3.0] - 2026-07-10
 
 ### Added
+- `chitra.goals`: deterministic, per-lane goal store and roster — records the monitor's stated goal, completion condition, and current status (`working`/`held`/`idle`/`blocked`/`done-pending-verification`/`done-pending-close`) with no LLM call in its own code path. Exposed via the `chitra-goals` CLI (`roster`, `scan-asks`).
+- Persistent open-asks tracking: `chitra-goals scan-asks` reads the full last assistant message from a lane's transcript (never a fixed-size pane tail) and, with `--record`, holds each numbered `awaiting ruling`/open-question line in the lane's durable record.
+- Operator-facing roster rendering (`roster --format box`) with a color legend, a `Needs` column, a computed marker, and an idle-by-design (🟡) state.
+- Receiving-board pipeline reconciliation (`chitra.board_updater` path) so triaged events flow into `facts.json` consistently.
+- `task_type → model/harness` routing (`chitra.routing_config`): a structured `routes` config that resolves a concrete model+harness (+zdr) at dispatch and records the resolved selection structurally in the signed ledger, alongside the existing opaque `routing_hint` pass-through.
+- `chitra.watchd` tmux pane-change emitter.
+
+### Fixed
+- Cross-host confirmation: the remote-dispatch path now expands the remote transcript root and matches delivery markers with local-normalized comparison over ssh, so a delivery to a session on another host is confirmed rather than reported unlocatable.
+- Dispatch robustness: pane-capture fallback so an unlocatable transcript is no longer treated as `FAILED`; dimmed placeholder input rows are treated as idle, not a draft; Claude transcript writes are allowed before verify.
+
+### Changed
+- Renamed the `POLYPHONY_CHITRA_*` environment variables to `CHITRA_*` (e.g. `CHITRA_LOCAL_HOST`, `CHITRA_LANE_LOCK_DIR`) and the default `/var/lib/polyphony-chitra/` state paths to `/var/lib/chitra/`, so the tool's public interface no longer names an internal project affiliation. If you set any `POLYPHONY_CHITRA_*` variable or rely on the old default paths, update to the `CHITRA_*` names / `/var/lib/chitra/` paths.
 - Test coverage for `liveness_check()` (malformed `session_ref`, remote-host assume-live, local-host with/without an attached tmux client).
 
 ## [0.2.0] - 2026-07-09
