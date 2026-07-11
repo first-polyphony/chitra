@@ -57,6 +57,8 @@ class GoalRecord:
     updated_at: str = ""
     open_asks: tuple[str, ...] = ()
     needs: str = ""
+    hold_reason: str = ""
+    resume_at: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -71,6 +73,8 @@ class GoalRecord:
             "updated_at": self.updated_at,
             "open_asks": list(self.open_asks),
             "needs": self.needs,
+            "hold_reason": self.hold_reason,
+            "resume_at": self.resume_at,
         }
 
 
@@ -132,6 +136,8 @@ def _record_from_dict(payload: object) -> GoalRecord:
         updated_at=values["updated_at"],
         open_asks=_open_asks_from_payload(payload),
         needs=_needs_from_payload(payload),
+        hold_reason=_hold_reason_from_payload(payload),
+        resume_at=_resume_at_from_payload(payload),
     )
 
 
@@ -149,6 +155,22 @@ def _needs_from_payload(payload: dict[str, object]) -> str:
     if not isinstance(needs, str):
         raise ValueError("goal record needs must be a string")
     return needs
+
+
+def _hold_reason_from_payload(payload: dict[str, object]) -> str:
+    """Read optional hold provenance retained by older persisted records."""
+    hold_reason = payload.get("hold_reason", "")
+    if not isinstance(hold_reason, str):
+        raise ValueError("goal record hold_reason must be a string")
+    return hold_reason
+
+
+def _resume_at_from_payload(payload: dict[str, object]) -> str:
+    """Read optional timed-hold deadline retained by older persisted records."""
+    resume_at = payload.get("resume_at", "")
+    if not isinstance(resume_at, str):
+        raise ValueError("goal record resume_at must be a string")
+    return resume_at
 
 
 def load_goals(root: Path | None = None) -> list[GoalRecord]:
@@ -199,6 +221,11 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
     open_asks = rec.open_asks
     if existing is not None and not open_asks and existing.open_asks and not clear_open_asks:
         open_asks = existing.open_asks
+    hold_reason = rec.hold_reason
+    resume_at = rec.resume_at
+    if existing is not None and rec.status == existing.status and not hold_reason and not resume_at:
+        hold_reason = existing.hold_reason
+        resume_at = existing.resume_at
     stored = GoalRecord(
         session_ref=rec.session_ref,
         goal=rec.goal,
@@ -211,12 +238,66 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
         updated_at=now,
         open_asks=open_asks,
         needs=rec.needs,
+        hold_reason=hold_reason,
+        resume_at=resume_at,
     )
     records = [record for record in load_goals(root) if record.session_ref != rec.session_ref]
     records.append(stored)
     _write_goals(root, records)
     logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
     return stored
+
+
+def _parse_iso8601(value: str) -> datetime:
+    """Parse one timezone-aware ISO8601 datetime for timed hold metadata."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("resume_at must be an ISO8601 datetime") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("resume_at must be an ISO8601 datetime with timezone")
+    return parsed
+
+
+def hold_goal(root: Path | None, session_ref: str, *, reason: str, resume_at: str = "") -> GoalRecord:
+    """Mark an existing lane held while retaining its re-arm payload."""
+    if not reason.strip():
+        raise ValueError("hold reason must be non-empty")
+    if resume_at:
+        _parse_iso8601(resume_at)
+    existing = get_goal(root, session_ref)
+    if existing is None:
+        raise GoalNotFoundError(session_ref)
+    held = upsert_goal(root, replace(existing, status="held", hold_reason=reason, resume_at=resume_at))
+    logger.info("goal_mutated", session_ref=session_ref, action="hold")
+    return held
+
+
+def resume_goal(root: Path | None, session_ref: str) -> GoalRecord:
+    """Return an explicitly held lane to working state and clear hold metadata."""
+    existing = get_goal(root, session_ref)
+    if existing is None:
+        raise GoalNotFoundError(session_ref)
+    if existing.status != "held":
+        raise ValueError("goal is not held")
+    resumed = upsert_goal(root, replace(existing, status="working", hold_reason="", resume_at=""))
+    logger.info("goal_mutated", session_ref=session_ref, action="resume")
+    return resumed
+
+
+def due_goals(root: Path | None = None, *, now: datetime | None = None) -> list[GoalRecord]:
+    """Return timed held lanes due at or before ``now`` in stable operator order."""
+    current = datetime.now(UTC) if now is None else now
+    if current.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    due: list[tuple[datetime, GoalRecord]] = []
+    for record in load_goals(root):
+        if record.status != "held" or not record.resume_at:
+            continue
+        resume_at = _parse_iso8601(record.resume_at)
+        if resume_at <= current:
+            due.append((resume_at, record))
+    return [record for _, record in sorted(due, key=lambda item: (item[0], item[1].session_ref))]
 
 
 def add_ask(root: Path | None, session_ref: str, ask: str) -> GoalRecord:
@@ -317,6 +398,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     add_root(close_command)
     close_command.add_argument("--session-ref", required=True)
 
+    hold_command = commands.add_parser("hold", help="Hold an existing lane without discarding its goal.")
+    add_root(hold_command)
+    hold_command.add_argument("--session-ref", required=True)
+    hold_command.add_argument("--reason", required=True)
+    hold_command.add_argument("--resume-at", default="")
+
+    resume_command = commands.add_parser("resume", help="Return an explicitly held lane to working state.")
+    add_root(resume_command)
+    resume_command.add_argument("--session-ref", required=True)
+
+    due_command = commands.add_parser("due", help="List timed holds that are due for operator review.")
+    add_root(due_command)
+    due_command.add_argument("--now", default="")
+
     add_ask_command = commands.add_parser("add-ask", help="Add one persistent open operator ask to a lane.")
     add_root(add_ask_command)
     add_ask_command.add_argument("--session-ref", required=True)
@@ -374,6 +469,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{record.session_ref}\t{record.status}\t{record.goal}\t{json.dumps(list(record.open_asks))}")
         elif args.command == "close":
             _print_record(close_goal(args.root, args.session_ref))
+        elif args.command == "hold":
+            _print_record(hold_goal(args.root, args.session_ref, reason=args.reason, resume_at=args.resume_at))
+        elif args.command == "resume":
+            _print_record(resume_goal(args.root, args.session_ref))
+        elif args.command == "due":
+            due_now = _parse_iso8601(args.now) if args.now else None
+            print(json.dumps([record.to_dict() for record in due_goals(args.root, now=due_now)], indent=2, sort_keys=True))
         elif args.command == "add-ask":
             _print_record(add_ask(args.root, args.session_ref, args.ask))
         elif args.command == "resolve-ask":

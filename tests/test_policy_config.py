@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from chitra.completion_gate import _DEFERRAL_PHRASES
-from chitra.policy_config import POLICY_CONFIG_ENV_VAR, PolicyConfig, load_policy_config
+from chitra.policy_config import POLICY_CONFIG_ENV_VAR, PolicyConfig, UsagePolicy, load_policy_config
 from chitra.state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
 
 
@@ -24,6 +24,47 @@ def test_unconfigured_policy_is_the_current_shipped_behavior(monkeypatch: pytest
         r"\bchitra (wants|says|needs|relays)\b",
     ]
     assert policy.dispatch.extra_idle_input_regexes == []
+    assert policy.usage == UsagePolicy()
+
+
+def test_usage_policy_loads_overrides_and_rejects_invalid_values(tmp_path: Path) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "usage": {
+                    "pause_5h_pct": 86.0,
+                    "pause_7d_pct": 93.0,
+                    "warn_5h_pct": 71.0,
+                    "warn_7d_pct": 86.0,
+                    "max_running": 3,
+                    "auto_resume": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_policy_config(path).usage == UsagePolicy(
+        pause_5h_pct=86.0,
+        pause_7d_pct=93.0,
+        warn_5h_pct=71.0,
+        warn_7d_pct=86.0,
+        max_running=3,
+        auto_resume=False,
+    )
+
+    for usage in (
+        {"pause_5h_pct": 0},
+        {"pause_7d_pct": 101},
+        {"warn_5h_pct": -1},
+        {"warn_7d_pct": 101},
+        {"warn_5h_pct": 86, "pause_5h_pct": 85},
+        {"warn_7d_pct": 93, "pause_7d_pct": 92},
+        {"max_running": 0},
+    ):
+        path.write_text(yaml.safe_dump({"usage": usage}), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_policy_config(path)
 
 
 def test_policy_explicit_path_wins_over_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

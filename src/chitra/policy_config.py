@@ -55,11 +55,38 @@ class DispatchPolicy(BaseModel):
         return self
 
 
+class UsagePolicy(BaseModel):
+    """Operator-configurable thresholds and concurrency controls for usage."""
+
+    pause_5h_pct: float = 85.0
+    pause_7d_pct: float = 92.0
+    warn_5h_pct: float = 70.0
+    warn_7d_pct: float = 85.0
+    max_running: int | None = None
+    auto_resume: bool = True
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> Self:
+        """Reject impossible usage-policy values at configuration load time."""
+        for name in ("pause_5h_pct", "pause_7d_pct", "warn_5h_pct", "warn_7d_pct"):
+            value = getattr(self, name)
+            if not 0 < value <= 100:
+                raise ValueError(f"{name} must be greater than 0 and at most 100")
+        if self.warn_5h_pct > self.pause_5h_pct:
+            raise ValueError("warn_5h_pct must not exceed pause_5h_pct")
+        if self.warn_7d_pct > self.pause_7d_pct:
+            raise ValueError("warn_7d_pct must not exceed pause_7d_pct")
+        if self.max_running is not None and self.max_running < 1:
+            raise ValueError("max_running must be at least 1 when set")
+        return self
+
+
 class PolicyConfig(BaseModel):
     """The complete optional policy.yaml schema."""
 
     completion_gate: GatePolicy = Field(default_factory=GatePolicy)
     dispatch: DispatchPolicy = Field(default_factory=DispatchPolicy)
+    usage: UsagePolicy = Field(default_factory=UsagePolicy)
 
 
 def load_policy_config(path: Path | None = None) -> PolicyConfig:

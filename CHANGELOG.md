@@ -4,6 +4,12 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-10
+
+### Added
+- `chitra.usage`: strict usage-snapshot reading and pure threshold evaluation for Claude Code sidecar files and the local Codex account. It reports `ok`, `approaching`, or `pause` without pausing, resuming, dispatching to, or otherwise deciding for a lane.
+- Goal hold bookkeeping: `chitra-goals hold`, `resume`, and `due` preserve the monitor-stated goal while recording an explicit hold reason and optional ISO8601 resume time. Timed holds are listed deterministically for operator review; operator-parked holds are never automatically surfaced as due.
+
 ## [0.3.0] - 2026-07-10
 
 ### Added
