@@ -36,6 +36,8 @@ chitra-goals = "chitra.goals:main"
 chitra-artifacts = "chitra.artifacts:main"
 chitra-usage = "chitra.usage:main"
 chitra-convo = "chitra.convlog:main"
+chitra-capabilities = "chitra.capabilities:main"
+chitra-queue = "chitra.merge_queue:main"
 
 [project.urls]
 Repository = "https://github.com/first-polyphony/chitra"
