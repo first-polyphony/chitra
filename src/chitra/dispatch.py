@@ -96,13 +96,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from chitra.completion_gate import TodoItem
 from chitra.policy_config import PolicyConfig
+from chitra.reasoning import DecisionAttestation
 
 from . import ledger as ledger_mod
 
@@ -201,6 +202,8 @@ class DispatchOrder(BaseModel):
     input_baseline_hash: str | None = None
     input_seen_hash: str | None = None
     snapshot_tail_hash: str | None = None
+    message_kind: Literal["legacy", "operator_relay", "reasoned_answer", "reasoned_nudge"] = "legacy"
+    decision_attestation: DecisionAttestation | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     # Optional completion-claim audit inputs. All three are opt-in: a caller
@@ -214,6 +217,21 @@ class DispatchOrder(BaseModel):
     completion_todo_items: list[TodoItem] | None = None
     completion_has_deploy_evidence: bool = False
     completion_has_live_verify_evidence: bool = False
+
+    @model_validator(mode="after")
+    def validate_reasoned_message(self) -> DispatchOrder:
+        """Bind every opted-in reasoned send to exact approved bytes and provenance."""
+        is_reasoned = self.message_kind in {"reasoned_answer", "reasoned_nudge"}
+        if is_reasoned and self.decision_attestation is None:
+            raise ValueError("reasoned messages require decision_attestation")
+        if not is_reasoned and self.decision_attestation is not None:
+            raise ValueError("decision_attestation is only valid for reasoned messages")
+        if self.decision_attestation is not None:
+            if self.nudge != self.decision_attestation.approved_text:
+                raise ValueError("nudge must exactly match the attested approved_text")
+            if self.decision_attestation.operator_confirmation_required:
+                raise ValueError("A3 oracle advice requires an operator ruling before dispatch")
+        return self
 
 
 class DispatchResult(BaseModel):
@@ -246,6 +264,10 @@ class DispatchResult(BaseModel):
     resolved_model: str | None = None
     resolved_harness: str | None = None
     resolved_zdr: bool = False
+    decision_id: str | None = None
+    goal_contract_id: str | None = None
+    corpus_id: str | None = None
+    decision_route: str | None = None
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

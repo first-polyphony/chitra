@@ -4,6 +4,9 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- Goal-first answer and nudge reasoning with a deterministic, citation-bearing principles index, a testable insufficiency gate for read-only oracle escalation, and immutable dispatch attestations.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added

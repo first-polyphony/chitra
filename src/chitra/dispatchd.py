@@ -236,6 +236,11 @@ def process_one_order(
     result.resolved_model = resolved_model
     result.resolved_harness = resolved_harness
     result.resolved_zdr = resolved_zdr
+    if order.decision_attestation is not None:
+        result.decision_id = order.decision_attestation.decision_id
+        result.goal_contract_id = order.decision_attestation.goal_contract_id
+        result.corpus_id = order.decision_attestation.corpus_id
+        result.decision_route = order.decision_attestation.route.value
     logger.info(
         "dispatchd_order_processed",
         order_id=order.order_id,

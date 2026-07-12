@@ -136,6 +136,25 @@ capabilities:
         params: []
         mutates: true
 
+  - name: principles
+    kind: tool
+    purpose: Compile and verify the reviewed, citation-bearing principles index.
+    when_to_use: Use during build or startup validation to prove the checked-in runtime index matches its reviewed source manifest.
+    authority:
+      level: record
+      grants:
+        - Compile the reviewed local principles manifest into its deterministic local index.
+      excludes:
+        - Invent, promote, or change governing principles.
+        - Invoke a model, oracle, or external service.
+    default_enabled: true
+    commands:
+      - name: chitra-principles
+        description: Compile or verify the deterministic principles index.
+        argv: [chitra-principles]
+        params: []
+        mutates: true
+
   - name: convo
     kind: tool
     purpose: Record structured operator and lane conversation facts.
