@@ -303,15 +303,19 @@ def _render_cards(records: Sequence[RosterRecord]) -> str:
 def render_roster(
     records: Sequence[RosterRecord],
     *,
-    fmt: Literal["cards", "box", "markdown"] = "cards",
+    fmt: Literal["cards", "box", "markdown"] = "box",
     artifacts: Sequence[ArtifactRosterRecord] = (),
 ) -> str:
     """Render every stored lane, stable order (host, session name, full ref).
 
-    Default ``cards``: one labelled stanza per lane (readable full sentences).
-    ``box``: the fixed-column table. ``markdown``: a client-rendered table.
-    Artifact records are injected by the caller; their URLs are emitted in a
-    separate unwrapped block so operators can copy each complete URL.
+    Default ``box``: the fixed-column table with the operator's agreed color
+    legend (🟢/🟡/🔴 marker column), wrapped cells, and emoji-aware alignment
+    — this is the format the operator confirmed ("table format noted — box
+    tables from here on"). ``cards``: one labelled stanza per lane, offered
+    as an alternate, narrower-terminal layout. ``markdown``: a
+    client-rendered table. Artifact records are injected by the caller;
+    their URLs are emitted in a separate unwrapped block so operators can
+    copy each complete URL.
     """
     artifact_block = _unreviewed_artifact_block(artifacts, fmt=fmt)
     if not records and not artifact_block:

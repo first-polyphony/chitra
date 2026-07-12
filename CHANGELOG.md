@@ -4,6 +4,12 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Fixed
+- `chitra-goals roster` (and `render_roster`) now default to `box` — the fixed-column,
+  color-marker table (0.3.0's original operator-agreed format) — instead of the
+  per-lane `cards` stanza layout that #43 made the default without a documented
+  operator ruling. `cards` and `markdown` remain available via `--format`/`fmt=`.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added

@@ -92,7 +92,7 @@ def test_compute_marker_rejects_unknown_status() -> None:
         compute_marker(_record("host:lane:0.0", cast(GoalStatus, "unknown")))
 
 
-def test_cards_default_shows_every_lane_full_content_markers_and_stable_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_box_default_shows_every_lane_full_content_markers_and_stable_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COLUMNS", "100")
     long_goal = "This is a deliberately long durable objective that must survive in full."
     records = [
@@ -100,7 +100,29 @@ def test_cards_default_shows_every_lane_full_content_markers_and_stable_order(mo
         _record("alpha:zeta:0.0", "done-pending-close"),
         _record("alpha:alpha:0.0", "held"),
     ]
-    rendered = render_roster(records)  # default fmt is cards
+    rendered = render_roster(records)  # default fmt is box (the operator's agreed table+colors format)
+
+    # The fixed-column table: box-drawing borders, header row with field labels.
+    assert "┌" in rendered and "│" in rendered
+    assert "Goal" in rendered and "Now" in rendered
+    assert all(name in rendered for name in ("build", "zeta", "alpha"))
+    assert all(marker in rendered for marker in ("🔴", "🟡", "🟢"))
+    assert rendered.index("alpha") < rendered.index("zeta") < rendered.index("build")
+    assert rendered == render_roster(list(reversed(records)))
+    # Full content survives — no truncation.
+    assert "…" not in rendered
+    assert all(word in " ".join(rendered.split()) for word in long_goal.split())
+
+
+def test_cards_format_shows_every_lane_full_content_markers_and_stable_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "100")
+    long_goal = "This is a deliberately long durable objective that must survive in full."
+    records = [
+        _record("zeta:build:0.0", "blocked", goal=long_goal),
+        _record("alpha:zeta:0.0", "done-pending-close"),
+        _record("alpha:alpha:0.0", "held"),
+    ]
+    rendered = render_roster(records, fmt="cards")
 
     # Labelled stanzas, not a table: no box-drawing, has field labels.
     assert "┌" not in rendered and "│" not in rendered
@@ -108,7 +130,7 @@ def test_cards_default_shows_every_lane_full_content_markers_and_stable_order(mo
     assert all(name in rendered for name in ("build", "zeta", "alpha"))
     assert all(marker in rendered for marker in ("🔴", "🟡", "🟢"))
     assert rendered.index("alpha") < rendered.index("zeta") < rendered.index("build")
-    assert rendered == render_roster(list(reversed(records)))
+    assert rendered == render_roster(list(reversed(records)), fmt="cards")
     # Full content survives — no truncation.
     assert "…" not in rendered
     assert all(word in " ".join(rendered.split()) for word in long_goal.split())
@@ -157,7 +179,7 @@ def test_roster_surfaces_every_open_ask_below_the_table_in_every_format() -> Non
         _record("alpha:review:0.0", "working", open_asks=("1. Approve tenancy.", "2. Choose rollback owner.")),
     ]
 
-    cards = render_roster(records)
+    cards = render_roster(records, fmt="cards")
     box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
     for rendered in (cards, box, markdown):
@@ -179,7 +201,7 @@ def test_markers_and_needs_present_across_formats(monkeypatch: pytest.MonkeyPatc
         _record("host:ask:0.0", "working", open_asks=("you: where does F2 live?",)),
     ]
 
-    cards = render_roster(records)
+    cards = render_roster(records, fmt="cards")
     box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
     for rendered in (cards, box, markdown):
@@ -249,5 +271,9 @@ def test_roster_does_not_render_an_empty_artifact_count() -> None:
 def test_roster_marks_redirected_goal_versions_next_to_the_goal() -> None:
     record = _record("host:lane:0.0", "working", goal_version=2)
 
-    for rendered in (render_roster([record]), render_roster([record], fmt="box"), render_roster([record], fmt="markdown")):
+    for rendered in (
+        render_roster([record], fmt="cards"),
+        render_roster([record], fmt="box"),
+        render_roster([record], fmt="markdown"),
+    ):
         assert "v2" in rendered
