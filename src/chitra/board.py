@@ -199,6 +199,13 @@ def _roster_needs(record: RosterRecord, marker: str) -> str:
     return "—"
 
 
+def _roster_goal(record: RosterRecord) -> str:
+    """Return the goal text with a minimal marker for redirected versions."""
+    goal_version = getattr(record, "goal_version", 1)
+    version_marker = f" v{goal_version}" if goal_version > 1 else ""
+    return f"{record.goal}{version_marker}"
+
+
 def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, str, str]]:
     """Build FULL (untruncated) cell rows in stable host/session/ref order.
 
@@ -212,7 +219,7 @@ def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, s
             (
                 marker,
                 session_name(record.session_ref),
-                f"{record.goal} — done: {record.done_when}",
+                f"{_roster_goal(record)} — done: {record.done_when}",
                 record.now,
                 _roster_needs(record, marker),
             )
@@ -283,7 +290,7 @@ def _render_cards(records: Sequence[RosterRecord]) -> str:
     for record in _ordered_roster_records(records):
         marker = compute_marker(record)
         block = [f"{marker} {session_name(record.session_ref)}"]
-        block += field("Goal", f"{record.goal}  ·  done: {record.done_when}")
+        block += field("Goal", f"{_roster_goal(record)}  ·  done: {record.done_when}")
         block += field("Now", record.now)
         if marker == "🔴":
             block += field("Needs", _roster_needs(record, marker))

@@ -36,6 +36,13 @@ dispatch:
   # Case-sensitive regexes that identify additional idle pane input rows.
   extra_idle_input_regexes: []
 
+# Canonical decision documents for working-directory prefixes. The most-specific
+# matching prefix wins; default is used when no configured prefix matches.
+# guidance:
+#   canonical_decisions:
+#     /opt/polyphony/repo: /srv/onedrive-share/DocsHome/Projects_Dev/decisions.md
+#     default: /srv/onedrive-share/DocsHome/decisions.md
+
 # Usage snapshots are read and evaluated by chitra-usage. Uncomment this
 # template to override the shipped defaults; chitra never pauses or resumes a lane.
 # usage:

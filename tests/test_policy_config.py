@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from chitra.completion_gate import _DEFERRAL_PHRASES
-from chitra.policy_config import POLICY_CONFIG_ENV_VAR, PolicyConfig, UsagePolicy, load_policy_config
+from chitra.policy_config import POLICY_CONFIG_ENV_VAR, GuidancePolicy, PolicyConfig, UsagePolicy, load_policy_config, resolve_guidance
 from chitra.state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
 
 
@@ -119,3 +119,32 @@ def test_policy_model_defaults_are_independent() -> None:
     second = PolicyConfig()
     first.completion_gate.deferral_phrases.append("custom")
     assert "custom" not in second.completion_gate.deferral_phrases
+
+
+def test_resolve_guidance_uses_longest_component_boundary_prefix_and_default(tmp_path: Path) -> None:
+    config = PolicyConfig(
+        guidance=GuidancePolicy(
+            canonical_decisions={
+                "/opt": "/docs/opt.md",
+                "/opt/polyphony": "/docs/polyphony.md",
+                "default": "/docs/default.md",
+            }
+        )
+    )
+
+    assert resolve_guidance(config, Path("/opt/polyphony/chitra")) == Path("/docs/polyphony.md")
+    assert resolve_guidance(config, Path("/opt/other")) == Path("/docs/opt.md")
+    assert resolve_guidance(config, Path("/opt/polyphony-other/work")) == Path("/docs/opt.md")
+    boundary_config = PolicyConfig(
+        guidance=GuidancePolicy(canonical_decisions={"/opt/poly": "/docs/poly.md", "default": "/docs/default.md"})
+    )
+    assert resolve_guidance(boundary_config, Path("/opt/polyphony/x")) == Path("/docs/default.md")
+    assert resolve_guidance(PolicyConfig(guidance=GuidancePolicy(canonical_decisions={"default": "/docs/default.md"})), tmp_path) == Path(
+        "/docs/default.md"
+    )
+    assert resolve_guidance(PolicyConfig(), tmp_path) is None
+
+
+def test_guidance_policy_rejects_empty_document_values() -> None:
+    with pytest.raises(ValueError, match="canonical_decisions values"):
+        GuidancePolicy(canonical_decisions={"default": ""})
