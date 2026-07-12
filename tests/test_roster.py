@@ -23,6 +23,7 @@ def _record(
     now: str = "running checks",
     open_asks: tuple[str, ...] = (),
     needs: str = "",
+    goal_version: int = 1,
 ) -> GoalRecord:
     return GoalRecord(
         session_ref=session_ref,
@@ -30,6 +31,7 @@ def _record(
         done_when="Every required validation command passes cleanly.",
         source="branch",
         status=status,
+        goal_version=goal_version,
         now=now,
         open_asks=open_asks,
         needs=needs,
@@ -242,3 +244,10 @@ def test_roster_does_not_render_an_empty_artifact_count() -> None:
 
     assert "UNREVIEWED ARTIFACTS" not in rendered
     assert "0 unreviewed" not in rendered.lower()
+
+
+def test_roster_marks_redirected_goal_versions_next_to_the_goal() -> None:
+    record = _record("host:lane:0.0", "working", goal_version=2)
+
+    for rendered in (render_roster([record]), render_roster([record], fmt="box"), render_roster([record], fmt="markdown")):
+        assert "v2" in rendered

@@ -14,9 +14,11 @@ from chitra.artifacts import ARTIFACT_URL_PREFIX, ArtifactRecord, upsert_artifac
 from chitra.goals import (
     GoalNotFoundError,
     GoalRecord,
+    GoalRedirectRequiredError,
     GoalStatus,
     GoalValidationError,
     add_ask,
+    check_specification,
     close_goal,
     due_goals,
     get_goal,
@@ -24,10 +26,12 @@ from chitra.goals import (
     list_goals,
     load_goals,
     main,
+    redirect_goal,
     resolve_ask,
     resume_goal,
     session_host,
     session_name,
+    update_now,
     upsert_goal,
     validate_goal,
 )
@@ -38,8 +42,10 @@ def _record(**changes: str) -> GoalRecord:
         "session_ref": "tophand:f2-77:0.0",
         "goal": "Ship the tested deterministic goals store safely.",
         "done_when": "The full suite and static checks pass.",
-        "source": "feat/goal-store-roster",
+        "source": "task-file:/tmp/goal-store.md",
         "status": "working",
+        "intent": "Safely deliver a deterministic persistent goals store for operators.",
+        "scope": "Goal storage, CLI behavior, and tests only.",
         "now": "writing tests",
         "last_verified": "",
         "needs": "",
@@ -51,6 +57,8 @@ def _record(**changes: str) -> GoalRecord:
         done_when=values["done_when"],
         source=values["source"],
         status=cast(GoalStatus, values["status"]),
+        intent=values["intent"],
+        scope=values["scope"],
         now=values["now"],
         last_verified=values["last_verified"],
         needs=values["needs"],
@@ -69,6 +77,8 @@ def test_store_round_trip_and_atomic_write(tmp_path: Path) -> None:
     payload = json.loads((tmp_path / "goals.json").read_text(encoding="utf-8"))
     assert payload["schema"] == "chitra.goals.v1"
     assert payload["goals"][0]["needs"] == "you: run the interview"
+    assert payload["goals"][0]["goal_version"] == 1
+    assert payload["goals"][0]["goal_history"] == []
 
 
 def test_upsert_preserves_created_timestamp_and_recomputes_updated(tmp_path: Path) -> None:
@@ -118,7 +128,7 @@ def test_resolve_ask_rejects_ambiguous_missing_and_out_of_range_selectors(tmp_pa
         add_ask(tmp_path, "missing:lane", "1. Decide?")
 
 
-def test_load_old_record_without_open_asks_is_backward_compatible(tmp_path: Path) -> None:
+def test_load_old_record_without_optional_fields_is_backward_compatible(tmp_path: Path) -> None:
     payload = {
         "schema": "chitra.goals.v1",
         "updated_at": "2026-07-10T00:00:00+00:00",
@@ -138,10 +148,156 @@ def test_load_old_record_without_open_asks_is_backward_compatible(tmp_path: Path
     }
     (tmp_path / "goals.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    assert load_goals(tmp_path)[0].open_asks == ()
-    assert load_goals(tmp_path)[0].needs == ""
-    assert load_goals(tmp_path)[0].hold_reason == ""
-    assert load_goals(tmp_path)[0].resume_at == ""
+    record = load_goals(tmp_path)[0]
+    assert record.open_asks == ()
+    assert record.needs == ""
+    assert record.hold_reason == ""
+    assert record.resume_at == ""
+    assert record.intent == ""
+    assert record.scope == ""
+    assert record.goal_version == 1
+    assert record.goal_history == ()
+    stored = upsert_goal(tmp_path, record)
+    assert load_goals(tmp_path) == [stored]
+    assert stored.to_dict()["goal_history"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("intent", 1, "intent must be a string"),
+        ("scope", 1, "scope must be a string"),
+        ("goal_version", True, "goal_version must be an integer"),
+        ("goal_history", "not-a-list", "goal_history must be a list"),
+        (
+            "goal_history",
+            [{"goal": "g", "done_when": "d", "intent": "i", "scope": "s", "revised_at": "t"}],
+            "goal_history entries must contain strategic prior values",
+        ),
+        (
+            "goal_history",
+            [{"goal": "g", "done_when": "d", "intent": "i", "scope": "s", "revised_at": "t", "reason": 1}],
+            "goal_history entries must contain strings",
+        ),
+    ],
+)
+def test_new_optional_goal_fields_are_strictly_validated(
+    tmp_path: Path, field: str, invalid: object, message: str
+) -> None:
+    record_payload = _record().to_dict()
+    record_payload[field] = invalid
+    payload = {"schema": "chitra.goals.v1", "goals": [record_payload]}
+    (tmp_path / "goals.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_goals(tmp_path)
+
+
+def test_plain_upsert_preserves_strategic_version_and_history(tmp_path: Path) -> None:
+    first = upsert_goal(tmp_path, _record())
+    redirected = redirect_goal(tmp_path, first.session_ref, reason="operator narrowed delivery", scope="Goal storage and tests only.")
+
+    revised = upsert_goal(
+        tmp_path,
+        replace(redirected, now="running checks", goal_version=99, goal_history=()),
+    )
+
+    assert revised.now == "running checks"
+    assert revised.goal_version == 2
+    assert revised.goal_history == redirected.goal_history
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"goal": "Ship a revised deterministic goals store safely now."},
+        {"done_when": "The redirected complete suite and static checks pass."},
+        {"intent": "Safely deliver a changed deterministic persistent goals store for operators."},
+        {"scope": "Goal storage, CLI behavior, tests, and docs only."},
+        {"source": "branch:feat/revised-goal"},
+    ],
+)
+def test_upsert_rejects_any_strategic_change(tmp_path: Path, change: dict[str, str]) -> None:
+    first = upsert_goal(tmp_path, _record())
+
+    with pytest.raises(GoalRedirectRequiredError, match="redirect"):
+        upsert_goal(tmp_path, replace(first, **change))
+
+
+def test_redirect_records_prior_strategic_values_and_preserves_tactical_state(tmp_path: Path) -> None:
+    first = upsert_goal(tmp_path, _record(open_asks=""))
+    asked = add_ask(tmp_path, first.session_ref, "1. Approve the redirect?")
+    redirected = redirect_goal(
+        tmp_path,
+        first.session_ref,
+        reason="operator expanded the stated scope",
+        goal="Ship a revised deterministic goals store safely now.",
+        scope="Goal storage, CLI behavior, tests, and docs only.",
+    )
+
+    assert redirected.goal_version == 2
+    assert redirected.goal_history == (
+        {
+            "goal": asked.goal,
+            "done_when": asked.done_when,
+            "intent": asked.intent,
+            "scope": asked.scope,
+            "revised_at": redirected.updated_at,
+            "reason": "operator expanded the stated scope",
+        },
+    )
+    assert redirected.now == asked.now
+    assert redirected.open_asks == asked.open_asks
+    assert redirected.needs == asked.needs
+
+
+def test_redirect_requires_existing_record_reason_and_real_strategic_change(tmp_path: Path) -> None:
+    with pytest.raises(GoalNotFoundError):
+        redirect_goal(tmp_path, "missing:lane", reason="operator changed direction")
+    stored = upsert_goal(tmp_path, _record())
+    with pytest.raises(ValueError, match="reason"):
+        redirect_goal(tmp_path, stored.session_ref, reason=" ", goal="A revised goal with enough words to validate.")
+    with pytest.raises(ValueError, match="must change"):
+        redirect_goal(tmp_path, stored.session_ref, reason="operator reviewed it")
+    with pytest.raises(GoalValidationError, match="goal must be non-empty"):
+        redirect_goal(tmp_path, stored.session_ref, reason="operator removed the goal", goal="")
+
+
+def test_update_now_is_tactical_only_and_requires_an_existing_record(tmp_path: Path) -> None:
+    stored = upsert_goal(tmp_path, _record())
+    updated = update_now(tmp_path, stored.session_ref, now="validating", status="blocked", last_verified="2026-07-11T00:00:00Z")
+
+    assert updated.now == "validating"
+    assert updated.status == "blocked"
+    assert updated.last_verified == "2026-07-11T00:00:00Z"
+    assert updated.goal == stored.goal
+    assert updated.intent == stored.intent
+    unchanged = update_now(tmp_path, stored.session_ref)
+    assert (unchanged.now, unchanged.status, unchanged.last_verified) == (
+        updated.now,
+        updated.status,
+        updated.last_verified,
+    )
+    with pytest.raises(GoalNotFoundError):
+        update_now(tmp_path, "missing:lane", now="nothing")
+
+
+@pytest.mark.parametrize(
+    ("record", "issue"),
+    [
+        (_record(intent="too short"), "intent must be"),
+        (_record(goal="too short"), "goal must contain"),
+        (_record(done_when="too short"), "done_when must be"),
+        (_record(scope="too short"), "scope must be"),
+        (_record(source="screen"), "source must start"),
+    ],
+)
+def test_check_specification_reports_each_independent_criterion(record: GoalRecord, issue: str) -> None:
+    assert check_specification(record) == [next(item for item in check_specification(record) if issue in item)]
+
+
+def test_check_specification_accepts_a_fully_specified_goal() -> None:
+    assert check_specification(_record()) == []
 
 
 def test_hold_resume_due_and_upsert_hold_metadata_preservation(tmp_path: Path) -> None:
@@ -268,6 +424,105 @@ def test_goal_cli_set_preserves_needs_when_omitted(tmp_path: Path, capsys: pytes
 
     assert stored is not None
     assert stored.needs == "you: run the interview"
+
+
+def test_goal_cli_set_redirect_now_and_check_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    record = _record()
+    set_args = [
+        "set",
+        "--root",
+        str(tmp_path),
+        "--session-ref",
+        record.session_ref,
+        "--goal",
+        record.goal,
+        "--done-when",
+        record.done_when,
+        "--source",
+        record.source,
+        "--intent",
+        record.intent,
+        "--scope",
+        record.scope,
+    ]
+    assert main(set_args) == 0
+    capsys.readouterr()
+    assert main([*set_args, "--goal", "Ship a revised deterministic goals store safely now."]) == 1
+    assert "chitra-goals redirect --reason" in capsys.readouterr().err
+
+    assert (
+        main(
+            [
+                "redirect",
+                "--root",
+                str(tmp_path),
+                "--session-ref",
+                record.session_ref,
+                "--reason",
+                "operator redirected the strategic objective",
+                "--goal",
+                "Ship a revised deterministic goals store safely now.",
+            ]
+        )
+        == 0
+    )
+    assert '"goal_version": 2' in capsys.readouterr().out
+    assert main(["now", "--root", str(tmp_path), "--session-ref", record.session_ref, "--now", "running tests"]) == 0
+    assert '"now": "running tests"' in capsys.readouterr().out
+    assert main(["check", "--root", str(tmp_path), "--session-ref", record.session_ref]) == 0
+    assert capsys.readouterr().out.strip() == "well-specified"
+
+    assert (
+        main(
+            [
+                "redirect",
+                "--root",
+                str(tmp_path),
+                "--session-ref",
+                record.session_ref,
+                "--reason",
+                "operator retained a short captured intent",
+                "--intent",
+                "brief intent",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert main(["check", "--root", str(tmp_path), "--session-ref", record.session_ref]) == 1
+    assert "intent must be" in capsys.readouterr().out
+
+    assert main(["check", "--root", str(tmp_path), "--session-ref", "missing:lane"]) == 1
+    assert "missing:lane" in capsys.readouterr().err
+    assert main(["redirect", "--root", str(tmp_path), "--session-ref", record.session_ref, "--reason", "no revision"]) == 1
+    assert "must change" in capsys.readouterr().err
+    assert main(["now", "--root", str(tmp_path), "--session-ref", "missing:lane"]) == 1
+    assert "missing:lane" in capsys.readouterr().err
+
+
+def test_goal_cli_guidance_happy_and_error_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from chitra.policy_config import POLICY_CONFIG_ENV_VAR
+
+    document = tmp_path / "decisions.md"
+    document.write_text("# Canonical decisions\n", encoding="utf-8")
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(f"guidance:\n  canonical_decisions:\n    default: {document}\n", encoding="utf-8")
+    monkeypatch.setenv(POLICY_CONFIG_ENV_VAR, str(policy))
+
+    assert main(["guidance", "--cwd", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == str(document)
+    assert main(["guidance", "--cwd", str(tmp_path), "--show"]) == 0
+    assert capsys.readouterr().out == "# Canonical decisions\n"
+
+    monkeypatch.delenv(POLICY_CONFIG_ENV_VAR)
+    assert main(["guidance", "--cwd", str(tmp_path)]) == 1
+    assert "no guidance is configured" in capsys.readouterr().err
+    policy.write_text("guidance:\n  canonical_decisions:\n    default: /missing/decisions.md\n", encoding="utf-8")
+    monkeypatch.setenv(POLICY_CONFIG_ENV_VAR, str(policy))
+    assert main(["guidance", "--cwd", str(tmp_path)]) == 1
+    assert "configured guidance file is missing" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

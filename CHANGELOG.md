@@ -4,6 +4,11 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-11
+
+### Added
+- Sticky strategic goal records with redirect-only revisions, deterministic specification checks, and policy-configured canonical guidance documents.
+
 ## [0.7.0] - 2026-07-11
 
 ### Added

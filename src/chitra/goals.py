@@ -38,6 +38,10 @@ class GoalValidationError(ValueError):
     """Raised when a goal record is not valid monitor doctrine."""
 
 
+class GoalRedirectRequiredError(GoalValidationError):
+    """Raised when a strategic goal revision must use the redirect path."""
+
+
 class GoalNotFoundError(KeyError):
     """Raised when an operation requires a goal record that is absent."""
 
@@ -51,6 +55,10 @@ class GoalRecord:
     done_when: str
     source: str
     status: GoalStatus
+    intent: str = ""
+    scope: str = ""
+    goal_version: int = 1
+    goal_history: tuple[dict[str, str], ...] = ()
     now: str = ""
     last_verified: str = ""
     created_at: str = ""
@@ -67,6 +75,10 @@ class GoalRecord:
             "done_when": self.done_when,
             "source": self.source,
             "status": self.status,
+            "intent": self.intent,
+            "scope": self.scope,
+            "goal_version": self.goal_version,
+            "goal_history": list(self.goal_history),
             "now": self.now,
             "last_verified": self.last_verified,
             "created_at": self.created_at,
@@ -105,6 +117,22 @@ def validate_goal(rec: GoalRecord) -> list[str]:
     return issues
 
 
+def check_specification(rec: GoalRecord) -> list[str]:
+    """Return stricter deterministic interview-bypass criteria for a goal."""
+    issues: list[str] = []
+    if not rec.intent.strip() or len(rec.intent.split()) < 8:
+        issues.append("intent must be non-empty and contain at least eight words")
+    if len(rec.goal.split()) < 6:
+        issues.append("goal must contain at least six words")
+    if not rec.done_when.strip() or len(rec.done_when.split()) < 5:
+        issues.append("done_when must be non-empty and contain at least five words")
+    if not rec.scope.strip() or len(rec.scope.split()) < 4:
+        issues.append("scope must be non-empty and contain at least four words")
+    if not rec.source.startswith(("task-file", "branch", "transcript-first-msg")):
+        issues.append("source must start with task-file, branch, or transcript-first-msg")
+    return issues
+
+
 def goals_path(root: Path | None = None) -> Path:
     """Return the persistent goals document path for ``root``."""
     return (state_dir() if root is None else root) / "goals.json"
@@ -130,6 +158,10 @@ def _record_from_dict(payload: object) -> GoalRecord:
         done_when=values["done_when"],
         source=values["source"],
         status=cast(GoalStatus, values["status"]),
+        intent=_intent_from_payload(payload),
+        scope=_scope_from_payload(payload),
+        goal_version=_goal_version_from_payload(payload),
+        goal_history=_goal_history_from_payload(payload),
         now=values["now"],
         last_verified=values["last_verified"],
         created_at=values["created_at"],
@@ -171,6 +203,46 @@ def _resume_at_from_payload(payload: dict[str, object]) -> str:
     if not isinstance(resume_at, str):
         raise ValueError("goal record resume_at must be a string")
     return resume_at
+
+
+def _intent_from_payload(payload: dict[str, object]) -> str:
+    """Read optional original operator intent from compatible goal records."""
+    intent = payload.get("intent", "")
+    if not isinstance(intent, str):
+        raise ValueError("goal record intent must be a string")
+    return intent
+
+
+def _scope_from_payload(payload: dict[str, object]) -> str:
+    """Read optional strategic scope boundaries from compatible goal records."""
+    scope = payload.get("scope", "")
+    if not isinstance(scope, str):
+        raise ValueError("goal record scope must be a string")
+    return scope
+
+
+def _goal_version_from_payload(payload: dict[str, object]) -> int:
+    """Read the optional monotonic strategic-goal version."""
+    goal_version = payload.get("goal_version", 1)
+    if not isinstance(goal_version, int) or isinstance(goal_version, bool):
+        raise ValueError("goal record goal_version must be an integer")
+    return goal_version
+
+
+def _goal_history_from_payload(payload: dict[str, object]) -> tuple[dict[str, str], ...]:
+    """Read redirect history entries from compatible goal records strictly."""
+    raw_history = payload.get("goal_history", [])
+    if not isinstance(raw_history, list):
+        raise ValueError("goal record goal_history must be a list of objects")
+    fields = ("goal", "done_when", "intent", "scope", "revised_at", "reason")
+    history: list[dict[str, str]] = []
+    for entry in raw_history:
+        if not isinstance(entry, dict) or set(entry) != set(fields):
+            raise ValueError("goal record goal_history entries must contain strategic prior values")
+        if not all(isinstance(entry[field], str) for field in fields):
+            raise ValueError("goal record goal_history entries must contain strings")
+        history.append({field: entry[field] for field in fields})
+    return tuple(history)
 
 
 def load_goals(root: Path | None = None) -> list[GoalRecord]:
@@ -217,6 +289,8 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
     if issues:
         raise GoalValidationError("; ".join(issues))
     existing = get_goal(root, rec.session_ref)
+    if existing is not None and not _strategic_fields_match(existing, rec):
+        raise GoalRedirectRequiredError("strategic goal fields changed; use chitra-goals redirect --reason ...")
     now = _utc_now()
     open_asks = rec.open_asks
     if existing is not None and not open_asks and existing.open_asks and not clear_open_asks:
@@ -232,6 +306,10 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
         done_when=rec.done_when,
         source=rec.source,
         status=rec.status,
+        intent=rec.intent,
+        scope=rec.scope,
+        goal_version=existing.goal_version if existing is not None else rec.goal_version,
+        goal_history=existing.goal_history if existing is not None else rec.goal_history,
         now=rec.now,
         last_verified=rec.last_verified,
         created_at=existing.created_at if existing is not None else now,
@@ -246,6 +324,90 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
     _write_goals(root, records)
     logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
     return stored
+
+
+def _strategic_fields_match(left: GoalRecord, right: GoalRecord) -> bool:
+    """Compare strategic fields while treating whitespace-only revisions alike."""
+    return all(
+        getattr(left, field).strip() == getattr(right, field).strip()
+        for field in ("goal", "done_when", "intent", "scope", "source")
+    )
+
+
+def redirect_goal(
+    root: Path | None,
+    session_ref: str,
+    *,
+    reason: str,
+    goal: str | None = None,
+    done_when: str | None = None,
+    intent: str | None = None,
+    scope: str | None = None,
+    source: str | None = None,
+) -> GoalRecord:
+    """Replace strategic values after recording the prior operator direction."""
+    if not reason.strip():
+        raise ValueError("redirect reason must be non-empty")
+    existing = get_goal(root, session_ref)
+    if existing is None:
+        raise GoalNotFoundError(session_ref)
+    redirected = replace(
+        existing,
+        goal=existing.goal if goal is None else goal,
+        done_when=existing.done_when if done_when is None else done_when,
+        intent=existing.intent if intent is None else intent,
+        scope=existing.scope if scope is None else scope,
+        source=existing.source if source is None else source,
+    )
+    if _strategic_fields_match(existing, redirected):
+        raise ValueError("redirect must change at least one strategic field")
+    issues = validate_goal(redirected)
+    if issues:
+        raise GoalValidationError("; ".join(issues))
+    revised_at = _utc_now()
+    history_entry = {
+        "goal": existing.goal,
+        "done_when": existing.done_when,
+        "intent": existing.intent,
+        "scope": existing.scope,
+        "revised_at": revised_at,
+        "reason": reason,
+    }
+    stored = replace(
+        redirected,
+        goal_version=existing.goal_version + 1,
+        goal_history=(*existing.goal_history, history_entry),
+        created_at=existing.created_at,
+        updated_at=revised_at,
+    )
+    records = [record for record in load_goals(root) if record.session_ref != session_ref]
+    records.append(stored)
+    _write_goals(root, records)
+    logger.info("goal_mutated", session_ref=session_ref, action="redirect")
+    return stored
+
+
+def update_now(
+    root: Path | None,
+    session_ref: str,
+    *,
+    now: str | None = None,
+    status: GoalStatus | None = None,
+    last_verified: str | None = None,
+) -> GoalRecord:
+    """Update only the current tactical state of an existing goal record."""
+    existing = get_goal(root, session_ref)
+    if existing is None:
+        raise GoalNotFoundError(session_ref)
+    return upsert_goal(
+        root,
+        replace(
+            existing,
+            now=existing.now if now is None else now,
+            status=existing.status if status is None else status,
+            last_verified=existing.last_verified if last_verified is None else last_verified,
+        ),
+    )
 
 
 def _parse_iso8601(value: str) -> datetime:
@@ -378,6 +540,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     set_command.add_argument("--goal", required=True)
     set_command.add_argument("--done-when", required=True)
     set_command.add_argument("--source", required=True)
+    set_command.add_argument("--intent", default=None)
+    set_command.add_argument("--scope", default=None)
     set_command.add_argument("--status", choices=GOAL_STATUSES, default="working")
     set_command.add_argument("--now", default="")
     set_command.add_argument("--last-verified", default="")
@@ -407,6 +571,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     resume_command = commands.add_parser("resume", help="Return an explicitly held lane to working state.")
     add_root(resume_command)
     resume_command.add_argument("--session-ref", required=True)
+
+    redirect_command = commands.add_parser("redirect", help="Record a reasoned revision to a lane's strategic goal.")
+    add_root(redirect_command)
+    redirect_command.add_argument("--session-ref", required=True)
+    redirect_command.add_argument("--reason", required=True)
+    redirect_command.add_argument("--goal")
+    redirect_command.add_argument("--done-when")
+    redirect_command.add_argument("--intent")
+    redirect_command.add_argument("--scope")
+    redirect_command.add_argument("--source")
+
+    now_command = commands.add_parser("now", help="Update only a lane's tactical current state.")
+    add_root(now_command)
+    now_command.add_argument("--session-ref", required=True)
+    now_command.add_argument("--now")
+    now_command.add_argument("--status", choices=GOAL_STATUSES)
+    now_command.add_argument("--last-verified")
+
+    check_command = commands.add_parser("check", help="Check whether a lane meets the specification threshold.")
+    add_root(check_command)
+    check_command.add_argument("--session-ref", required=True)
+
+    guidance_command = commands.add_parser("guidance", help="Locate canonical operator guidance for a working directory.")
+    guidance_command.add_argument("--cwd", type=Path, required=True)
+    guidance_command.add_argument("--show", action="store_true")
 
     due_command = commands.add_parser("due", help="List timed holds that are due for operator review.")
     add_root(due_command)
@@ -449,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
                 done_when=args.done_when,
                 source=args.source,
                 status=args.status,
+                intent=args.intent if args.intent is not None else (existing.intent if existing is not None else ""),
+                scope=args.scope if args.scope is not None else (existing.scope if existing is not None else ""),
                 now=args.now,
                 last_verified=args.last_verified,
                 open_asks=tuple(args.open_ask),
@@ -473,6 +664,50 @@ def main(argv: list[str] | None = None) -> int:
             _print_record(hold_goal(args.root, args.session_ref, reason=args.reason, resume_at=args.resume_at))
         elif args.command == "resume":
             _print_record(resume_goal(args.root, args.session_ref))
+        elif args.command == "redirect":
+            _print_record(
+                redirect_goal(
+                    args.root,
+                    args.session_ref,
+                    reason=args.reason,
+                    goal=args.goal,
+                    done_when=args.done_when,
+                    intent=args.intent,
+                    scope=args.scope,
+                    source=args.source,
+                )
+            )
+        elif args.command == "now":
+            _print_record(
+                update_now(
+                    args.root,
+                    args.session_ref,
+                    now=args.now,
+                    status=args.status,
+                    last_verified=args.last_verified,
+                )
+            )
+        elif args.command == "check":
+            found_record = get_goal(args.root, args.session_ref)
+            if found_record is None:
+                raise GoalNotFoundError(args.session_ref)
+            specification_issues = check_specification(found_record)
+            if specification_issues:
+                print("\n".join(specification_issues))
+                return 1
+            print("well-specified")
+        elif args.command == "guidance":
+            from chitra.policy_config import load_policy_config, resolve_guidance
+
+            guidance_path = resolve_guidance(load_policy_config(), args.cwd)
+            if guidance_path is None:
+                raise ValueError(f"no guidance is configured for {args.cwd}")
+            if not guidance_path.is_file():
+                raise ValueError(f"configured guidance file is missing: {guidance_path}")
+            if args.show:
+                print(guidance_path.read_text(encoding="utf-8"), end="")
+            else:
+                print(guidance_path)
         elif args.command == "due":
             due_now = _parse_iso8601(args.now) if args.now else None
             print(json.dumps([record.to_dict() for record in due_goals(args.root, now=due_now)], indent=2, sort_keys=True))
@@ -502,6 +737,9 @@ def main(argv: list[str] | None = None) -> int:
                 if roster_lint is not None:
                     for issue in roster_lint(records):
                         print(issue, file=sys.stderr)
+    except GoalRedirectRequiredError as exc:
+        print(f"chitra-goals: {exc}; use chitra-goals redirect --reason ...", file=sys.stderr)
+        return 1
     except (GoalValidationError, GoalNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"chitra-goals: {exc}", file=sys.stderr)
         return 1

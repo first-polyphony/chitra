@@ -81,12 +81,44 @@ class UsagePolicy(BaseModel):
         return self
 
 
+class GuidancePolicy(BaseModel):
+    """Map working-directory prefixes to canonical decision documents."""
+
+    canonical_decisions: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_document_paths(self) -> Self:
+        """Reject blank configured document paths before they reach the CLI."""
+        if any(not document.strip() for document in self.canonical_decisions.values()):
+            raise ValueError("canonical_decisions values must be non-empty strings")
+        return self
+
+
 class PolicyConfig(BaseModel):
     """The complete optional policy.yaml schema."""
 
     completion_gate: GatePolicy = Field(default_factory=GatePolicy)
     dispatch: DispatchPolicy = Field(default_factory=DispatchPolicy)
     usage: UsagePolicy = Field(default_factory=UsagePolicy)
+    guidance: GuidancePolicy = Field(default_factory=GuidancePolicy)
+
+
+def resolve_guidance(config: PolicyConfig, cwd: Path) -> Path | None:
+    """Return the canonical decision document for ``cwd`` by longest prefix."""
+    resolved_cwd = cwd.expanduser().resolve().as_posix()
+    matches: list[tuple[int, str]] = []
+    for prefix, document in config.guidance.canonical_decisions.items():
+        if prefix == "default":
+            continue
+        resolved_prefix = Path(prefix).expanduser().resolve().as_posix()
+        if resolved_cwd == resolved_prefix or (
+            resolved_prefix != "/" and resolved_cwd.startswith(f"{resolved_prefix}/")
+        ) or (resolved_prefix == "/" and resolved_cwd.startswith("/")):
+            matches.append((len(resolved_prefix), document))
+    if matches:
+        return Path(max(matches, key=lambda match: match[0])[1]).expanduser()
+    default = config.guidance.canonical_decisions.get("default")
+    return Path(default).expanduser() if default is not None else None
 
 
 def load_policy_config(path: Path | None = None) -> PolicyConfig:
