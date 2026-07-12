@@ -192,6 +192,237 @@ principles:
       <<: *corpus39
       line_start: 85
       line_end: 85
+  - principle_id: A03
+    title: Domain logic stays transport-free
+    text: Domain stages, services, and stores do not import web, command-line, or UI response types; translation happens at the edge.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, architecture]
+    risk_classes: [A1, A2]
+    keywords: [domain, transport, web, command-line, ui, service, store, edge]
+    citation:
+      <<: *corpus39
+      line_start: 67
+      line_end: 67
+  - principle_id: A06
+    title: Required dependencies are required
+    text: Required collaborators are required in signatures, and persistent writes return the stored record or raise.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, architecture]
+    risk_classes: [A1, A2]
+    keywords: [required, dependency, collaborator, signature, persistent, write, return, raise]
+    citation:
+      <<: *corpus39
+      line_start: 73
+      line_end: 73
+  - principle_id: A07
+    title: Async I/O and owned resources
+    text: Use asynchronous network, file, and delay primitives in async code and explicitly own and clean up resources.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, architecture]
+    risk_classes: [A1, A2]
+    keywords: [async, aiohttp, aiofiles, asyncio, network, file, resource, cleanup]
+    citation:
+      <<: *corpus39
+      line_start: 75
+      line_end: 75
+  - principle_id: S01
+    title: Fix security findings structurally
+    text: Never add a global scanner skip or agent-authored suppression; unresolved exceptions are bounded human policy decisions after real fixes.
+    scopes: [global, security, engineering]
+    answer_categories: [answer, nudge, security]
+    risk_classes: [A1, A2, A3]
+    keywords: [security, scanner, skip, suppression, exception, finding, structural, human]
+    citation:
+      <<: *corpus39
+      line_start: 81
+      line_end: 81
+  - principle_id: S04
+    title: GCT owns its domains
+    text: Use GCT discovery and invocation for brokered services, keep credentials downstream, and require a named current carve-out for direct access.
+    scopes: [global, security, services]
+    answer_categories: [answer, nudge, credentials, architecture]
+    risk_classes: [A1, A2, A3]
+    keywords: [gct, gateway, broker, service, credential, carve-out, direct, discovery]
+    citation:
+      <<: *corpus39
+      line_start: 87
+      line_end: 87
+  - principle_id: M01
+    title: Product LLM calls use LLMService
+    text: Route normal product model calls through LLMService; only the named streaming, embedding, and OSS-harness carve-outs bypass it.
+    scopes: [global, engineering, models]
+    answer_categories: [answer, nudge, architecture]
+    risk_classes: [A1, A2]
+    keywords: [llmservice, llm, model, provider, streaming, embedding, oss, harness]
+    citation:
+      <<: *corpus39
+      line_start: 91
+      line_end: 91
+  - principle_id: M02
+    title: Route by role from current configuration
+    text: Use current routing configuration plus explicit operator overrides; Codex uses OAuth surfaces and frontier models stay in assigned roles.
+    scopes: [global, engineering, models]
+    answer_categories: [answer, nudge, routing]
+    risk_classes: [A1, A2]
+    keywords: [routing, model, role, codex, oauth, openrouter, frontier, override]
+    citation:
+      <<: *corpus39
+      line_start: 93
+      line_end: 93
+  - principle_id: M03
+    title: Separate maker checker and evidence
+    text: An implementer does not grade itself; validation and judging use independent contexts and current artifacts.
+    scopes: [global, engineering, models]
+    answer_categories: [answer, nudge, validation]
+    risk_classes: [A1, A2, A3]
+    keywords: [maker, checker, implementer, judge, validation, independent, evidence, artifact]
+    citation:
+      <<: *corpus39
+      line_start: 95
+      line_end: 95
+  - principle_id: T01
+    title: Use the canonical build surface
+    text: Python repository acceptance uses Pants for lint, type checking, and tests; direct tools are diagnostic supplements.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, validation]
+    risk_classes: [A1, A2]
+    keywords: [pants, pytest, ruff, mypy, lint, type, test, build, acceptance]
+    citation:
+      <<: *corpus39
+      line_start: 97
+      line_end: 97
+  - principle_id: T02
+    title: Match task shape to mechanism
+    text: Use deterministic tools for mechanical work, a direct model for one judgment, Foreman before fan-out, and Deepwork for long recursive work.
+    scopes: [global, engineering, models]
+    answer_categories: [answer, nudge, routing]
+    risk_classes: [A1, A2]
+    keywords: [deterministic, tool, model, foreman, fan-out, deepwork, recursive, mechanism]
+    citation:
+      <<: *corpus39
+      line_start: 99
+      line_end: 99
+  - principle_id: V01
+    title: Validate behavior not an oracle
+    text: Acceptance follows the real entry point and checks the user-visible or persisted effect, not only a return, mock call, compile, or synthetic path.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, validation, completion]
+    risk_classes: [A1, A2]
+    keywords: [validate, behavior, entry, user-visible, persisted, mock, compile, synthetic]
+    citation:
+      <<: *corpus39
+      line_start: 103
+      line_end: 103
+  - principle_id: V02
+    title: Test doubles stay at external boundaries
+    text: Unit tests may replace expensive external boundaries with constrained doubles but never mock the subject or its internal chain.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, validation]
+    risk_classes: [A1, A2]
+    keywords: [test, double, mock, external, boundary, unit, integration, real]
+    citation:
+      <<: *corpus39
+      line_start: 105
+      line_end: 105
+  - principle_id: V03
+    title: Preserve regression knowledge
+    text: Read package hubs, accepted ADRs, changelogs, error logs, and regression ledgers before significant edits and add regression tests for repaired failures.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, change, validation]
+    risk_classes: [A1, A2]
+    keywords: [regression, changelog, adr, hub, error, ledger, test, repair]
+    citation:
+      <<: *corpus39
+      line_start: 107
+      line_end: 107
+  - principle_id: C02
+    title: Ask before changing governance
+    text: New dependencies, schemas, hooks, policy, root directories, spend, or authorization boundaries require explicit approval.
+    scopes: [global, engineering]
+    answer_categories: [answer, nudge, escalation, change]
+    risk_classes: [A2, A3]
+    keywords: [dependency, schema, hook, policy, governance, spend, authorization, approval]
+    citation:
+      <<: *corpus39
+      line_start: 111
+      line_end: 111
+  - principle_id: K01
+    title: HFR is discovery plus scoped authority
+    text: Read the nearest package hub and compile both registry paths and filesystem-discovered hubs because the registry alone is incomplete.
+    scopes: [global, engineering, knowledge]
+    answer_categories: [answer, nudge, architecture]
+    risk_classes: [A0, A1, A2]
+    keywords: [hfr, registry, hub, package, discovery, filesystem, authority]
+    citation:
+      <<: *corpus39
+      line_start: 115
+      line_end: 115
+  - principle_id: K02
+    title: ADR status matters
+    text: Accepted and implemented ADRs bind only their scope; draft, proposed, historical, superseded, archived, and unknown material does not silently become policy.
+    scopes: [global, engineering, knowledge]
+    answer_categories: [answer, nudge, architecture]
+    risk_classes: [A0, A1, A2, A3]
+    keywords: [adr, accepted, implemented, draft, proposed, historical, superseded, status, policy]
+    citation:
+      <<: *corpus39
+      line_start: 117
+      line_end: 117
+  - principle_id: K03
+    title: Put knowledge on its canonical plane
+    text: Code and doctrine go in Git, project knowledge in Wiki, hot documents in DocsHome, scratch state in DocsHome scratch, and large corpora in DataHome.
+    scopes: [global, knowledge, storage]
+    answer_categories: [answer, nudge, storage]
+    risk_classes: [A0, A1, A2]
+    keywords: [git, wiki, docshome, scratch, datahome, storage, document, corpus, knowledge]
+    citation:
+      <<: *corpus39
+      line_start: 119
+      line_end: 119
+  - principle_id: K04
+    title: Read back authoritative storage
+    text: Re-read the backend or canonical path and distinguish refresh or synchronization failure from absent content.
+    scopes: [global, knowledge, storage]
+    answer_categories: [answer, nudge, storage, validation]
+    risk_classes: [A0, A1, A2]
+    keywords: [read, backend, canonical, refresh, sync, storage, missing, content]
+    citation:
+      <<: *corpus39
+      line_start: 121
+      line_end: 121
+  - principle_id: H01
+    title: One writer per live session
+    text: Tmux injection is the only write channel to an attached lane; check pane mode, paste safely, and verify the directive in the transcript.
+    scopes: [global, chitra]
+    answer_categories: [nudge, action]
+    risk_classes: [A1, A2]
+    keywords: [writer, tmux, live, session, lane, pane, paste, transcript, directive]
+    citation:
+      <<: *corpus39
+      line_start: 125
+      line_end: 125
+  - principle_id: H02
+    title: Reasoned output is immutable after review
+    text: Goal, question, evidence, principles, candidate, author, reviewers, and verdict have stable bindings; any mutation invalidates release.
+    scopes: [global, chitra]
+    answer_categories: [answer, nudge, action]
+    risk_classes: [A0, A1, A2, A3]
+    keywords: [immutable, review, goal, evidence, principle, candidate, verdict, hash, mutation]
+    citation:
+      <<: *corpus39
+      line_start: 127
+      line_end: 127
+  - principle_id: H04
+    title: Plain directive self-contained communication
+    text: Lead with the outcome, define jargon once, keep lane directives concrete, and explain options and consequences in operator decisions.
+    scopes: [global, chitra]
+    answer_categories: [answer, nudge]
+    risk_classes: [A0, A1, A2, A3]
+    keywords: [plain, directive, outcome, jargon, concrete, option, consequence, communication]
+    citation:
+      <<: *corpus39
+      line_start: 131
+      line_end: 131
   - principle_id: C01
     title: Protected change flow
     text: Develop on a topic branch, run required checks, open a pull request, and merge through protected main without force-admin or deploy-checkout edits.

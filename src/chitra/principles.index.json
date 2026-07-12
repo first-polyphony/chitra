@@ -3,10 +3,14 @@
   "core_pack": [
     "A01",
     "A02",
+    "A03",
     "A04",
     "A05",
+    "A06",
+    "A07",
     "A08",
     "C01",
+    "C02",
     "E01",
     "E02",
     "E03",
@@ -17,12 +21,29 @@
     "G03",
     "G04",
     "G05",
+    "H01",
+    "H02",
     "H03",
+    "H04",
     "H05",
+    "K01",
+    "K02",
+    "K03",
+    "K04",
+    "M01",
+    "M02",
+    "M03",
+    "S01",
     "S02",
-    "S03"
+    "S03",
+    "S04",
+    "T01",
+    "T02",
+    "V01",
+    "V02",
+    "V03"
   ],
-  "corpus_id": "sha256:6833dc91d57ef8e2054503a02f9a87bac847532e99b065754422f831e81e09a2",
+  "corpus_id": "sha256:05a94af0b6426a503814be08c203c163e2bcacb0a175bdf8191d5a74b1f856a2",
   "principles": [
     {
       "answer_categories": [
@@ -100,6 +121,45 @@
       ],
       "text": "Inject shared collaborators and keep each branching domain concept in one authoritative decision function.",
       "title": "Dependency injection and one switch"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 67,
+        "line_start": 67,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "domain",
+        "transport",
+        "web",
+        "command-line",
+        "ui",
+        "service",
+        "store",
+        "edge"
+      ],
+      "principle_id": "A03",
+      "record_sha256": "af6b60858bed1ce5659488e49043bdd36301ba7ca4560827ad7a84e71a4fdb16",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Domain stages, services, and stores do not import web, command-line, or UI response types; translation happens at the edge.",
+      "title": "Domain logic stays transport-free"
     },
     {
       "answer_categories": [
@@ -187,6 +247,84 @@
       ],
       "citation": {
         "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 73,
+        "line_start": 73,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "required",
+        "dependency",
+        "collaborator",
+        "signature",
+        "persistent",
+        "write",
+        "return",
+        "raise"
+      ],
+      "principle_id": "A06",
+      "record_sha256": "ce400c4e9a3fcb9f248dfa101bbbff50ecacb561b49fab008b6fb62a86118132",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Required collaborators are required in signatures, and persistent writes return the stored record or raise.",
+      "title": "Required dependencies are required"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 75,
+        "line_start": 75,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "async",
+        "aiohttp",
+        "aiofiles",
+        "asyncio",
+        "network",
+        "file",
+        "resource",
+        "cleanup"
+      ],
+      "principle_id": "A07",
+      "record_sha256": "27f8f79ab6c060fd7ac959e012f9d7cee676f6dfaa1ff35c1c2bad76bd4f4fa2",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Use asynchronous network, file, and delay primitives in async code and explicitly own and clean up resources.",
+      "title": "Async I/O and owned resources"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
         "line_end": 77,
         "line_start": 77,
         "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
@@ -256,6 +394,46 @@
       ],
       "text": "Develop on a topic branch, run required checks, open a pull request, and merge through protected main without force-admin or deploy-checkout edits.",
       "title": "Protected change flow"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "escalation",
+        "change"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 111,
+        "line_start": 111,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "dependency",
+        "schema",
+        "hook",
+        "policy",
+        "governance",
+        "spend",
+        "authorization",
+        "approval"
+      ],
+      "principle_id": "C02",
+      "record_sha256": "c178e974261364f94b7df58fa72885b36c601200694891b103a288398930103a",
+      "risk_classes": [
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "New dependencies, schemas, hooks, policy, root directories, spend, or authorization boundaries require explicit approval.",
+      "title": "Ask before changing governance"
     },
     {
       "answer_categories": [
@@ -655,6 +833,87 @@
     },
     {
       "answer_categories": [
+        "nudge",
+        "action"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 125,
+        "line_start": 125,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "writer",
+        "tmux",
+        "live",
+        "session",
+        "lane",
+        "pane",
+        "paste",
+        "transcript",
+        "directive"
+      ],
+      "principle_id": "H01",
+      "record_sha256": "f30c8b571a4efbc367b04e1e4191e697335d3abd5d75d54a57c890c6c43c6162",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "chitra"
+      ],
+      "text": "Tmux injection is the only write channel to an attached lane; check pane mode, paste safely, and verify the directive in the transcript.",
+      "title": "One writer per live session"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "action"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 127,
+        "line_start": 127,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "immutable",
+        "review",
+        "goal",
+        "evidence",
+        "principle",
+        "candidate",
+        "verdict",
+        "hash",
+        "mutation"
+      ],
+      "principle_id": "H02",
+      "record_sha256": "828146aa448a88a5e7ebf587097b8a6cdf96af091de9234e4a202c203ee490d9",
+      "risk_classes": [
+        "A0",
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "chitra"
+      ],
+      "text": "Goal, question, evidence, principles, candidate, author, reviewers, and verdict have stable bindings; any mutation invalidates release.",
+      "title": "Reasoned output is immutable after review"
+    },
+    {
+      "answer_categories": [
         "answer",
         "nudge"
       ],
@@ -697,6 +956,46 @@
     {
       "answer_categories": [
         "answer",
+        "nudge"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 131,
+        "line_start": 131,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "plain",
+        "directive",
+        "outcome",
+        "jargon",
+        "concrete",
+        "option",
+        "consequence",
+        "communication"
+      ],
+      "principle_id": "H04",
+      "record_sha256": "a71e3d248b93b00e273e634c5236bbfabd4310de569ef6396ef7700bc8d17e04",
+      "risk_classes": [
+        "A0",
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "chitra"
+      ],
+      "text": "Lead with the outcome, define jargon once, keep lane directives concrete, and explain options and consequences in operator decisions.",
+      "title": "Plain directive self-contained communication"
+    },
+    {
+      "answer_categories": [
+        "answer",
         "nudge",
         "escalation"
       ],
@@ -735,6 +1034,335 @@
       ],
       "text": "Missing goals, stale principles, conflicts, or absent evidence block autonomous normative answers while safe factual observations and precise missing-evidence statements remain allowed.",
       "title": "Fail closed but answer boundedly"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 115,
+        "line_start": 115,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "hfr",
+        "registry",
+        "hub",
+        "package",
+        "discovery",
+        "filesystem",
+        "authority"
+      ],
+      "principle_id": "K01",
+      "record_sha256": "57ce67d91605e709e5653e822c32d033a7cb442afeb55193651624dff778ce24",
+      "risk_classes": [
+        "A0",
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering",
+        "knowledge"
+      ],
+      "text": "Read the nearest package hub and compile both registry paths and filesystem-discovered hubs because the registry alone is incomplete.",
+      "title": "HFR is discovery plus scoped authority"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 117,
+        "line_start": 117,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "adr",
+        "accepted",
+        "implemented",
+        "draft",
+        "proposed",
+        "historical",
+        "superseded",
+        "status",
+        "policy"
+      ],
+      "principle_id": "K02",
+      "record_sha256": "9c91ee62d2e032602c6cc0c4bdf2dc110bfb107a501c13e3fa699c78b78f082b",
+      "risk_classes": [
+        "A0",
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "engineering",
+        "knowledge"
+      ],
+      "text": "Accepted and implemented ADRs bind only their scope; draft, proposed, historical, superseded, archived, and unknown material does not silently become policy.",
+      "title": "ADR status matters"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "storage"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 119,
+        "line_start": 119,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "git",
+        "wiki",
+        "docshome",
+        "scratch",
+        "datahome",
+        "storage",
+        "document",
+        "corpus",
+        "knowledge"
+      ],
+      "principle_id": "K03",
+      "record_sha256": "eb3d06a43a3325aa7f69735edd7d7e7d93fdf78b1c25d0cfd36fa2147fcba446",
+      "risk_classes": [
+        "A0",
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "knowledge",
+        "storage"
+      ],
+      "text": "Code and doctrine go in Git, project knowledge in Wiki, hot documents in DocsHome, scratch state in DocsHome scratch, and large corpora in DataHome.",
+      "title": "Put knowledge on its canonical plane"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "storage",
+        "validation"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 121,
+        "line_start": 121,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "read",
+        "backend",
+        "canonical",
+        "refresh",
+        "sync",
+        "storage",
+        "missing",
+        "content"
+      ],
+      "principle_id": "K04",
+      "record_sha256": "54a67009e63f4d82c2baca09d32f9c4bc15a228d60c8cca7853a26f5f7a5c069",
+      "risk_classes": [
+        "A0",
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "knowledge",
+        "storage"
+      ],
+      "text": "Re-read the backend or canonical path and distinguish refresh or synchronization failure from absent content.",
+      "title": "Read back authoritative storage"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 91,
+        "line_start": 91,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "llmservice",
+        "llm",
+        "model",
+        "provider",
+        "streaming",
+        "embedding",
+        "oss",
+        "harness"
+      ],
+      "principle_id": "M01",
+      "record_sha256": "5bb03dc2fab747ca8acd3ff78f7e5daee88d3f19040ca6c8e6dfa6146362a76d",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering",
+        "models"
+      ],
+      "text": "Route normal product model calls through LLMService; only the named streaming, embedding, and OSS-harness carve-outs bypass it.",
+      "title": "Product LLM calls use LLMService"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "routing"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 93,
+        "line_start": 93,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "routing",
+        "model",
+        "role",
+        "codex",
+        "oauth",
+        "openrouter",
+        "frontier",
+        "override"
+      ],
+      "principle_id": "M02",
+      "record_sha256": "c7a8a70aee86986cd2a9e723435e963e8e16fa125a72e84a01a8c49935edb0f8",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering",
+        "models"
+      ],
+      "text": "Use current routing configuration plus explicit operator overrides; Codex uses OAuth surfaces and frontier models stay in assigned roles.",
+      "title": "Route by role from current configuration"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "validation"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 95,
+        "line_start": 95,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "maker",
+        "checker",
+        "implementer",
+        "judge",
+        "validation",
+        "independent",
+        "evidence",
+        "artifact"
+      ],
+      "principle_id": "M03",
+      "record_sha256": "54bf1922674ddbecbf51ddcd8adcbddbe2a34d7008e17375c22f4503579fd7c1",
+      "risk_classes": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "engineering",
+        "models"
+      ],
+      "text": "An implementer does not grade itself; validation and judging use independent contexts and current artifacts.",
+      "title": "Separate maker checker and evidence"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "security"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 81,
+        "line_start": 81,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "security",
+        "scanner",
+        "skip",
+        "suppression",
+        "exception",
+        "finding",
+        "structural",
+        "human"
+      ],
+      "principle_id": "S01",
+      "record_sha256": "ef2f6ea77e9fce38567dc37328cc7754291bc68e12e1858a00df627402b3a4fb",
+      "risk_classes": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "security",
+        "engineering"
+      ],
+      "text": "Never add a global scanner skip or agent-authored suppression; unresolved exceptions are bounded human policy decisions after real fixes.",
+      "title": "Fix security findings structurally"
     },
     {
       "answer_categories": [
@@ -820,8 +1448,249 @@
       ],
       "text": "Prefer provisioned GCT, GitHub App, service-account, or daemon paths and stop after three failed headless login attempts in sixty seconds.",
       "title": "Credentials are mediated and throttled"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "credentials",
+        "architecture"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 87,
+        "line_start": 87,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "gct",
+        "gateway",
+        "broker",
+        "service",
+        "credential",
+        "carve-out",
+        "direct",
+        "discovery"
+      ],
+      "principle_id": "S04",
+      "record_sha256": "7e8dead41b8583c5f03c2499a2e4e1e7dcc53ef037b9af6a587afb5808461c6c",
+      "risk_classes": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "scopes": [
+        "global",
+        "security",
+        "services"
+      ],
+      "text": "Use GCT discovery and invocation for brokered services, keep credentials downstream, and require a named current carve-out for direct access.",
+      "title": "GCT owns its domains"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "validation"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 97,
+        "line_start": 97,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "pants",
+        "pytest",
+        "ruff",
+        "mypy",
+        "lint",
+        "type",
+        "test",
+        "build",
+        "acceptance"
+      ],
+      "principle_id": "T01",
+      "record_sha256": "6385a5c444c58ea0234c10bdfe397d04eebe21dd9c349001bbbf2c4923eeaedf",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Python repository acceptance uses Pants for lint, type checking, and tests; direct tools are diagnostic supplements.",
+      "title": "Use the canonical build surface"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "routing"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 99,
+        "line_start": 99,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "deterministic",
+        "tool",
+        "model",
+        "foreman",
+        "fan-out",
+        "deepwork",
+        "recursive",
+        "mechanism"
+      ],
+      "principle_id": "T02",
+      "record_sha256": "00b228022d86c818083f0bbe2868f3f9fa0b863f49d4f757fef3b60e3199580e",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering",
+        "models"
+      ],
+      "text": "Use deterministic tools for mechanical work, a direct model for one judgment, Foreman before fan-out, and Deepwork for long recursive work.",
+      "title": "Match task shape to mechanism"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "validation",
+        "completion"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 103,
+        "line_start": 103,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "validate",
+        "behavior",
+        "entry",
+        "user-visible",
+        "persisted",
+        "mock",
+        "compile",
+        "synthetic"
+      ],
+      "principle_id": "V01",
+      "record_sha256": "6232ad67668d0ddd5d1a7197c5448e366d119931991100dcd8be7bf9edb88699",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Acceptance follows the real entry point and checks the user-visible or persisted effect, not only a return, mock call, compile, or synthetic path.",
+      "title": "Validate behavior not an oracle"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "validation"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 105,
+        "line_start": 105,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "test",
+        "double",
+        "mock",
+        "external",
+        "boundary",
+        "unit",
+        "integration",
+        "real"
+      ],
+      "principle_id": "V02",
+      "record_sha256": "23f9a0c245cf655fb1808bfbcaa7d24e7738f4fcc2c7ff83473fd7d394484f57",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Unit tests may replace expensive external boundaries with constrained doubles but never mock the subject or its internal chain.",
+      "title": "Test doubles stay at external boundaries"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "change",
+        "validation"
+      ],
+      "citation": {
+        "content_sha256": "a6cb543633fd81281b1d8a22e46a8fb220fa316c5262a01994e3d3bf7da2b40e",
+        "line_end": 107,
+        "line_start": 107,
+        "path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "resolved_path": "/srv/onedrive-share/DocsHome/_scratch/fleet-monitor/_v0.9/B-principles-corpus.md",
+        "revision": "design-corpus-2026-07-12",
+        "source_repository": "DocsHome",
+        "status": "binding"
+      },
+      "keywords": [
+        "regression",
+        "changelog",
+        "adr",
+        "hub",
+        "error",
+        "ledger",
+        "test",
+        "repair"
+      ],
+      "principle_id": "V03",
+      "record_sha256": "bb356e491bb9cca21bec394d09c5ec26f6f20407d5ba5939f7b1c3b940020456",
+      "risk_classes": [
+        "A1",
+        "A2"
+      ],
+      "scopes": [
+        "global",
+        "engineering"
+      ],
+      "text": "Read package hubs, accepted ADRs, changelogs, error logs, and regression ledgers before significant edits and add regression tests for repaired failures.",
+      "title": "Preserve regression knowledge"
     }
   ],
   "schema": "chitra.principles.index.v1",
-  "source_sha256": "92342080f05cfc7bef33038e506858b300613c93ace1003d06325672839b4039"
+  "source_sha256": "83694a8c7055e16c84e2fbd723496ce0f80a2ccf2d6dbe9fce7a112c653332b6"
 }

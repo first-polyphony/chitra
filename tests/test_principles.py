@@ -22,7 +22,7 @@ def test_checked_in_index_is_current_and_reproducible() -> None:
 
     assert rebuilt == checked_in
     assert checked_in.corpus_id.startswith("sha256:")
-    assert len(checked_in.principles) == 20
+    assert len(checked_in.principles) == 41
     assert all(principle.citation.content_sha256 for principle in checked_in.principles)
 
 
