@@ -1,0 +1,408 @@
+{
+  "compiler_version": "1",
+  "corpus_id": "sha256:9b789e543ac09db935aa03e90ffaff7ac7b7f1777a8b3a4c0851bdea30e6a1c9",
+  "principles": [
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "guidance": "Prefer existing standards and project conventions; keep changes surgical and add no framework, abstraction, fallback, or configurability without a goal-derived need.",
+      "keywords": [
+        "architecture",
+        "abstraction",
+        "framework",
+        "fallback",
+        "configuration",
+        "refactor",
+        "surgical",
+        "minimal"
+      ],
+      "principle_id": "A01",
+      "scope": [
+        "core",
+        "engineering"
+      ],
+      "status": "binding",
+      "title": "Substance and minimum mechanism"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "CLAUDE.md",
+        "docs/agent_docs/rules/must-rules.md"
+      ],
+      "guidance": "Use Pydantic models at new input, output, service, and stage boundaries; validate required fields at the boundary and use typed attributes downstream.",
+      "keywords": [
+        "type",
+        "typed",
+        "pydantic",
+        "model",
+        "schema",
+        "boundary",
+        "dictionary",
+        "input",
+        "output"
+      ],
+      "principle_id": "A04",
+      "scope": [
+        "core",
+        "engineering"
+      ],
+      "status": "binding",
+      "title": "Typed boundaries"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "CLAUDE.md",
+        "docs/agent_docs/rules/must-rules.md"
+      ],
+      "guidance": "Raise a typed exception with context for malformed required input, impossible state, wiring failure, or corrupt output; defaults must not conceal required-contract failures.",
+      "keywords": [
+        "error",
+        "invalid",
+        "malformed",
+        "corrupt",
+        "required",
+        "default",
+        "fail",
+        "exception",
+        "contract"
+      ],
+      "principle_id": "A05",
+      "scope": [
+        "core",
+        "engineering"
+      ],
+      "status": "binding",
+      "title": "Fail loud on contract breach"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "action"
+      ],
+      "citations": [
+        "CLAUDE.md#Git-Workflow",
+        "rules/github-integration.md"
+      ],
+      "guidance": "Develop on a topic branch or isolated worktree, run required checks, and merge through a pull request; never push directly to main or edit a deploy checkout.",
+      "keywords": [
+        "git",
+        "branch",
+        "worktree",
+        "pull",
+        "request",
+        "pr",
+        "main",
+        "merge",
+        "deploy",
+        "checkout"
+      ],
+      "principle_id": "C01",
+      "scope": [
+        "core",
+        "change-control"
+      ],
+      "status": "binding",
+      "title": "Protected change flow"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "action"
+      ],
+      "citations": [
+        "CLAUDE.md#Boundaries"
+      ],
+      "guidance": "New dependencies, schemas, hooks, pre-commit policy, root directories, spend, or authorization boundaries require explicit operator approval.",
+      "keywords": [
+        "dependency",
+        "schema",
+        "hook",
+        "policy",
+        "directory",
+        "spend",
+        "authorization",
+        "approval",
+        "governance"
+      ],
+      "principle_id": "C02",
+      "scope": [
+        "core",
+        "governance"
+      ],
+      "status": "binding",
+      "title": "Ask before changing governance"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "CLAUDE.md#Agent-Discipline",
+        "rules/evidence-first-integration.md"
+      ],
+      "guidance": "Verify claims with current files, transcripts, commands, receipts, logs, service state, or user-visible effects; repetition and tool success are not proof.",
+      "keywords": [
+        "evidence",
+        "verify",
+        "proof",
+        "receipt",
+        "log",
+        "current",
+        "claim",
+        "status"
+      ],
+      "principle_id": "E01",
+      "scope": [
+        "core",
+        "evidence"
+      ],
+      "status": "binding",
+      "title": "Evidence before belief"
+    },
+    {
+      "answer_categories": [
+        "nudge",
+        "action"
+      ],
+      "citations": [
+        "agent_docs/plans/2026-06-27-monitor-state-authority-prd.md"
+      ],
+      "guidance": "Obtain fresh host, session, and pane state before checkpoint, nudge, takeover, close, or spawn; missing or stale live authority fails closed.",
+      "keywords": [
+        "live",
+        "host",
+        "session",
+        "pane",
+        "checkpoint",
+        "nudge",
+        "takeover",
+        "close",
+        "spawn",
+        "stale"
+      ],
+      "principle_id": "E02",
+      "scope": [
+        "core",
+        "live-action"
+      ],
+      "status": "binding",
+      "title": "Live reads authorize live actions"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "CLAUDE.md#Operational-Reliability",
+        "docs/agent_docs/rules/validation-principles.md"
+      ],
+      "guidance": "Test the frozen done-when; deployable code normally requires checks, protected-main merge, real deployment, and live user-path verification, while non-deployable work follows its explicit artifact contract.",
+      "keywords": [
+        "done",
+        "complete",
+        "completion",
+        "test",
+        "merge",
+        "deploy",
+        "live",
+        "verify",
+        "artifact"
+      ],
+      "principle_id": "E04",
+      "scope": [
+        "core",
+        "completion"
+      ],
+      "status": "binding",
+      "title": "Completion is goal-specific"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "action"
+      ],
+      "citations": [
+        "tools/support/chitra_adapter/harness/CLAUDE.md"
+      ],
+      "guidance": "Preserve the frozen goal's intent, goal, done-when, scope, source, and version; only an explicit operator redirect may replace it.",
+      "keywords": [
+        "goal",
+        "intent",
+        "done",
+        "scope",
+        "source",
+        "redirect",
+        "objective",
+        "requirement"
+      ],
+      "principle_id": "G01",
+      "scope": [
+        "core",
+        "goal"
+      ],
+      "status": "binding",
+      "title": "Preserve the original strategic contract"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "guidance": "Choose the smallest reversible step necessary for the recorded outcome; escalate only when the missing fact changes scope, authority, spend, schema, dependency, irreversibility, or success.",
+      "keywords": [
+        "next",
+        "step",
+        "gap",
+        "reversible",
+        "scope",
+        "authority",
+        "spend",
+        "schema",
+        "dependency",
+        "success"
+      ],
+      "principle_id": "G02",
+      "scope": [
+        "core",
+        "goal"
+      ],
+      "status": "binding",
+      "title": "Fill gaps without inventing direction"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge",
+        "action"
+      ],
+      "citations": [
+        "CLAUDE.md#Agent-Discipline",
+        "tools/support/chitra_adapter/harness/CLAUDE.md"
+      ],
+      "guidance": "Keep inspect, recommend, design, build, deploy, and send distinct; do not expand the action beyond the verb authorized by the goal.",
+      "keywords": [
+        "inspect",
+        "recommend",
+        "design",
+        "build",
+        "deploy",
+        "send",
+        "implement",
+        "review"
+      ],
+      "principle_id": "G03",
+      "scope": [
+        "core",
+        "task"
+      ],
+      "status": "binding",
+      "title": "Act at the verb's altitude"
+    },
+    {
+      "answer_categories": [
+        "answer"
+      ],
+      "citations": [
+        "tools/support/chitra_adapter/harness/CLAUDE.md"
+      ],
+      "guidance": "Resolve researchable facts first; escalate only a genuine strategic or authorization choice with one crisp question, a ranked recommendation, consequences, and primary-source anchors.",
+      "keywords": [
+        "ambiguous",
+        "strategic",
+        "authorization",
+        "choose",
+        "decision",
+        "permission",
+        "ruling",
+        "escalate"
+      ],
+      "principle_id": "G05",
+      "scope": [
+        "core",
+        "escalation"
+      ],
+      "status": "binding",
+      "title": "Escalate a decision, not uncertainty theater"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "tools/support/chitra_adapter/harness/CLAUDE.md"
+      ],
+      "guidance": "Name the goal version, evidence references, principle IDs, inference, confidence basis, and unresolved unknowns for every reasoned answer.",
+      "keywords": [
+        "basis",
+        "provenance",
+        "citation",
+        "confidence",
+        "inference",
+        "unknown",
+        "answer",
+        "explain"
+      ],
+      "principle_id": "H03",
+      "scope": [
+        "core",
+        "communication"
+      ],
+      "status": "binding",
+      "title": "Expose every answer's basis"
+    },
+    {
+      "answer_categories": [
+        "answer",
+        "nudge"
+      ],
+      "citations": [
+        "tools/support/chitra_adapter/harness/CLAUDE.md"
+      ],
+      "guidance": "Block autonomous normative answers when the binding goal or principle index is missing or stale, a binding conflict remains, or required evidence is absent; safe cited observations may still be returned.",
+      "keywords": [
+        "missing",
+        "stale",
+        "conflict",
+        "abstain",
+        "block",
+        "autonomy",
+        "evidence",
+        "safe",
+        "factual"
+      ],
+      "principle_id": "H05",
+      "scope": [
+        "core",
+        "autonomy"
+      ],
+      "status": "binding",
+      "title": "Fail closed but answer boundedly"
+    }
+  ],
+  "reproducible": true,
+  "schema": "chitra.principles.lock.v1"
+}

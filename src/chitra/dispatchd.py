@@ -428,6 +428,7 @@ def _process_claimed_order(
                 resolved_model=resolved_model,
                 resolved_harness=resolved_harness,
                 resolved_zdr=resolved_zdr,
+                decision_provenance=order.reasoning.provenance if order.reasoning is not None else None,
             )
             _write_result_atomic(results_dir, result)
             processed_dir.mkdir(parents=True, exist_ok=True)
@@ -456,6 +457,7 @@ def _process_claimed_order(
             resolved_zdr=resolved_zdr,
             status=DispatchStatus.BLOCKED,
             reason=f"lane lock unavailable: {exc}",
+            decision_provenance=order.reasoning.provenance if order.reasoning is not None else None,
         )
         _write_result_atomic(results_dir, result)
         claimed_path.replace(processed_dir / claimed_path.name)
@@ -546,6 +548,7 @@ def _process_claimed_order(
     result.resolved_model = resolved_model
     result.resolved_harness = resolved_harness
     result.resolved_zdr = resolved_zdr
+    result.decision_provenance = order.reasoning.provenance if order.reasoning is not None else None
     logger.info(
         "dispatchd_order_processed",
         order_id=order.order_id,

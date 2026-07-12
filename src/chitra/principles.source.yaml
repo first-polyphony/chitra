@@ -1,0 +1,137 @@
+schema: chitra.principles.source.v1
+compiler_version: "1"
+principles:
+  - principle_id: G01
+    title: Preserve the original strategic contract
+    guidance: Preserve the frozen goal's intent, goal, done-when, scope, source, and version; only an explicit operator redirect may replace it.
+    scope: [core, goal]
+    answer_categories: [answer, nudge, action]
+    keywords: [goal, intent, done, scope, source, redirect, objective, requirement]
+    status: binding
+    citations:
+      - tools/support/chitra_adapter/harness/CLAUDE.md
+  - principle_id: G02
+    title: Fill gaps without inventing direction
+    guidance: Choose the smallest reversible step necessary for the recorded outcome; escalate only when the missing fact changes scope, authority, spend, schema, dependency, irreversibility, or success.
+    scope: [core, goal]
+    answer_categories: [answer, nudge]
+    keywords: [next, step, gap, reversible, scope, authority, spend, schema, dependency, success]
+    status: binding
+    citations:
+      - AGENTS.md
+      - CLAUDE.md
+  - principle_id: G03
+    title: Act at the verb's altitude
+    guidance: Keep inspect, recommend, design, build, deploy, and send distinct; do not expand the action beyond the verb authorized by the goal.
+    scope: [core, task]
+    answer_categories: [answer, nudge, action]
+    keywords: [inspect, recommend, design, build, deploy, send, implement, review]
+    status: binding
+    citations:
+      - CLAUDE.md#Agent-Discipline
+      - tools/support/chitra_adapter/harness/CLAUDE.md
+  - principle_id: G05
+    title: Escalate a decision, not uncertainty theater
+    guidance: Resolve researchable facts first; escalate only a genuine strategic or authorization choice with one crisp question, a ranked recommendation, consequences, and primary-source anchors.
+    scope: [core, escalation]
+    answer_categories: [answer]
+    keywords: [ambiguous, strategic, authorization, choose, decision, permission, ruling, escalate]
+    status: binding
+    citations:
+      - tools/support/chitra_adapter/harness/CLAUDE.md
+  - principle_id: E01
+    title: Evidence before belief
+    guidance: Verify claims with current files, transcripts, commands, receipts, logs, service state, or user-visible effects; repetition and tool success are not proof.
+    scope: [core, evidence]
+    answer_categories: [answer, nudge]
+    keywords: [evidence, verify, proof, receipt, log, current, claim, status]
+    status: binding
+    citations:
+      - CLAUDE.md#Agent-Discipline
+      - rules/evidence-first-integration.md
+  - principle_id: E02
+    title: Live reads authorize live actions
+    guidance: Obtain fresh host, session, and pane state before checkpoint, nudge, takeover, close, or spawn; missing or stale live authority fails closed.
+    scope: [core, live-action]
+    answer_categories: [nudge, action]
+    keywords: [live, host, session, pane, checkpoint, nudge, takeover, close, spawn, stale]
+    status: binding
+    citations:
+      - agent_docs/plans/2026-06-27-monitor-state-authority-prd.md
+  - principle_id: E04
+    title: Completion is goal-specific
+    guidance: Test the frozen done-when; deployable code normally requires checks, protected-main merge, real deployment, and live user-path verification, while non-deployable work follows its explicit artifact contract.
+    scope: [core, completion]
+    answer_categories: [answer, nudge]
+    keywords: [done, complete, completion, test, merge, deploy, live, verify, artifact]
+    status: binding
+    citations:
+      - CLAUDE.md#Operational-Reliability
+      - docs/agent_docs/rules/validation-principles.md
+  - principle_id: A01
+    title: Substance and minimum mechanism
+    guidance: Prefer existing standards and project conventions; keep changes surgical and add no framework, abstraction, fallback, or configurability without a goal-derived need.
+    scope: [core, engineering]
+    answer_categories: [answer, nudge]
+    keywords: [architecture, abstraction, framework, fallback, configuration, refactor, surgical, minimal]
+    status: binding
+    citations:
+      - AGENTS.md
+      - CLAUDE.md
+  - principle_id: A04
+    title: Typed boundaries
+    guidance: Use Pydantic models at new input, output, service, and stage boundaries; validate required fields at the boundary and use typed attributes downstream.
+    scope: [core, engineering]
+    answer_categories: [answer, nudge]
+    keywords: [type, typed, pydantic, model, schema, boundary, dictionary, input, output]
+    status: binding
+    citations:
+      - CLAUDE.md
+      - docs/agent_docs/rules/must-rules.md
+  - principle_id: A05
+    title: Fail loud on contract breach
+    guidance: Raise a typed exception with context for malformed required input, impossible state, wiring failure, or corrupt output; defaults must not conceal required-contract failures.
+    scope: [core, engineering]
+    answer_categories: [answer, nudge]
+    keywords: [error, invalid, malformed, corrupt, required, default, fail, exception, contract]
+    status: binding
+    citations:
+      - CLAUDE.md
+      - docs/agent_docs/rules/must-rules.md
+  - principle_id: C01
+    title: Protected change flow
+    guidance: Develop on a topic branch or isolated worktree, run required checks, and merge through a pull request; never push directly to main or edit a deploy checkout.
+    scope: [core, change-control]
+    answer_categories: [answer, nudge, action]
+    keywords: [git, branch, worktree, pull, request, pr, main, merge, deploy, checkout]
+    status: binding
+    citations:
+      - CLAUDE.md#Git-Workflow
+      - rules/github-integration.md
+  - principle_id: C02
+    title: Ask before changing governance
+    guidance: New dependencies, schemas, hooks, pre-commit policy, root directories, spend, or authorization boundaries require explicit operator approval.
+    scope: [core, governance]
+    answer_categories: [answer, nudge, action]
+    keywords: [dependency, schema, hook, policy, directory, spend, authorization, approval, governance]
+    status: binding
+    citations:
+      - CLAUDE.md#Boundaries
+  - principle_id: H03
+    title: Expose every answer's basis
+    guidance: Name the goal version, evidence references, principle IDs, inference, confidence basis, and unresolved unknowns for every reasoned answer.
+    scope: [core, communication]
+    answer_categories: [answer, nudge]
+    keywords: [basis, provenance, citation, confidence, inference, unknown, answer, explain]
+    status: binding
+    citations:
+      - tools/support/chitra_adapter/harness/CLAUDE.md
+  - principle_id: H05
+    title: Fail closed but answer boundedly
+    guidance: Block autonomous normative answers when the binding goal or principle index is missing or stale, a binding conflict remains, or required evidence is absent; safe cited observations may still be returned.
+    scope: [core, autonomy]
+    answer_categories: [answer, nudge]
+    keywords: [missing, stale, conflict, abstain, block, autonomy, evidence, safe, factual]
+    status: binding
+    citations:
+      - tools/support/chitra_adapter/harness/CLAUDE.md
