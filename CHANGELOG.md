@@ -7,6 +7,8 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 ### Added
 - `chitra.convlog` v2 operator briefs now record a plain-language subject and progress summary, render those details as a grounding lead-in, and keep v1 conversation-log entries readable.
 - Roster reports now list every unreviewed published artifact by title and complete, copyable URL in deterministic oldest-first order.
+- `chitra.capabilities`: a packaged, strictly validated capability manifest with a reversible, time-boxed runtime toggle overlay and `chitra-capabilities` CLI. It exposes only enabled tool commands as MCP-shaped definitions; daemons remain non-toggleable.
+- `chitra.merge_queue`: pure caller-supplied merge-queue hygiene decisions, chitra-owned hold markers, an atomic `queue_holds.json` store, append-only `queue_hygiene.jsonl`, and the gated `chitra-queue` CLI. It cannot merge, approve, branch, invoke `gh`, or make network calls.
 
 ## [0.5.0] - 2026-07-11
 

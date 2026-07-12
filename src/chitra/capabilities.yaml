@@ -1,0 +1,196 @@
+# Chitra capability manifest (HFR: human-facing resource).
+# Read this as a declarative, narrow authority document: an enabled entry
+# grants only its listed command surface and never a general shell privilege.
+schema: chitra.capabilities.v1
+capabilities:
+  - name: dispatchd
+    kind: daemon
+    purpose: Drain the deterministic local dispatch order queue into tmux lanes.
+    when_to_use: Run as the supervised queue-delivery daemon after an external caller has written a valid order.
+    authority:
+      level: record
+      grants:
+        - Consume validated local dispatch orders and record their results.
+      excludes:
+        - Decide message content.
+        - Merge, approve, or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: dispatchd
+        description: Start the local deterministic dispatch daemon.
+        argv: [dispatchd]
+        params: []
+        mutates: true
+
+  - name: triaged
+    kind: daemon
+    purpose: Tail lane events and emit deterministic state-transition records.
+    when_to_use: Run as the supervised event-triage daemon for an existing events log.
+    authority:
+      level: record
+      grants:
+        - Read lane events and write deduplicated local triage records.
+      excludes:
+        - Dispatch messages.
+        - Merge, approve, or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: triaged
+        description: Start the local deterministic triage daemon.
+        argv: [triaged]
+        params: []
+        mutates: true
+
+  - name: draft-scanner
+    kind: daemon
+    purpose: Detect unsubmitted drafts in configured tmux input boxes.
+    when_to_use: Run periodically when an operator wants flag-only visibility into lingering drafts.
+    authority:
+      level: observe
+      grants:
+        - Inspect configured tmux panes and report draft presence.
+      excludes:
+        - Submit, discard, or edit a draft.
+        - Merge, approve, or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: draft-scanner
+        description: Start the flag-only draft scanner daemon.
+        argv: [draft-scanner]
+        params: []
+        mutates: false
+
+  - name: board
+    kind: tool
+    purpose: Render the deterministic operator board from validated state facts.
+    when_to_use: Use when an operator needs a current, local status board rather than a free-text summary.
+    authority:
+      level: observe
+      grants:
+        - Read validated board facts and render a local view.
+      excludes:
+        - Decide work priorities.
+        - Merge, approve, or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: chitra-board
+        description: Render the local chitra board.
+        argv: [chitra-board]
+        params: []
+        mutates: false
+
+  - name: usage
+    kind: tool
+    purpose: Read provider usage snapshots and evaluate deterministic thresholds.
+    when_to_use: Use before scheduling work when rate-limit state may constrain a lane or account.
+    authority:
+      level: observe
+      grants:
+        - Read usage snapshots and calculate a threshold verdict.
+      excludes:
+        - Pause, resume, or dispatch to a lane.
+        - Change provider account settings.
+    default_enabled: true
+    commands:
+      - name: chitra-usage
+        description: Read usage snapshots or print their deterministic evaluation.
+        argv: [chitra-usage]
+        params: []
+        mutates: false
+
+  - name: goals
+    kind: tool
+    purpose: Record the monitor-stated goal and explicit status for a lane.
+    when_to_use: Use when a stated lane goal, hold, or open operator ask must survive a monitor restart.
+    authority:
+      level: record
+      grants:
+        - Store and retrieve deterministic per-lane goal records.
+      excludes:
+        - Generate goals or decide whether work is complete.
+        - Merge, approve, or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: chitra-goals
+        description: Store, inspect, or render deterministic lane goal records.
+        argv: [chitra-goals]
+        params: []
+        mutates: true
+
+  - name: artifacts
+    kind: tool
+    purpose: Record Claude artifact publication and explicit review metadata.
+    when_to_use: Use when an artifact URL and its review state need durable, deterministic bookkeeping.
+    authority:
+      level: record
+      grants:
+        - Store artifact metadata and explicit review state.
+      excludes:
+        - Publish an artifact.
+        - Decide review content or merge pull requests.
+    default_enabled: true
+    commands:
+      - name: chitra-artifacts
+        description: Store and inspect deterministic artifact review records.
+        argv: [chitra-artifacts]
+        params: []
+        mutates: true
+
+  - name: convo
+    kind: tool
+    purpose: Record structured operator and lane conversation facts.
+    when_to_use: Use when a monitor must preserve a decision, directive, or operator brief verbatim.
+    authority:
+      level: record
+      grants:
+        - Append and render structured local conversation records.
+      excludes:
+        - Invent conversation content.
+        - Dispatch messages or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: chitra-convo
+        description: Record and inspect structured conversation facts.
+        argv: [chitra-convo]
+        params: []
+        mutates: true
+
+  - name: capability-management
+    kind: tool
+    purpose: Inspect and reversibly record per-capability runtime toggles.
+    when_to_use: Use when an operator needs to inspect, time-box, enable, disable, or reset one declared tool capability.
+    authority:
+      level: record
+      grants:
+        - Record only per-capability enablement overrides in the local state directory.
+      excludes:
+        - Enable a daemon.
+        - Grant global shell, git, GitHub, merge, or approval authority.
+    default_enabled: true
+    commands:
+      - name: chitra-capabilities
+        description: Inspect or record one reversible capability toggle.
+        argv: [chitra-capabilities]
+        params: []
+        mutates: true
+
+  - name: queue-management
+    kind: tool
+    purpose: Apply deterministic hygiene decisions to a caller-supplied merge-queue head snapshot.
+    when_to_use: Use only for a queued pull request after the monitor has collected a complete snapshot and an operator has enabled this capability.
+    authority:
+      level: act
+      grants:
+        - Record or clear a chitra-owned queue hold and its local hygiene audit event.
+        - Reassert one chitra-owned hold after a ready label is improperly restored.
+      excludes:
+        - Merge, approve, rebase, or create a branch.
+        - Invoke gh, a subprocess, or network I/O.
+        - Add queue:ready to a non-green head.
+    default_enabled: false
+    commands:
+      - name: chitra-queue
+        description: Evaluate queue hygiene or perform an explicitly enabled local hold bookkeeping action.
+        argv: [chitra-queue]
+        params: []
+        mutates: true

@@ -33,3 +33,13 @@ def default_convlog_path() -> Path:
 def default_ledger_key_path() -> Path:
     """Return the default HMAC signing-key path."""
     return state_dir() / "ledger.key"
+
+
+def default_queue_holds_path() -> Path:
+    """Return the default current-state store for chitra-owned queue holds."""
+    return state_dir() / "queue_holds.json"
+
+
+def default_queue_hygiene_log_path() -> Path:
+    """Return the append-only queue-hygiene audit log path."""
+    return state_dir() / "queue_hygiene.jsonl"
