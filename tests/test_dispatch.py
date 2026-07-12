@@ -211,6 +211,32 @@ def test_transcript_confirms_nudge_excludes_given_path(tmp_path: Path) -> None:
     assert path is None
 
 
+def test_find_recent_transcript_searches_multiple_pathsep_separated_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session under a non-default CLAUDE_CONFIG_DIR (e.g. chitra's own
+    monitor/harness identity, which runs under ~/.claude-chitra rather than
+    ~/.claude) writes its transcripts under that root's projects/ dir.
+    CHITRA_CLAUDE_PROJECTS must be able to list more than one root or
+    transcript-grep can never confirm delivery to such a session -- see
+    dispatch_to_tmux's fall-through to FAILED when both transcript-grep and
+    the pane-capture fallback miss.
+    """
+    default_root = tmp_path / "home" / ".claude" / "projects"
+    alt_root = tmp_path / "home" / ".claude-chitra" / "projects"
+    session_dir = alt_root / "some-harness-project"
+    session_dir.mkdir(parents=True)
+    default_root.mkdir(parents=True)
+    transcript = session_dir / "abc123.jsonl"
+    transcript.write_text(json.dumps({"text": "fleet status sweep now"}) + "\n", encoding="utf-8")
+
+    monkeypatch.setenv("CHITRA_CLAUDE_PROJECTS", f"{default_root}{os.pathsep}{alt_root}")
+
+    found = find_recent_transcript("fleet status sweep now", now_ts=time.time())
+
+    assert found == transcript
+
+
 def test_remote_transcript_find_script_expands_default_tilde_root() -> None:
     script = _remote_transcript_grep_command("marker", "~/.claude/projects", 300)
 

@@ -923,6 +923,25 @@ def transcript_mtime(
         return None
 
 
+def _resolve_local_projects_roots(projects_root: Path | None) -> list[Path]:
+    """Resolve the local transcript search root(s) for ``find_recent_transcript``.
+
+    An explicit ``projects_root`` (existing single-root callers/tests) always
+    wins and is used alone. Otherwise ``CHITRA_CLAUDE_PROJECTS`` may list more
+    than one root separated by ``os.pathsep`` -- a local Claude Code session
+    running under a non-default ``CLAUDE_CONFIG_DIR`` (e.g. a dedicated
+    persona/harness identity such as chitra's own monitor role) writes its
+    transcripts under THAT root's ``projects/``, not the default
+    ``~/.claude/projects``. Searching only the default root means
+    transcript-grep can never confirm a genuine delivery to such a session --
+    it always falls through to the weaker pane-capture fallback, or FAILED.
+    """
+    if projects_root is not None:
+        return [projects_root]
+    raw = _env("CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects"))
+    return [Path(part) for part in raw.split(os.pathsep) if part.strip()]
+
+
 def find_recent_transcript(
     marker: str,
     *,
@@ -933,9 +952,10 @@ def find_recent_transcript(
 ) -> Path | None:
     """Find the most-recently-modified transcript containing ``marker``.
 
-    Searches ``~/.claude/projects/*/*.jsonl`` by recency + content match,
-    explicitly excluding any path in ``exclude_paths`` (the monitor's /
-    dispatchd's own transcript). Returns the matching path or None.
+    Searches ``<root>/*/*.jsonl`` by recency + content match across one or
+    more roots (see ``_resolve_local_projects_roots``), explicitly excluding
+    any path in ``exclude_paths`` (the monitor's / dispatchd's own
+    transcript). Returns the matching path or None.
     """
     marker_norm = normalized_dispatch_text(marker)
     if not marker_norm:
@@ -943,19 +963,19 @@ def find_recent_transcript(
     exclude = exclude_paths or set()
     now = now_ts if now_ts is not None else time.time()
     candidates: list[tuple[float, Path]] = []
-    root = projects_root if projects_root is not None else Path(_env("CHITRA_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
-    for jsonl in root.glob(transcript_glob()):
-        if jsonl in exclude:
-            continue
-        try:
-            mtime = jsonl.stat().st_mtime
-        except OSError:
-            continue
-        if now - mtime > recency_seconds:
-            continue
-        tail = _read_transcript_tail(jsonl)
-        if marker_norm in normalized_dispatch_text(tail):
-            candidates.append((mtime, jsonl))
+    for root in _resolve_local_projects_roots(projects_root):
+        for jsonl in root.glob(transcript_glob()):
+            if jsonl in exclude:
+                continue
+            try:
+                mtime = jsonl.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime > recency_seconds:
+                continue
+            tail = _read_transcript_tail(jsonl)
+            if marker_norm in normalized_dispatch_text(tail):
+                candidates.append((mtime, jsonl))
     if not candidates:
         return None
     candidates.sort(key=lambda pair: pair[0], reverse=True)
