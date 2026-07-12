@@ -14,6 +14,7 @@ import chitra.dispatchd as dispatchd_mod
 import chitra.ledger as ledger_mod
 from chitra.dispatch import DISPATCH_VERIFY_WAIT_SECONDS, DispatchOrder, DispatchResult, DispatchStatus
 from chitra.dispatchd import build_arg_parser, process_one_order, run_once
+from chitra.goals import GoalRecord, hold_goal, upsert_goal
 from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
 
@@ -22,6 +23,16 @@ def _write_order(orders_dir: Path, order: DispatchOrder) -> Path:
     path = orders_dir / f"{order.order_id}.json"
     path.write_text(order.model_dump_json(), encoding="utf-8")
     return path
+
+
+def _tracked_goal(session_ref: str = "tophand:feeds-111:0.0") -> GoalRecord:
+    return GoalRecord(
+        session_ref=session_ref,
+        goal="Ship the tested feature to production safely.",
+        done_when="Tests pass.",
+        source="task",
+        status="working",
+    )
 
 
 def test_run_once_processes_pending_orders_and_moves_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,6 +175,106 @@ def test_blocked_result_does_not_write_a_ledger_entry(tmp_path: Path, monkeypatc
     assert results[0].status == DispatchStatus.BLOCKED
     # Only a real send is signed/logged — a blocked attempt is not a delivery.
     assert not (tmp_path / "ledger.jsonl").exists()
+
+
+def test_rate_limit_held_session_is_blocked_without_touching_the_pane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session chitra.rate_limit_guard paused for a rate-limit reason gets
+    no ordinary new-work order delivered -- and dispatch_to_tmux (any pane
+    I/O at all) must never even be called."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-frozen", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert call_count["n"] == 0
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.BLOCKED
+    assert "rate-limit-frozen" in results[0].reason
+    assert (queue_dir / "processed" / "ord-frozen.json").exists()
+
+
+def test_hold_for_non_rate_limit_reason_does_not_freeze_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator- or throttle-held lane is untouched by the rate-limit
+    freeze -- only a hold_reason prefixed 'rate-limit:' blocks delivery."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="operator")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-not-frozen", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+
+
+def test_bypass_rate_limit_freeze_order_is_delivered_despite_the_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """chitra.rate_limit_guard's own checkpoint/re-arm nudges must reach a
+    session even while it is frozen -- they ARE the pause/resume mechanism."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(
+        order_id="ord-checkpoint", session_ref="tophand:feeds-111:0.0", nudge="checkpoint now", bypass_rate_limit_freeze=True
+    )
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert call_count["n"] == 1
+    assert results[0].status == DispatchStatus.SENT
+
+
+def test_no_goals_root_configured_leaves_dispatch_unaffected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backward compatibility: a caller that never passes goals_root sees no
+    behavior change -- the freeze check is a pure read of an explicitly
+    configured goal store, not a new default coupling."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    monkeypatch.setenv("CHITRA_STATE_DIR", str(tmp_path / "no-such-state-dir"))
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-default", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl")
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
 
 
 def test_ledger_write_failure_does_not_prevent_completion_or_cause_redelivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

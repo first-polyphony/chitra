@@ -33,6 +33,15 @@ GOAL_STATUSES: tuple[GoalStatus, ...] = (
 )
 SCHEMA = "chitra.goals.v1"
 
+# Shared hold_reason convention: a hold_reason starting with this prefix
+# (e.g. "rate-limit:5h") marks a timed pause driven by provider usage
+# thresholds (see chitra.rate_limit_guard), distinct from an operator- or
+# throttle-initiated hold. goals.py itself stays decision-free -- this is
+# just the string convention two callers (chitra.rate_limit_guard, which
+# sets it, and chitra.dispatchd, which reads it to freeze a held session's
+# queue) need to agree on.
+RATE_LIMIT_HOLD_REASON_PREFIX = "rate-limit:"
+
 
 class GoalValidationError(ValueError):
     """Raised when a goal record is not valid monitor doctrine."""

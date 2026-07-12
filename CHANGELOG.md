@@ -4,6 +4,10 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- `chitra.rate_limit_guard`: a one-shot detect/checkpoint/pause/resume sweep for sessions nearing a provider rate/session limit (`chitra-rate-limit-guard`, capability `rate-limit-guard`, `default_enabled: false`). Composes `chitra.usage`'s existing threshold evaluation with `chitra.goals`' existing `hold`/`resume`/`due` bookkeeping: a fresh `pause` verdict enqueues a fixed checkpoint nudge and holds the lane's goal record under `rate-limit:<window>`; a due hold is auto-resumed once a fresh verdict confirms the window is `ok` again (never into a still-hot window), enqueueing a re-arm nudge built from the lane's own stored `goal`/`done_when`. Meant to run under an external timer, not a new daemon.
+- `chitra.dispatchd`: an opt-in rate-limit freeze check (`goals_root`/`--goals-root`). A session currently held for a `rate-limit:`-prefixed reason gets no ordinary new-work order delivered -- BLOCKED before any pane I/O. `DispatchOrder.bypass_rate_limit_freeze` exempts `chitra.rate_limit_guard`'s own checkpoint/re-arm nudges from this freeze, since they are the pause/resume mechanism itself.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added

@@ -215,6 +215,15 @@ class DispatchOrder(BaseModel):
     completion_has_deploy_evidence: bool = False
     completion_has_live_verify_evidence: bool = False
 
+    # Opt-in exemption from dispatchd's rate-limit freeze check (see
+    # dispatchd.process_one_order). False for every ordinary order -- the
+    # freeze applies. Set True only by chitra.rate_limit_guard's own
+    # checkpoint/re-arm nudges: those two messages ARE the pause/resume
+    # mechanism itself (the checkpoint notice that must reach a session right
+    # as it is being frozen; the re-arm nudge sent right after a hold clears),
+    # so they must never be blocked by the freeze they create.
+    bypass_rate_limit_freeze: bool = False
+
 
 class DispatchResult(BaseModel):
     """Result of processing a dispatch order.

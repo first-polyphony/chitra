@@ -24,6 +24,19 @@ only -- including the optional completion-claim audit
 (``chitra.completion_gate``) run in ``process_one_order`` before delivery,
 which is itself pure keyword/field matching, not reasoning. See
 ``docs/evasion-taxonomy.md``.
+
+Rate-limit freeze (opt-in via ``goals_root``): before any delivery attempt,
+``process_one_order`` checks whether the order's ``session_ref`` currently
+has a ``chitra.goals`` record held for a rate-limit reason (``hold_reason``
+starting with ``chitra.goals.RATE_LIMIT_HOLD_REASON_PREFIX``, set by
+``chitra.rate_limit_guard``). If so, the order is returned ``BLOCKED``
+without touching the pane at all -- this is the "hold its queue" half of
+graceful pause: once a session is paused for being near its provider
+rate/session limit, dispatchd stops delivering ordinary new-work orders to
+it until ``chitra.rate_limit_guard`` observes the window has reset and
+calls ``chitra.goals.resume_goal``. This is a plain read of already-recorded
+goal-store state, not a new decision -- the decision (pause/resume) was
+already made and persisted by the caller of ``chitra.goals.hold_goal``.
 """
 
 from __future__ import annotations
@@ -48,6 +61,7 @@ from .dispatch import (
     LaneLockError,
     dispatch_to_tmux,
 )
+from .goals import RATE_LIMIT_HOLD_REASON_PREFIX, get_goal
 from .policy_config import PolicyConfig, load_policy_config
 from .routing_config import RoutingConfig, load_routing_config, resolve_route, resolve_routing_hint
 from .state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
@@ -89,6 +103,7 @@ def process_one_order(
     policy: PolicyConfig | None = None,
     invalid_dir: Path | None = None,
     tuning: DispatchTuning | None = None,
+    goals_root: Path | None = None,
 ) -> DispatchResult | None:
     """Process a single order file. Returns the result, or None if skipped.
 
@@ -105,6 +120,14 @@ def process_one_order(
     fills in the opaque ``routing_hint`` (``"config"`` provenance). An
     explicit ``routing_hint`` from the caller always wins and skips this
     lookup entirely.
+
+    ``goals_root`` selects the ``chitra.goals`` store consulted for the
+    rate-limit freeze check documented in this module's docstring (``None``
+    resolves to the default goals store under ``chitra.state_paths.state_dir()``,
+    exactly like every other unset path in this function). A session with no
+    goal record, or one held for any reason other than a rate-limit pause, is
+    never frozen — this only ever blocks delivery to a session
+    ``chitra.rate_limit_guard`` itself paused.
 
     Invalid orders produce a FAILED result using the source filename stem and
     are moved to ``invalid/`` (or ``invalid_dir``) so they cannot be retried
@@ -157,6 +180,40 @@ def process_one_order(
         with contextlib.suppress(OSError):
             order_path.replace(processed_dir / order_path.name)
         return None
+
+    # Rate-limit freeze: a session chitra.rate_limit_guard paused for being
+    # near its provider rate/session limit gets no ordinary new-work orders
+    # until the window resets and the hold is cleared (see this module's
+    # docstring). Nothing is pasted and no pane is even captured -- same
+    # "reject before any pane I/O" shape as the directive-voice guard inside
+    # dispatch_to_tmux. ``bypass_rate_limit_freeze`` exempts chitra.rate_limit_
+    # guard's own checkpoint/re-arm nudges, which ARE the pause/resume
+    # mechanism and must never be blocked by the freeze they create.
+    held = None if order.bypass_rate_limit_freeze else get_goal(goals_root, order.session_ref)
+    if held is not None and held.status == "held" and held.hold_reason.startswith(RATE_LIMIT_HOLD_REASON_PREFIX):
+        logger.info(
+            "dispatchd_order_blocked_rate_limit_freeze",
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            hold_reason=held.hold_reason,
+            resume_at=held.resume_at,
+        )
+        result = DispatchResult(
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            status=DispatchStatus.BLOCKED,
+            reason=f"rate-limit-frozen: {held.hold_reason} (resume_at={held.resume_at})",
+            routing_hint=order.routing_hint,
+            task_type=order.task_type,
+            routing_hint_source=routing_hint_source,
+            resolved_model=resolved_model,
+            resolved_harness=resolved_harness,
+            resolved_zdr=resolved_zdr,
+        )
+        _write_result_atomic(results_dir, result)
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        order_path.replace(processed_dir / order_path.name)
+        return result
 
     # Completion-claim audit: opt-in via completion_todo_items being set (see
     # DispatchOrder's docstring). A disputed claim is never delivered as an
@@ -291,12 +348,16 @@ def run_once(
     policy_config_path: Path | None = None,
     invalid_dir: Path | None = None,
     tuning: DispatchTuning | None = None,
+    goals_root: Path | None = None,
 ) -> list[DispatchResult]:
     """Process every pending order in ``queue_dir/orders`` once, FIFO by mtime.
 
     ``routing_config_path`` (or the ``CHITRA_ROUTING_CONFIG`` env var if
     unset) is loaded once per call and passed to every ``process_one_order``
     invocation — see ``chitra.routing_config`` for the lookup semantics.
+
+    ``goals_root`` is forwarded to ``process_one_order``'s rate-limit freeze
+    check on every order (see that function's docstring).
     """
     queue_dir = queue_dir or default_queue_dir()
     orders_dir, results_dir, processed_dir = _ensure_queue_dirs(queue_dir)
@@ -326,6 +387,7 @@ def run_once(
             policy=policy,
             invalid_dir=invalid_dir,
             tuning=tuning,
+            goals_root=goals_root,
         )
         if result is not None:
             out.append(result)
@@ -343,6 +405,7 @@ def run_forever(
     policy_config_path: Path | None = None,
     invalid_dir: Path | None = None,
     tuning: DispatchTuning | None = None,
+    goals_root: Path | None = None,
 ) -> None:
     """Run the daemon loop: drain the queue, sleep, repeat. Runs until killed."""
     queue_dir = queue_dir or default_queue_dir()
@@ -357,6 +420,7 @@ def run_forever(
             policy_config_path=policy_config_path,
             invalid_dir=invalid_dir,
             tuning=tuning,
+            goals_root=goals_root,
         )
         time.sleep(poll_seconds)
 
@@ -385,6 +449,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to policy.yaml (env CHITRA_POLICY_CONFIG, else shipped defaults).",
     )
     parser.add_argument("--invalid-orders-dir", type=Path, default=None, help="Invalid-order directory (default: <queue-dir>/invalid).")
+    parser.add_argument(
+        "--goals-root",
+        type=Path,
+        default=None,
+        help="chitra.goals store root consulted for the rate-limit freeze check (default: CHITRA_STATE_DIR).",
+    )
     parser.add_argument("--capture-lines", type=int, default=12)
     parser.add_argument("--post-paste-wait-seconds", type=float, default=DISPATCH_VERIFY_WAIT_SECONDS)
     parser.add_argument("--transcript-recency-seconds", type=float, default=300.0)
