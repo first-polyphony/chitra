@@ -81,9 +81,7 @@ def test_marker_for_covers_every_status_and_rejects_unknown() -> None:
         ("held", ("1. Decide the deployment window.",), "🔴"),
     ],
 )
-def test_compute_marker_has_operator_precedence(
-    status: GoalStatus, open_asks: tuple[str, ...], expected: str
-) -> None:
+def test_compute_marker_has_operator_precedence(status: GoalStatus, open_asks: tuple[str, ...], expected: str) -> None:
     assert compute_marker(_record("host:lane:0.0", status, open_asks=open_asks)) == expected
 
 
@@ -92,7 +90,7 @@ def test_compute_marker_rejects_unknown_status() -> None:
         compute_marker(_record("host:lane:0.0", cast(GoalStatus, "unknown")))
 
 
-def test_cards_default_shows_every_lane_full_content_markers_and_stable_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_markdown_default_shows_every_lane_full_content_markers_and_stable_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COLUMNS", "100")
     long_goal = "This is a deliberately long durable objective that must survive in full."
     records = [
@@ -100,9 +98,10 @@ def test_cards_default_shows_every_lane_full_content_markers_and_stable_order(mo
         _record("alpha:zeta:0.0", "done-pending-close"),
         _record("alpha:alpha:0.0", "held"),
     ]
-    rendered = render_roster(records)  # default fmt is cards
+    rendered = render_roster(records)
 
-    # Labelled stanzas, not a table: no box-drawing, has field labels.
+    assert rendered.startswith("|  | Session | Goal | Now | Needs |")
+    # Markdown table, not a terminal-drawn box.
     assert "┌" not in rendered and "│" not in rendered
     assert "Goal" in rendered and "Now" in rendered
     assert all(name in rendered for name in ("build", "zeta", "alpha"))
@@ -147,6 +146,81 @@ def test_box_lines_are_display_width_aligned_and_terminal_aware(monkeypatch: pyt
         assert widths == {expected}, (columns, sorted(widths))
 
 
+def test_box_lines_stay_width_aligned_with_emoji_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression for SOL finding #8: ``_wrap_cell`` used to wrap by
+    ``textwrap.wrap``'s code-point count while ``_pad`` pads by display
+    width. A Goal/Now/Needs cell full of wide emoji was under-counted (1
+    code point but 2 terminal columns), so a wrapped line could still be
+    wider than its column once padded -- the frame overflowed. Reproduced
+    upstream at COLUMNS=100 producing frame widths {100, 119} for a 20-emoji
+    Goal; this must now stay a single width."""
+    from chitra.board import display_width
+
+    records = [
+        _record("host:emoji:0.0", "working", goal="🧪" * 20, now="🚀" * 15, needs=""),
+        _record("host:blocked:0.0", "blocked", needs="🔥" * 12 + " decide now"),
+    ]
+    monkeypatch.setenv("COLUMNS", "100")
+    box = render_roster(records, fmt="box")
+    frame = [line for line in box.splitlines() if line and line[0] in "┌├│└"]
+    widths = {display_width(line) for line in frame}
+    assert widths == {100}, sorted(widths)
+    assert "🧪" in box and "🚀" in box and "🔥" in box
+
+
+def test_box_lines_stay_width_aligned_with_cjk_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CJK characters are double-width (unicodedata east_asian_width W/F),
+    the same failure mode as emoji: wrapping by code-point count instead of
+    display width overflows the frame."""
+    from chitra.board import display_width
+
+    records = [
+        _record("host:cjk:0.0", "working", goal="目标是让每一次发布都可验证且可回滚" * 3, now="正在运行测试"),
+        _record("host:two:0.0", "done-pending-verification"),
+    ]
+    monkeypatch.setenv("COLUMNS", "100")
+    box = render_roster(records, fmt="box")
+    frame = [line for line in box.splitlines() if line and line[0] in "┌├│└"]
+    widths = {display_width(line) for line in frame}
+    assert widths == {100}, sorted(widths)
+
+
+def test_box_hard_splits_a_long_unbroken_token_by_display_width_not_code_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An overlong unbroken token (e.g. a URL, or a run of emoji with no
+    spaces) must still be split so no physical line exceeds its column's
+    display width, even mid-token."""
+    from chitra.board import display_width
+
+    unbroken_emoji_token = "🧪" * 40  # no spaces at all -- must hard-split
+    records = [
+        _record("host:long-token:0.0", "working", now=unbroken_emoji_token),
+        _record("host:two:0.0", "done-pending-verification"),
+    ]
+    monkeypatch.setenv("COLUMNS", "100")
+    box = render_roster(records, fmt="box")
+    frame = [line for line in box.splitlines() if line and line[0] in "┌├│└"]
+    widths = {display_width(line) for line in frame}
+    assert widths == {100}, sorted(widths)
+    # Full content survives the hard split -- every emoji still present.
+    assert box.count("🧪") == 40
+
+
+def test_box_lines_stay_width_aligned_in_a_narrow_terminal_with_emoji(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A narrow terminal (clamped to the 80-column floor) with wide emoji
+    content must still keep every physical line at exactly the frame width
+    -- narrow columns are where a display-width miscount overflows fastest."""
+    from chitra.board import display_width
+
+    records = [
+        _record("host:narrow:0.0", "blocked", goal="🧪" * 25, now="🚀" * 20, needs="🔥" * 10),
+    ]
+    monkeypatch.setenv("COLUMNS", "1")  # clamped up to the 80-column floor
+    box = render_roster(records, fmt="box")
+    frame = [line for line in box.splitlines() if line and line[0] in "┌├│└"]
+    widths = {display_width(line) for line in frame}
+    assert widths == {80}, sorted(widths)
+
+
 def test_render_roster_empty_store_is_a_small_no_crash_line() -> None:
     assert render_roster([]) == "no lanes recorded"
 
@@ -157,7 +231,7 @@ def test_roster_surfaces_every_open_ask_below_the_table_in_every_format() -> Non
         _record("alpha:review:0.0", "working", open_asks=("1. Approve tenancy.", "2. Choose rollback owner.")),
     ]
 
-    cards = render_roster(records)
+    cards = render_roster(records, fmt="cards")
     box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
     for rendered in (cards, box, markdown):
@@ -179,7 +253,7 @@ def test_markers_and_needs_present_across_formats(monkeypatch: pytest.MonkeyPatc
         _record("host:ask:0.0", "working", open_asks=("you: where does F2 live?",)),
     ]
 
-    cards = render_roster(records)
+    cards = render_roster(records, fmt="cards")
     box = render_roster(records, fmt="box")
     markdown = render_roster(records, fmt="markdown")
     for rendered in (cards, box, markdown):

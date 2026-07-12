@@ -160,6 +160,16 @@ class DispatchStatus(enum.StrEnum):
     # order was never delivered -- a disputed completion claim must never
     # silently pass through as "sent". See dispatchd.process_one_order.
     COMPLETION_DISPUTE = "completion_dispute"
+    # The order's session is rate-limit-held: parked in the durable
+    # deferred/ subqueue (no pane I/O, no result file persisted) rather than
+    # discarded. dispatchd.run_once/requeue_deferred_for_session return it
+    # to orders/ FIFO once the hold clears, so it is delivered exactly once,
+    # never silently dropped. This status is for in-process visibility only
+    # (a caller inspecting run_once's return value) -- it is never written
+    # to results/, since a persisted terminal result would block the later
+    # real delivery's own idempotency check. See
+    # docs/SOL-ADVERSARIAL-REVIEW finding #1.
+    DEFERRED = "deferred"
 
 
 class DispatchOrder(BaseModel):
@@ -214,6 +224,17 @@ class DispatchOrder(BaseModel):
     completion_todo_items: list[TodoItem] | None = None
     completion_has_deploy_evidence: bool = False
     completion_has_live_verify_evidence: bool = False
+
+    # Opt-in exemption from dispatchd's rate-limit freeze check (see
+    # dispatchd.process_one_order). False for every ordinary order -- the
+    # freeze applies and the order is durably deferred, never discarded.
+    # Setting this boolean alone is NOT sufficient to bypass the freeze:
+    # dispatchd additionally requires task_type to be one of its own sealed
+    # internal task types (chitra.rate_limit_guard's checkpoint/stop/re-arm
+    # nudges) before honoring it -- an arbitrary queue writer cannot invent a
+    # new bypass merely by setting this field, since dispatchd (not the
+    # order) controls the allowlist. See docs/SOL-ADVERSARIAL-REVIEW finding #7.
+    bypass_rate_limit_freeze: bool = False
 
 
 class DispatchResult(BaseModel):
@@ -869,6 +890,37 @@ def _read_transcript_tail(path: Path, max_bytes: int = 262144) -> str:
             return fh.read()
     except OSError:
         return ""
+
+
+def transcript_mtime(
+    transcript_path: str,
+    *,
+    host: str,
+    runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
+) -> float | None:
+    """Return a transcript file's last-modified epoch, local or over ssh.
+
+    Used by ``chitra.rate_limit_guard`` to verify a checkpointed session's
+    turn actually stopped writing (no growth for a bounded quiet window)
+    before recording a graceful hold -- see docs/SOL-ADVERSARIAL-REVIEW
+    finding #2. Returns ``None`` if the path cannot be stat'd (missing file,
+    unreachable host); a caller treats that as "cannot verify", never as
+    "stopped".
+    """
+    if host and not is_local_host(host, local_extra):
+        run = runner or run_cmd
+        proc = run(ssh_command(host, f"stat -c %Y {shlex.quote(transcript_path)} 2>/dev/null"), timeout=8)
+        if proc.returncode != 0:
+            return None
+        try:
+            return float(proc.stdout.strip())
+        except ValueError:
+            return None
+    try:
+        return Path(transcript_path).stat().st_mtime
+    except OSError:
+        return None
 
 
 def find_recent_transcript(

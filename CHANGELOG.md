@@ -4,6 +4,99 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-12
+
+A hardening patch, not a feature release. An independent adversarial review
+(`docs/SOL-ADVERSARIAL-REVIEW.md`) of the two open feature PRs this
+consolidates (#54 board-table-colors, #55 graceful-session-pause-resume)
+found two BLOCKER-severity defects and five HIGH-severity defects across
+dispatch delivery, pause/resume durability, and account-identity handling.
+This release fixes all seven, replaces the two PRs (superseded, closed),
+and does **not** introduce any new user-facing feature beyond what #55
+already proposed — the scope is entirely "make the same proposed behavior
+actually durable and correct."
+
+Every fix below is paired with new fault-injection, concurrency, or
+kill-point tests that exercise the failure path directly (not just the
+happy path) — see the PR description for the full per-finding table.
+
+### Fixed
+- **Dispatch queue: frozen orders were silently discarded, not held.** A
+  session held for a rate-limit reason now durably defers ordinary orders
+  (`queue/deferred/`, no result file written) instead of returning a
+  terminal `BLOCKED` result and archiving them to `processed/`. Once the
+  hold clears, `chitra.dispatchd.requeue_deferred_for_session` atomically
+  returns the backlog to `orders/` in original FIFO order for exactly-once
+  delivery.
+- **Pause/resume was two uncoordinated writes, not a transaction.**
+  `chitra.rate_limit_guard` is now driven by a durable, crash-safe
+  transaction outbox (`chitra.rate_limit_state`) walking
+  `pause_requested → checkpoint_sent → stop_sent → awaiting_quiescence →
+  held → resume_requested → resume_sent`. Every transition consumes a real
+  `chitra.dispatchd` delivery result; every waiting phase is bounded by a
+  configurable deadline (`PolicyConfig.pause`) with bounded retries, then
+  escalates for operator visibility without ever dropping the freeze. A
+  pause now enqueues a second, deterministic `/goal clear` stop order after
+  the checkpoint is confirmed, then verifies the target session's own
+  transcript has gone quiet before recording `held` — a graceful pause
+  proves the turn stopped, it does not just label the goal "held". A resume
+  enqueues its re-arm nudge, waits for confirmed delivery, and only then
+  clears the hold and requeues the deferred backlog — never the reverse.
+- **`dispatchd` could double-deliver a nudge on crash or worker race.**
+  Orders are now atomically claimed (renamed into `queue/in_flight/`)
+  before any delivery attempt, so two racing workers can never both process
+  the same order file. A send-nonce marker plus an owner-pid marker let a
+  restarted daemon tell a live in-progress claim apart from one abandoned
+  by a crashed worker, and reconcile a possible crash-after-paste via the
+  same transcript-grep evidence `dispatch_to_tmux` itself uses — never
+  blindly re-pasting into a live pane.
+- **The rate-limit freeze check ran before the lane lock (TOCTOU), and its
+  bypass was an unrestricted public boolean.** The freeze is now checked
+  under the same lane-lock hold used for delivery, closing the race window.
+  `DispatchOrder.bypass_rate_limit_freeze` is honored only when the order's
+  `task_type` is also one of dispatchd's own sealed internal task types —
+  an arbitrary queue writer can no longer invent a bypass. `--goals-root`
+  is now actually forwarded from the CLI into `run_once`/`run_forever`
+  (it was accepted by the parser but silently dropped before reaching
+  either).
+- **Unknown-account sessions were silently merged.** `chitra.usage.
+  evaluate_grouped` no longer groups every blank-`account` session into one
+  shared identity — each is isolated so one hot, unknown-identity session
+  can never attribute its pause verdict to an unrelated unknown sibling. A
+  new `chitra.account_registry` tracks each lane's last-known account
+  identity within a bounded freshness window, surfacing a missing snapshot
+  or a mid-session account change as an operator escalation instead of
+  silently doing nothing. Codex host-wide fan-out remains an explicit,
+  documented, fail-closed gap (no per-lane Codex usage snapshot exists yet)
+  — never silently attempted.
+- **The `goals.json` store was atomic per write but not against concurrent
+  writers.** `upsert_goal`, `redirect_goal`, `close_goal`, and every
+  read-modify-write helper (`hold_goal`, `resume_goal`, `add_ask`,
+  `resolve_ask`, `update_now`) now serialize their full read-modify-write
+  transaction with a `flock`-protected critical section, closing the
+  lost-update window where a concurrent writer's mutation could be silently
+  erased by whichever `os.replace()` landed last.
+- **Box-format roster cells overflowed on emoji/CJK content.** `_wrap_cell`
+  now wraps by terminal display width (matching `_pad`'s own measurement),
+  not `textwrap.wrap`'s code-point count — a wide-character-heavy Goal/Now/
+  Needs cell no longer produces a wider physical line than its column.
+  Overlong unbroken tokens are hard-split by display width, never by code
+  points. The `cards`/`box` default is **unchanged** (still `cards`) —
+  which format the operator wants by default remains an open decision; it
+  is now a single named constant (`board.ROSTER_DEFAULT_FORMAT`) so
+  resolving that decision later is a one-line change.
+
+### Changed
+- Version escalation is frozen at the `0.8.x` line. Six minor-version
+  increments landed in roughly two days without six independently hardened
+  maturity steps behind them; an independent review assessed the honest
+  feature maturity at 0.3.2-equivalent. The already-published `v0.2.0`/
+  `v0.7.0`/`v0.8.0` tags are immutable and are not being deleted or
+  rewritten. Only `0.8.x` hardening patches ship until transactionality,
+  idempotence, and evidence-backed status are demonstrated with the kind of
+  fault-injection tests this release adds — no `0.9` without an explicit
+  operator go-ahead.
+
 ## [0.8.0] - 2026-07-11
 
 ### Added

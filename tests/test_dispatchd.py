@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import multiprocessing
 import os
 import subprocess
 from pathlib import Path
@@ -13,7 +15,8 @@ import yaml
 import chitra.dispatchd as dispatchd_mod
 import chitra.ledger as ledger_mod
 from chitra.dispatch import DISPATCH_VERIFY_WAIT_SECONDS, DispatchOrder, DispatchResult, DispatchStatus
-from chitra.dispatchd import build_arg_parser, process_one_order, run_once
+from chitra.dispatchd import build_arg_parser, main, process_one_order, requeue_deferred_for_session, run_once
+from chitra.goals import GoalRecord, hold_goal, upsert_goal
 from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
 
@@ -201,6 +204,518 @@ def test_ledger_write_failure_does_not_prevent_completion_or_cause_redelivery(tm
     assert not (queue_dir / "orders" / "ord-4.json").exists()
     assert (queue_dir / "processed" / "ord-4.json").exists()
     assert (queue_dir / "results" / "ord-4.json").exists()
+
+
+# --- rate-limit freeze / durable deferred subqueue (SOL findings #1, #7) ---
+
+
+def _tracked_goal(session_ref: str = "tophand:feeds-111:0.0") -> GoalRecord:
+    return GoalRecord(
+        session_ref=session_ref,
+        goal="Ship the tested feature to production safely.",
+        done_when="Tests pass.",
+        source="task",
+        status="working",
+    )
+
+
+def test_rate_limit_held_session_is_deferred_not_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session held for a rate-limit reason gets no ordinary new-work
+    order delivered -- and, unlike a permanent BLOCKED/processed rejection,
+    the order is durably parked in deferred/ with no result file, so it can
+    still be delivered later. dispatch_to_tmux (any pane I/O) must never be
+    called. See docs/SOL-ADVERSARIAL-REVIEW finding #1."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-frozen", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert call_count["n"] == 0
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.DEFERRED
+    assert "rate-limit-deferred" in results[0].reason
+    # Durably parked, not discarded: no result file, order sits in deferred/.
+    assert not (queue_dir / "results" / "ord-frozen.json").exists()
+    assert not (queue_dir / "processed" / "ord-frozen.json").exists()
+    assert (queue_dir / "deferred" / "ord-frozen.json").exists()
+
+
+def test_deferred_order_is_requeued_and_delivered_exactly_once_after_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: an order that arrives while a lane is rate-limit-held is
+    never lost -- once the hold clears and requeue_deferred_for_session runs
+    (as chitra.rate_limit_guard.apply_resume does), the SAME order is
+    delivered, and delivered exactly once."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-later", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    deferred_pass = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+    assert deferred_pass[0].status == DispatchStatus.DEFERRED
+    assert call_count["n"] == 0
+
+    # A resume clears the hold; requeue_deferred_for_session (called by
+    # chitra.rate_limit_guard.apply_resume) returns the backlog to orders/.
+    from chitra.goals import resume_goal
+
+    resume_goal(goals_root, "tophand:feeds-111:0.0")
+    requeued = requeue_deferred_for_session(queue_dir, "tophand:feeds-111:0.0")
+    assert requeued == ["ord-later"]
+    assert not (queue_dir / "deferred" / "ord-later.json").exists()
+    assert (queue_dir / "orders" / "ord-later.json").exists()
+
+    delivered_pass = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+    assert call_count["n"] == 1
+    assert len(delivered_pass) == 1
+    assert delivered_pass[0].status == DispatchStatus.SENT
+    assert (queue_dir / "results" / "ord-later.json").exists()
+
+    # A third pass must not redeliver -- ordinary idempotency still applies.
+    third_pass = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+    assert third_pass == []
+    assert call_count["n"] == 1
+
+
+def test_hold_for_non_rate_limit_reason_does_not_freeze_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator- or throttle-held lane is untouched by the rate-limit
+    freeze -- only a hold_reason prefixed 'rate-limit:' defers delivery."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="operator")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-not-frozen", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+
+
+def test_bypass_flag_alone_does_not_escape_the_freeze_without_a_sealed_task_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An arbitrary queue writer cannot invent a bypass merely by setting
+    bypass_rate_limit_freeze=True -- dispatchd only honors it for its own
+    sealed internal task types. See docs/SOL-ADVERSARIAL-REVIEW finding #7."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(
+        order_id="ord-fake-bypass",
+        session_ref="tophand:feeds-111:0.0",
+        nudge="not really a checkpoint",
+        bypass_rate_limit_freeze=True,
+        task_type="anything-else",
+    )
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert call_count["n"] == 0
+    assert results[0].status == DispatchStatus.DEFERRED
+
+
+def test_sealed_task_type_bypass_is_delivered_despite_the_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """chitra.rate_limit_guard's own checkpoint/stop/re-arm nudges (its
+    sealed internal task types) must reach a session even while it is
+    frozen -- they ARE the pause/resume mechanism."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(
+        order_id="ord-checkpoint",
+        session_ref="tophand:feeds-111:0.0",
+        nudge="checkpoint now",
+        bypass_rate_limit_freeze=True,
+        task_type="rate-limit-checkpoint",
+    )
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert call_count["n"] == 1
+    assert results[0].status == DispatchStatus.SENT
+
+
+def test_no_goals_root_configured_leaves_dispatch_unaffected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backward compatibility: a caller that never passes goals_root sees no
+    behavior change -- the freeze check is a pure read of an explicitly
+    configured goal store, not a new default coupling."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    monkeypatch.setenv("CHITRA_STATE_DIR", str(tmp_path / "no-such-state-dir"))
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-default", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl")
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+
+
+def test_goals_root_is_wired_through_the_cli_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression for SOL finding #7: build_arg_parser() exposed --goals-root
+    but main() never forwarded it to run_once/run_forever, so a deployment
+    using a non-default root believed it enabled the freeze but the daemon
+    never consulted it. Drive the real CLI entrypoint end to end."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-cli", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    _write_order(queue_dir / "orders", order)
+
+    exit_code = main(
+        [
+            "--once",
+            "--queue-dir",
+            str(queue_dir),
+            "--lock-dir",
+            str(tmp_path / "locks"),
+            "--ledger-path",
+            str(tmp_path / "ledger.jsonl"),
+            "--goals-root",
+            str(goals_root),
+        ]
+    )
+
+    assert exit_code == 0
+    assert call_count["n"] == 0  # the freeze must actually apply via the CLI path, not just direct run_once calls
+    # Filesystem state, not printed stdout (which interleaves structlog
+    # lines with the JSON print): the order must be durably deferred, never
+    # delivered nor discarded, proving --goals-root actually reached
+    # process_one_order through main() -> run_once().
+    assert (queue_dir / "deferred" / "ord-cli.json").exists()
+    assert not (queue_dir / "processed" / "ord-cli.json").exists()
+    assert not (queue_dir / "results" / "ord-cli.json").exists()
+
+
+# --- multiprocessing + kill-point tests (SOL finding #14) ------------------
+
+
+def _mp_race_worker(queue_dir_str: str, lock_dir_str: str, ledger_path_str: str, log_path_str: str) -> None:
+    """Runs in a forked child process (Linux default start method): drains
+    the shared queue directory, logging every real dispatch attempt it
+    makes to a shared, flock-serialized file so the parent can verify no
+    order was ever delivered by more than one worker."""
+    import fcntl
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        with open(log_path_str, "a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.write(order.order_id + "\n")
+            fh.flush()
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    dispatchd_mod.dispatch_to_tmux = fake_dispatch  # type: ignore[assignment]
+    for _ in range(3):  # multiple passes: mop up anything this worker didn't win on its first attempt
+        run_once(Path(queue_dir_str), lock_dir=Path(lock_dir_str), ledger_path=Path(ledger_path_str))
+
+
+def test_concurrent_workers_claim_and_deliver_each_order_exactly_once(tmp_path: Path) -> None:
+    """Real OS-process concurrency: several workers race to drain the SAME
+    queue directory. The atomic claim (rename into in_flight/) must ensure
+    every order is delivered by exactly one worker, exactly once -- not
+    zero, not two. See docs/SOL-ADVERSARIAL-REVIEW finding #5."""
+    order_ids = [f"race-{i}" for i in range(16)]
+    queue_dir = tmp_path / "queue"
+    for order_id in order_ids:
+        _write_order(queue_dir / "orders", DispatchOrder(order_id=order_id, session_ref=f"localhost:{order_id}:0.0", nudge="work"))
+
+    log_path = tmp_path / "delivered.log"
+    log_path.write_text("", encoding="utf-8")
+
+    ctx = multiprocessing.get_context("fork")
+    procs = [
+        ctx.Process(
+            target=_mp_race_worker,
+            args=(str(queue_dir), str(tmp_path / "locks"), str(tmp_path / "ledger.jsonl"), str(log_path)),
+        )
+        for _ in range(4)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0
+
+    delivered = log_path.read_text(encoding="utf-8").splitlines()
+    assert sorted(delivered) == sorted(order_ids)  # every order delivered, and none delivered twice
+    for order_id in order_ids:
+        assert (queue_dir / "results" / f"{order_id}.json").exists()
+        assert (queue_dir / "processed" / f"{order_id}.json").exists()
+
+
+def test_kill_point_crash_after_pane_touch_reconciles_instead_of_double_pasting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simulate the exact gap SOL finding #5 named: a worker pastes into the
+    live pane (dispatch_to_tmux succeeds) and then the process dies before
+    _write_result_atomic runs. The order is left claimed with a send-nonce
+    but no result. A later pass must NOT paste a second time -- it must
+    reconcile via the target transcript (the same evidence dispatch_to_tmux
+    itself uses) and synthesize the SENT result instead."""
+    projects_root = tmp_path / "projects"
+    nudge = "checkpoint now please"
+    real_write_result_atomic = dispatchd_mod._write_result_atomic
+
+    def fake_dispatch_that_pastes(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        # The "pane touch": write the transcript a real delivery would have
+        # produced, exactly like a genuine paste would before the process died.
+        session_dir = projects_root / "some-project"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "abc123.jsonl").write_text(json.dumps({"text": order.nudge}) + "\n", encoding="utf-8")
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    def crashing_write_result_once(*args: Any, **kwargs: Any) -> Path:
+        raise RuntimeError("simulated process death before the result file was written")
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch_that_pastes)
+    monkeypatch.setattr(dispatchd_mod, "_write_result_atomic", crashing_write_result_once)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-crash", session_ref="localhost:s:0.0", nudge=nudge)
+    order_path = _write_order(queue_dir / "orders", order)
+    orders_dir, results_dir, processed_dir = dispatchd_mod._ensure_queue_dirs(queue_dir)
+
+    with pytest.raises(RuntimeError, match="simulated process death"):
+        process_one_order(
+            order_path,
+            orders_dir=orders_dir,
+            results_dir=results_dir,
+            processed_dir=processed_dir,
+            lock_dir=tmp_path / "locks",
+            ledger_path=tmp_path / "ledger.jsonl",
+            projects_root=projects_root,
+        )
+
+    # Post-crash state: claimed with a nonce, no result, no processed move,
+    # and the owner marker for the dead attempt is already gone (removed by
+    # process_one_order's own finally, exactly as a live reclaim check would
+    # expect from a genuinely-dead process).
+    assert (queue_dir / "in_flight" / "ord-crash.json").exists()
+    assert (queue_dir / "in_flight" / ".ord-crash.nonce").exists()
+    assert not (queue_dir / "in_flight" / ".ord-crash.owner").exists()
+    assert not (queue_dir / "results" / "ord-crash.json").exists()
+    assert not (queue_dir / "processed" / "ord-crash.json").exists()
+
+    # "Restart": a fresh pass with the real _write_result_atomic restored and
+    # a call-counting dispatch_to_tmux to prove no second paste happens.
+    monkeypatch.setattr(dispatchd_mod, "_write_result_atomic", real_write_result_atomic)
+    second_dispatch_calls = {"n": 0}
+
+    def counting_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        second_dispatch_calls["n"] += 1
+        return fake_dispatch_that_pastes(order, **kwargs)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", counting_dispatch)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", projects_root=projects_root)
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+    assert "reconciled" in results[0].reason
+    assert second_dispatch_calls["n"] == 0  # never pasted a second time
+    assert (queue_dir / "results" / "ord-crash.json").exists()
+    assert (queue_dir / "processed" / "ord-crash.json").exists()
+    assert not (queue_dir / "in_flight" / ".ord-crash.nonce").exists()
+
+
+def test_kill_point_crash_before_pane_touch_safely_redelivers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of the same kill-point: if the crash happened BEFORE
+    any real pane I/O landed (the nonce exists, but no transcript anywhere
+    confirms delivery), a restart must correctly conclude "not confirmed"
+    and redeliver normally -- never stall waiting for evidence that will
+    never arrive."""
+    empty_projects_root = tmp_path / "no-transcripts-here"  # isolates from any real ~/.claude/projects content
+
+    def crashing_claim_time_failure(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        raise RuntimeError("simulated crash before any pane I/O")
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", crashing_claim_time_failure)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-early-crash", session_ref="localhost:s:0.0", nudge="a distinctive unmatched nudge")
+    order_path = _write_order(queue_dir / "orders", order)
+    orders_dir, results_dir, processed_dir = dispatchd_mod._ensure_queue_dirs(queue_dir)
+
+    with pytest.raises(RuntimeError, match="simulated crash before any pane I/O"):
+        process_one_order(
+            order_path,
+            orders_dir=orders_dir,
+            results_dir=results_dir,
+            processed_dir=processed_dir,
+            lock_dir=tmp_path / "locks",
+            ledger_path=tmp_path / "ledger.jsonl",
+            projects_root=empty_projects_root,
+        )
+
+    # A nonce WAS written (the nonce is written immediately before
+    # dispatch_to_tmux is called), so this exercises the same reconciliation
+    # path -- but with no transcript evidence anywhere, reconciliation must
+    # correctly conclude "not confirmed" and safely redeliver.
+    assert (queue_dir / "in_flight" / ".ord-early-crash.nonce").exists()
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", projects_root=empty_projects_root)
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+    assert "reconciled" not in results[0].reason
+    assert (queue_dir / "results" / "ord-early-crash.json").exists()
+
+
+def test_stale_in_flight_claim_from_a_dead_owner_is_reclaimed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A claim whose owning pid is dead (crashed worker, no graceful
+    cleanup) is returned to orders/ on the next run_once pass -- never
+    stranded forever. A claim whose owner is still alive is left alone."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    queue_dir = tmp_path / "queue"
+    dispatchd_mod._ensure_queue_dirs(queue_dir)
+    order = DispatchOrder(order_id="ord-orphan", session_ref="localhost:s:0.0", nudge="hi")
+    orphaned_path = queue_dir / "in_flight" / "ord-orphan.json"
+    orphaned_path.write_text(order.model_dump_json(), encoding="utf-8")
+    # A pid essentially guaranteed not to be alive on any real system.
+    (queue_dir / "in_flight" / ".ord-orphan.owner").write_text("999999999", encoding="utf-8")
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl")
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+    assert (queue_dir / "results" / "ord-orphan.json").exists()
+
+
+def test_live_owner_claim_is_never_stolen(tmp_path: Path) -> None:
+    """The inverse: a claim whose owner pid IS alive (this test process
+    itself) must never be reclaimed out from under it."""
+    queue_dir = tmp_path / "queue"
+    dispatchd_mod._ensure_queue_dirs(queue_dir)
+    order = DispatchOrder(order_id="ord-live", session_ref="localhost:s:0.0", nudge="hi")
+    claimed_path = queue_dir / "in_flight" / "ord-live.json"
+    claimed_path.write_text(order.model_dump_json(), encoding="utf-8")
+    (queue_dir / "in_flight" / ".ord-live.owner").write_text(str(os.getpid()), encoding="utf-8")
+
+    dispatchd_mod._reclaim_stale_in_flight(queue_dir)
+
+    assert claimed_path.exists()  # still claimed -- not reclaimed to orders/
+    assert not (queue_dir / "orders" / "ord-live.json").exists()
+
+
+def test_result_appearing_while_waiting_for_the_lane_lock_is_caught_under_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for SOL finding #5's explicit ask: recheck idempotency
+    UNDER the lane lock, not only before acquiring it. Simulate a
+    concurrent order for the same session finishing (writing this order's
+    result) in the window between the pre-lock check and the lock actually
+    being acquired -- process_one_order must catch that under the lock and
+    never call dispatch_to_tmux."""
+    call_count = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        call_count["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-race-under-lock", session_ref="localhost:s:0.0", nudge="hi")
+    order_path = _write_order(queue_dir / "orders", order)
+    orders_dir, results_dir, processed_dir = dispatchd_mod._ensure_queue_dirs(queue_dir)
+
+    from chitra.dispatch import LaneLock
+
+    real_acquire = LaneLock.acquire
+
+    def acquire_then_plant_a_concurrent_result(self: LaneLock, **kwargs: Any) -> bool:
+        acquired = real_acquire(self, **kwargs)
+        # Simulate: another worker delivered this exact order and wrote its
+        # result WHILE this call was waiting on the lock.
+        concurrent_result = DispatchResult(order_id="ord-race-under-lock", session_ref=order.session_ref, status=DispatchStatus.SENT)
+        (results_dir / "ord-race-under-lock.json").write_text(concurrent_result.model_dump_json(), encoding="utf-8")
+        return acquired
+
+    monkeypatch.setattr(LaneLock, "acquire", acquire_then_plant_a_concurrent_result)
+
+    result = process_one_order(
+        order_path, orders_dir=orders_dir, results_dir=results_dir, processed_dir=processed_dir, lock_dir=tmp_path / "locks"
+    )
+
+    assert result is None  # recognized as already-processed, not re-dispatched
+    assert call_count["n"] == 0
+    assert (processed_dir / "ord-race-under-lock.json").exists()
 
 
 def test_routing_hint_flows_from_order_through_result_and_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -530,9 +1045,7 @@ def test_routing_provenance_is_stamped_on_result_and_signed_ledger(tmp_path: Pat
     assert entry.sig_v == 3
 
 
-def test_routes_entry_resolves_model_and_harness_into_result_and_signed_ledger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_routes_entry_resolves_model_and_harness_into_result_and_signed_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A structured ``routes`` entry is actively RESOLVED at dispatch: the
     concrete model+harness (+zdr) and ``"route"`` provenance land on the
     result and in the HMAC-signed ledger entry (closes ROADMAP line 97)."""

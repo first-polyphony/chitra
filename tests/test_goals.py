@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +36,24 @@ from chitra.goals import (
     upsert_goal,
     validate_goal,
 )
+
+
+def _mp_upsert_new_lane(root_str: str, session_ref: str) -> None:
+    """Module-level so it is a valid multiprocessing target (fork-safe)."""
+    upsert_goal(
+        Path(root_str),
+        GoalRecord(
+            session_ref=session_ref,
+            goal="Ship the tested deterministic goals store safely under load.",
+            done_when="The full suite and static checks pass.",
+            source="task-file:/tmp/goal-store.md",
+            status="working",
+        ),
+    )
+
+
+def _mp_add_ask(root_str: str, session_ref: str, ask: str) -> None:
+    add_ask(Path(root_str), session_ref, ask)
 
 
 def _record(**changes: str) -> GoalRecord:
@@ -181,9 +200,7 @@ def test_load_old_record_without_optional_fields_is_backward_compatible(tmp_path
         ),
     ],
 )
-def test_new_optional_goal_fields_are_strictly_validated(
-    tmp_path: Path, field: str, invalid: object, message: str
-) -> None:
+def test_new_optional_goal_fields_are_strictly_validated(tmp_path: Path, field: str, invalid: object, message: str) -> None:
     record_payload = _record().to_dict()
     record_payload[field] = invalid
     payload = {"schema": "chitra.goals.v1", "goals": [record_payload]}
@@ -385,10 +402,7 @@ def test_goal_cli_seeds_clears_and_scans_open_asks(tmp_path: Path, capsys: pytes
         encoding="utf-8",
     )
     assert (
-        main(
-            ["scan-asks", "--root", str(tmp_path), "--transcript", str(transcript), "--session-ref", record.session_ref, "--record"]
-        )
-        == 0
+        main(["scan-asks", "--root", str(tmp_path), "--transcript", str(transcript), "--session-ref", record.session_ref, "--record"]) == 0
     )
     assert "1. Scan this exact ask?" in capsys.readouterr().out
     scanned = get_goal(tmp_path, record.session_ref)
@@ -577,9 +591,7 @@ def test_roster_command_works_with_an_empty_store(tmp_path: Path, capsys: pytest
     assert capsys.readouterr().out.strip() == "no lanes recorded"
 
 
-def test_roster_command_reads_unreviewed_artifacts_from_the_shared_store(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_roster_command_reads_unreviewed_artifacts_from_the_shared_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     artifact = upsert_artifact(
         tmp_path,
         ArtifactRecord(
@@ -595,3 +607,47 @@ def test_roster_command_reads_unreviewed_artifacts_from_the_shared_store(
     rendered = capsys.readouterr().out
 
     assert f"{artifact.title} — {artifact.url}" in rendered
+
+
+# --- concurrent-writer lost-update regression (SOL finding #9) -------------
+
+
+def test_concurrent_writers_adding_different_lanes_do_not_lose_each_other(tmp_path: Path) -> None:
+    """Two-process lost-update regression, matching the review's exact
+    scenario: 'Monitor A reads goals [A, B]... A writes [B, A']; B writes
+    [A, B']. Whichever os.replace() runs last silently erases the other's
+    mutation.' N real OS processes each add their OWN lane concurrently to
+    the SAME shared document; every one must survive -- none silently
+    clobbered by a losing race on the read-modify-write window."""
+    ctx = multiprocessing.get_context("fork")
+    session_refs = [f"host:lane-{i}:0.0" for i in range(20)]
+    procs = [ctx.Process(target=_mp_upsert_new_lane, args=(str(tmp_path), ref)) for ref in session_refs]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+        assert p.exitcode == 0
+
+    stored_refs = {record.session_ref for record in load_goals(tmp_path)}
+    assert stored_refs == set(session_refs)
+
+
+def test_concurrent_writers_adding_asks_to_the_same_lane_do_not_lose_each_other(tmp_path: Path) -> None:
+    """The same lost-update race, but on ONE lane's own record: several
+    processes concurrently add_ask() to the SAME session_ref. Without
+    serializing the read-modify-write transaction, each process's
+    read-then-append can race another's, and whichever write lands last
+    silently drops the other's ask. Every ask must survive."""
+    upsert_goal(tmp_path, _record())
+    ctx = multiprocessing.get_context("fork")
+    asks = [f"{i}. Concurrent ask number {i}." for i in range(15)]
+    procs = [ctx.Process(target=_mp_add_ask, args=(str(tmp_path), "tophand:f2-77:0.0", ask)) for ask in asks]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+        assert p.exitcode == 0
+
+    stored = get_goal(tmp_path, "tophand:f2-77:0.0")
+    assert stored is not None
+    assert set(stored.open_asks) == set(asks)

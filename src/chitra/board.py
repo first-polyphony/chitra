@@ -67,6 +67,11 @@ ROSTER_NEEDS_MIN_WIDTH = 8
 ROSTER_MARKER_WIDTH = 2  # emoji markers render 2 terminal columns
 ROSTER_DEFAULT_TERM_WIDTH = 100
 ROSTER_MAX_TERM_WIDTH = 160
+# Single toggle: box vs. cards is an open operator decision (see
+# docs/SOL-ADVERSARIAL-REVIEW finding #8) -- not re-litigated here. This is
+# Both render_roster()'s default fmt= and chitra-goals roster's --format
+# default read this one constant, so the operator ruling stays centralized.
+ROSTER_DEFAULT_FORMAT: Literal["cards", "box", "markdown"] = "markdown"
 ROSTER_MARKERS: dict[GoalStatus, str] = {
     "blocked": "🔴",
     "held": "🟡",
@@ -174,21 +179,60 @@ def _pad(text: str, width: int) -> str:
 
 
 def _wrap_cell(text: str, width: int) -> list[str]:
-    """Word-wrap collapsed ``text`` into lines no wider than ``width`` columns.
+    """Word-wrap collapsed ``text`` into lines no wider than ``width`` DISPLAY
+    columns (not code points) — emoji/CJK-aware, matching ``_pad``'s own
+    measurement (see ``display_width``).
 
-    Wrapping (never single-line truncation) so a Goal's done-condition and a
-    long Now/Needs survive intact — they just flow onto more lines. Overlong
-    unbroken tokens are hard-split so a row can never exceed its column width.
+    ``textwrap.wrap`` counts code points, not terminal columns: a Goal/Now/
+    Needs cell containing emoji or CJK text is under-counted (a wide
+    character is 1 code point but renders 2 columns), so a wrapped line can
+    still be wider than its column once ``_pad``'s display-width padding is
+    applied — the frame overflows (reproduced at ``COLUMNS=100`` producing
+    frame widths ``{100, 119}`` for a 20-emoji Goal; see
+    docs/SOL-ADVERSARIAL-REVIEW finding #8). This wraps by display width
+    directly instead. Wrapping (never single-line truncation) so a Goal's
+    done-condition and a long Now/Needs survive intact — they just flow onto
+    more lines. Overlong unbroken tokens are hard-split character-by-character
+    by display width so a row can never exceed its column width regardless of
+    glyph width.
     """
     compact = " ".join(text.split())
     if not compact:
         return [""]
-    lines = textwrap.wrap(
-        compact,
-        width=max(1, width),
-        break_long_words=True,
-        break_on_hyphens=False,
-    )
+    width = max(1, width)
+    lines: list[str] = []
+    current = ""
+    current_width = 0
+    for word in compact.split(" "):
+        word_width = display_width(word)
+        if word_width > width:
+            # Overlong unbroken token: hard-split by display width, never by
+            # code-point count, so no fragment can render wider than width.
+            if current:
+                lines.append(current)
+                current = ""
+                current_width = 0
+            piece = ""
+            piece_width = 0
+            for char in word:
+                char_width = _char_width(char)
+                if piece and piece_width + char_width > width:
+                    lines.append(piece)
+                    piece = ""
+                    piece_width = 0
+                piece += char
+                piece_width += char_width
+            current, current_width = piece, piece_width
+            continue
+        candidate_width = current_width + (1 if current else 0) + word_width
+        if current and candidate_width > width:
+            lines.append(current)
+            current, current_width = word, word_width
+        else:
+            current = f"{current} {word}" if current else word
+            current_width = candidate_width
+    if current:
+        lines.append(current)
     return lines or [""]
 
 
@@ -303,15 +347,16 @@ def _render_cards(records: Sequence[RosterRecord]) -> str:
 def render_roster(
     records: Sequence[RosterRecord],
     *,
-    fmt: Literal["cards", "box", "markdown"] = "cards",
+    fmt: Literal["cards", "box", "markdown"] = ROSTER_DEFAULT_FORMAT,
     artifacts: Sequence[ArtifactRosterRecord] = (),
 ) -> str:
     """Render every stored lane, stable order (host, session name, full ref).
 
-    Default ``cards``: one labelled stanza per lane (readable full sentences).
-    ``box``: the fixed-column table. ``markdown``: a client-rendered table.
-    Artifact records are injected by the caller; their URLs are emitted in a
-    separate unwrapped block so operators can copy each complete URL.
+    Default (``ROSTER_DEFAULT_FORMAT``, currently ``markdown``): a
+    client-rendered table. ``cards``: one labelled stanza per lane (readable
+    full sentences). ``box``: the fixed-column table. Artifact records are
+    injected by the caller; their URLs are emitted in a separate unwrapped
+    block so operators can copy each complete URL.
     """
     artifact_block = _unreviewed_artifact_block(artifacts, fmt=fmt)
     if not records and not artifact_block:

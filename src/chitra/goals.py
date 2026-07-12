@@ -7,10 +7,13 @@ stated goal, completion condition, and current state.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +35,15 @@ GOAL_STATUSES: tuple[GoalStatus, ...] = (
     "done-pending-close",
 )
 SCHEMA = "chitra.goals.v1"
+
+# Shared hold_reason convention: a hold_reason starting with this prefix
+# (e.g. "rate-limit:5h") marks a timed pause driven by provider usage
+# thresholds (see chitra.rate_limit_guard), distinct from an operator- or
+# throttle-initiated hold. goals.py itself stays decision-free -- this is
+# just the string convention two callers (chitra.rate_limit_guard, which
+# sets it, and chitra.dispatchd, which reads it to freeze a held session's
+# queue) need to agree on.
+RATE_LIMIT_HOLD_REASON_PREFIX = "rate-limit:"
 
 
 class GoalValidationError(ValueError):
@@ -136,6 +148,36 @@ def check_specification(rec: GoalRecord) -> list[str]:
 def goals_path(root: Path | None = None) -> Path:
     """Return the persistent goals document path for ``root``."""
     return (state_dir() if root is None else root) / "goals.json"
+
+
+@contextlib.contextmanager
+def _goal_store_lock(root: Path | None) -> Iterator[None]:
+    """Serialize one full read-modify-write transaction against the goals store.
+
+    Concurrent writers (the CLI, a live monitor sweep, ``chitra.rate_limit_
+    guard``'s sweep, etc.) can each read the same on-disk snapshot and then
+    replace it with their own mutation, silently discarding whichever wrote
+    last -- goal updates are atomic PER WRITE (``_write_goals``'s
+    write-temp-then-``os.replace``), but not against a concurrent reader
+    racing the same read-modify-write window. An exclusive ``flock`` on a
+    sidecar lock file (never the document itself, so a lock holder's crash
+    cannot corrupt or strand the document) forces every read-modify-write
+    transaction in this module to run one at a time, closing that
+    lost-update window. Blocking, not best-effort: callers wait for the
+    lock rather than silently skipping serialization.
+    """
+    path = goals_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / f".{path.name}.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _utc_now() -> str:
@@ -288,6 +330,24 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
     issues = validate_goal(rec)
     if issues:
         raise GoalValidationError("; ".join(issues))
+    with _goal_store_lock(root):
+        stored = _upsert_goal_locked(root, rec, clear_open_asks=clear_open_asks)
+    logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
+    return stored
+
+
+def _upsert_goal_locked(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = False) -> GoalRecord:
+    """The body of ``upsert_goal``, assuming the caller already holds
+    ``_goal_store_lock``. Callers that must read-then-modify an existing
+    record (``add_ask``, ``resolve_ask``, ``hold_goal``, ``resume_goal``,
+    ``update_now``) take the lock ONCE around their own read AND this write
+    so the read cannot go stale before the write lands -- calling the public
+    ``upsert_goal`` (which re-acquires the lock itself) from inside an
+    already-locked section would either deadlock (a second ``flock`` from
+    the same process on a fresh fd still blocks on the first) or, worse,
+    leave a real window between the caller's own read and the write. See
+    docs/SOL-ADVERSARIAL-REVIEW finding #9.
+    """
     existing = get_goal(root, rec.session_ref)
     if existing is not None and not _strategic_fields_match(existing, rec):
         raise GoalRedirectRequiredError("strategic goal fields changed; use chitra-goals redirect --reason ...")
@@ -322,7 +382,6 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
     records = [record for record in load_goals(root) if record.session_ref != rec.session_ref]
     records.append(stored)
     _write_goals(root, records)
-    logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
     return stored
 
 
@@ -348,41 +407,42 @@ def redirect_goal(
     """Replace strategic values after recording the prior operator direction."""
     if not reason.strip():
         raise ValueError("redirect reason must be non-empty")
-    existing = get_goal(root, session_ref)
-    if existing is None:
-        raise GoalNotFoundError(session_ref)
-    redirected = replace(
-        existing,
-        goal=existing.goal if goal is None else goal,
-        done_when=existing.done_when if done_when is None else done_when,
-        intent=existing.intent if intent is None else intent,
-        scope=existing.scope if scope is None else scope,
-        source=existing.source if source is None else source,
-    )
-    if _strategic_fields_match(existing, redirected):
-        raise ValueError("redirect must change at least one strategic field")
-    issues = validate_goal(redirected)
-    if issues:
-        raise GoalValidationError("; ".join(issues))
-    revised_at = _utc_now()
-    history_entry = {
-        "goal": existing.goal,
-        "done_when": existing.done_when,
-        "intent": existing.intent,
-        "scope": existing.scope,
-        "revised_at": revised_at,
-        "reason": reason,
-    }
-    stored = replace(
-        redirected,
-        goal_version=existing.goal_version + 1,
-        goal_history=(*existing.goal_history, history_entry),
-        created_at=existing.created_at,
-        updated_at=revised_at,
-    )
-    records = [record for record in load_goals(root) if record.session_ref != session_ref]
-    records.append(stored)
-    _write_goals(root, records)
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        redirected = replace(
+            existing,
+            goal=existing.goal if goal is None else goal,
+            done_when=existing.done_when if done_when is None else done_when,
+            intent=existing.intent if intent is None else intent,
+            scope=existing.scope if scope is None else scope,
+            source=existing.source if source is None else source,
+        )
+        if _strategic_fields_match(existing, redirected):
+            raise ValueError("redirect must change at least one strategic field")
+        issues = validate_goal(redirected)
+        if issues:
+            raise GoalValidationError("; ".join(issues))
+        revised_at = _utc_now()
+        history_entry = {
+            "goal": existing.goal,
+            "done_when": existing.done_when,
+            "intent": existing.intent,
+            "scope": existing.scope,
+            "revised_at": revised_at,
+            "reason": reason,
+        }
+        stored = replace(
+            redirected,
+            goal_version=existing.goal_version + 1,
+            goal_history=(*existing.goal_history, history_entry),
+            created_at=existing.created_at,
+            updated_at=revised_at,
+        )
+        records = [record for record in load_goals(root) if record.session_ref != session_ref]
+        records.append(stored)
+        _write_goals(root, records)
     logger.info("goal_mutated", session_ref=session_ref, action="redirect")
     return stored
 
@@ -396,18 +456,21 @@ def update_now(
     last_verified: str | None = None,
 ) -> GoalRecord:
     """Update only the current tactical state of an existing goal record."""
-    existing = get_goal(root, session_ref)
-    if existing is None:
-        raise GoalNotFoundError(session_ref)
-    return upsert_goal(
-        root,
-        replace(
-            existing,
-            now=existing.now if now is None else now,
-            status=existing.status if status is None else status,
-            last_verified=existing.last_verified if last_verified is None else last_verified,
-        ),
-    )
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        stored = _upsert_goal_locked(
+            root,
+            replace(
+                existing,
+                now=existing.now if now is None else now,
+                status=existing.status if status is None else status,
+                last_verified=existing.last_verified if last_verified is None else last_verified,
+            ),
+        )
+    logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
+    return stored
 
 
 def _parse_iso8601(value: str) -> datetime:
@@ -427,22 +490,24 @@ def hold_goal(root: Path | None, session_ref: str, *, reason: str, resume_at: st
         raise ValueError("hold reason must be non-empty")
     if resume_at:
         _parse_iso8601(resume_at)
-    existing = get_goal(root, session_ref)
-    if existing is None:
-        raise GoalNotFoundError(session_ref)
-    held = upsert_goal(root, replace(existing, status="held", hold_reason=reason, resume_at=resume_at))
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        held = _upsert_goal_locked(root, replace(existing, status="held", hold_reason=reason, resume_at=resume_at))
     logger.info("goal_mutated", session_ref=session_ref, action="hold")
     return held
 
 
 def resume_goal(root: Path | None, session_ref: str) -> GoalRecord:
     """Return an explicitly held lane to working state and clear hold metadata."""
-    existing = get_goal(root, session_ref)
-    if existing is None:
-        raise GoalNotFoundError(session_ref)
-    if existing.status != "held":
-        raise ValueError("goal is not held")
-    resumed = upsert_goal(root, replace(existing, status="working", hold_reason="", resume_at=""))
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        if existing.status != "held":
+            raise ValueError("goal is not held")
+        resumed = _upsert_goal_locked(root, replace(existing, status="working", hold_reason="", resume_at=""))
     logger.info("goal_mutated", session_ref=session_ref, action="resume")
     return resumed
 
@@ -464,12 +529,15 @@ def due_goals(root: Path | None = None, *, now: datetime | None = None) -> list[
 
 def add_ask(root: Path | None, session_ref: str, ask: str) -> GoalRecord:
     """Persist one exact open operator ask for an existing lane, once only."""
-    existing = get_goal(root, session_ref)
-    if existing is None:
-        raise GoalNotFoundError(session_ref)
-    if ask in existing.open_asks:
-        return existing
-    return upsert_goal(root, replace(existing, open_asks=(*existing.open_asks, ask)))
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        if ask in existing.open_asks:
+            return existing
+        stored = _upsert_goal_locked(root, replace(existing, open_asks=(*existing.open_asks, ask)))
+    logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
+    return stored
 
 
 def resolve_ask(
@@ -484,21 +552,24 @@ def resolve_ask(
     selector_count = int(ask is not None) + int(index is not None) + int(all)
     if selector_count != 1:
         raise ValueError("select exactly one of ask, index, or all")
-    existing = get_goal(root, session_ref)
-    if existing is None:
-        raise GoalNotFoundError(session_ref)
-    if all:
-        remaining: tuple[str, ...] = ()
-    elif ask is not None:
-        if ask not in existing.open_asks:
-            raise ValueError("open ask was not found")
-        remaining = tuple(item for item in existing.open_asks if item != ask)
-    else:
-        assert index is not None
-        if index < 0 or index >= len(existing.open_asks):
-            raise ValueError("open ask index is out of range")
-        remaining = existing.open_asks[:index] + existing.open_asks[index + 1 :]
-    return upsert_goal(root, replace(existing, open_asks=remaining), clear_open_asks=True)
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        if all:
+            remaining: tuple[str, ...] = ()
+        elif ask is not None:
+            if ask not in existing.open_asks:
+                raise ValueError("open ask was not found")
+            remaining = tuple(item for item in existing.open_asks if item != ask)
+        else:
+            assert index is not None
+            if index < 0 or index >= len(existing.open_asks):
+                raise ValueError("open ask index is out of range")
+            remaining = existing.open_asks[:index] + existing.open_asks[index + 1 :]
+        stored = _upsert_goal_locked(root, replace(existing, open_asks=remaining), clear_open_asks=True)
+    logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
+    return stored
 
 
 def get_goal(root: Path | None, session_ref: str) -> GoalRecord | None:
@@ -513,11 +584,12 @@ def list_goals(root: Path | None = None) -> list[GoalRecord]:
 
 def close_goal(root: Path | None, session_ref: str) -> GoalRecord:
     """Remove a closed record from the deliberately small current-state store."""
-    records = load_goals(root)
-    closed = next((record for record in records if record.session_ref == session_ref), None)
-    if closed is None:
-        raise GoalNotFoundError(session_ref)
-    _write_goals(root, [record for record in records if record.session_ref != session_ref])
+    with _goal_store_lock(root):
+        records = load_goals(root)
+        closed = next((record for record in records if record.session_ref == session_ref), None)
+        if closed is None:
+            raise GoalNotFoundError(session_ref)
+        _write_goals(root, [record for record in records if record.session_ref != session_ref])
     logger.info("goal_mutated", session_ref=session_ref, action="close")
     return closed
 
@@ -620,9 +692,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     scan_asks_command.add_argument("--session-ref")
     scan_asks_command.add_argument("--record", action="store_true")
 
+    from chitra.board import ROSTER_DEFAULT_FORMAT  # deferred: board imports goals at module top
+
     roster_command = commands.add_parser("roster", help="Render the operator roster table.")
     add_root(roster_command)
-    roster_command.add_argument("--format", choices=("cards", "box", "markdown"), default="cards")
+    roster_command.add_argument("--format", choices=("cards", "box", "markdown"), default=ROSTER_DEFAULT_FORMAT)
     roster_command.add_argument("--lint", action="store_true", help="Print optional board roster-lint advice to stderr.")
     return parser
 
