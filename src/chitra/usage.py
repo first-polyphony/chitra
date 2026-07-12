@@ -245,17 +245,36 @@ def _verdict_binding_pct(snapshot: UsageSnapshot, verdict: Verdict) -> float:
     return 0
 
 
+def _account_group_key(snapshot: UsageSnapshot) -> str:
+    """Return the account-grouping key for one snapshot: the account itself
+    when known, or a per-session singleton key when unknown.
+
+    Fail closed on unknown account identity: an empty ``account`` field
+    (both status-input and ``.claude.json`` account lookup failed upstream,
+    per ``chitra-usage-snapshot``) must never be treated as a shared
+    identity with every OTHER unknown-account session. Grouping every ""
+    account together would let one fresh, hot, unknown-identity session
+    attribute its pause verdict to every unrelated unknown-identity sibling
+    (see docs/SOL-ADVERSARIAL-REVIEW finding #6). Each blank-account
+    snapshot is instead its own isolated group, keyed by session_id, so it
+    can only ever receive its OWN verdict -- never another session's.
+    """
+    return snapshot.account if snapshot.account else f"\0unknown:{snapshot.session_id}"
+
+
 def evaluate_grouped(
     items: list[tuple[UsageSnapshot, bool]], *, policy: UsagePolicy
 ) -> list[AccountedVerdict]:
     """Evaluate fresh readings by account, sorted by account then input order.
 
     Every input session receives its account's verdict, including stale siblings
-    whose sidecar snapshots no longer refresh.
+    whose sidecar snapshots no longer refresh. A session with no known account
+    identity is never merged with another unknown-identity session -- see
+    ``_account_group_key``.
     """
     groups: dict[str, list[tuple[UsageSnapshot, bool]]] = {}
     for item in items:
-        groups.setdefault(item[0].account, []).append(item)
+        groups.setdefault(_account_group_key(item[0]), []).append(item)
 
     results: list[AccountedVerdict] = []
     severity = {"ok": 0, "approaching": 1, "pause": 2}
@@ -284,7 +303,7 @@ def evaluate_grouped(
                     session_id=snapshot.session_id,
                     tmux_session=snapshot.tmux_session,
                     kind=snapshot.kind,
-                    account=account,
+                    account=snapshot.account,  # the real (possibly empty) account, never the internal grouping key
                     level=level,
                     binding_window=binding_window,
                     resume_at_epoch=resume_at_epoch,

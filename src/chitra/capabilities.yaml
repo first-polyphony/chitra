@@ -194,3 +194,29 @@ capabilities:
         argv: [chitra-queue]
         params: []
         mutates: true
+
+  - name: rate-limit-guard
+    kind: tool
+    purpose: >-
+      Drive a durable pause/resume transaction machine for a session nearing its provider
+      rate/session limit: checkpoint it, confirm the turn actually stopped, hold it, then
+      resume it once the window resets and dispatchd has redelivered its deferred backlog.
+    when_to_use: Run under an external timer (systemd timer / cron), one host at a time, against that host's chitra-usage snapshot directory.
+    authority:
+      level: act
+      grants:
+        - Hold or resume a chitra goal record for a rate-limit reason, preserving its stored goal as the re-arm payload.
+        - Enqueue a fixed checkpoint, stop-clear, or goal-templated resume nudge onto the local dispatch order queue.
+        - Requeue a held session's deferred backlog (FIFO, exactly once) after a confirmed resume.
+      excludes:
+        - Author, judge, or vary nudge content -- every nudge is a fixed/templated literal, never LLM-generated.
+        - Override an operator- or throttle-held lane, or resume into a still-hot window.
+        - Touch a tmux pane directly -- delivery is the existing dispatchd queue's job.
+        - Fan out a Codex account-wide pause to per-lane sessions -- Codex has no per-lane usage snapshot yet (tracked gap, not implemented; see rate_limit_guard.py docstring).
+    default_enabled: false
+    commands:
+      - name: chitra-rate-limit-guard
+        description: Advance one detect/checkpoint/stop-verify/hold/resume sweep pass for one host's tracked sessions.
+        argv: [chitra-rate-limit-guard]
+        params: []
+        mutates: true

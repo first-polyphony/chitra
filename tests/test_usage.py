@@ -188,9 +188,7 @@ def test_codex_snapshot_sequences_exchange_and_maps_payload_variants(tmp_path: P
     auth_path = tmp_path / "auth.json"
     _write_auth(auth_path, {"email": "first@example.com"})
 
-    snake_process = _FakeCodexProcess(
-        {"rateLimits": {"primary": {"used_percent": 81, "resets_at": 99}, "secondary": None}}
-    )
+    snake_process = _FakeCodexProcess({"rateLimits": {"primary": {"used_percent": 81, "resets_at": 99}, "secondary": None}})
     first = codex_snapshot(now=now, process_factory=_process_factory(snake_process), auth_path=auth_path)
     assert first.five_hour == UsageWindow(81.0, 99)
     assert first.seven_day is None
@@ -220,9 +218,7 @@ def test_codex_snapshot_sequences_exchange_and_maps_payload_variants(tmp_path: P
 
 
 def test_codex_snapshot_missing_auth_file_uses_empty_account(tmp_path: Path) -> None:
-    process = _FakeCodexProcess(
-        {"rateLimits": {"primary": {"used_percent": 10, "resets_at": 99}, "secondary": None}}
-    )
+    process = _FakeCodexProcess({"rateLimits": {"primary": {"used_percent": 10, "resets_at": 99}, "secondary": None}})
     assert codex_snapshot(process_factory=_process_factory(process), auth_path=tmp_path / "missing.json").account == ""
 
 
@@ -279,6 +275,33 @@ def test_evaluate_grouped_keeps_accounts_separate_and_unknown_without_fresh_read
     ]
 
 
+def test_evaluate_grouped_fails_closed_on_unknown_account_never_merging_unrelated_unknowns() -> None:
+    """Regression for SOL finding #6: two unrelated sessions that both have
+    an unknown (blank) account identity must never be merged into one
+    account group. Before this fix, ``evaluate_grouped`` grouped by the raw
+    (possibly empty) account string, so one hot fresh unknown-identity
+    session could pause every unrelated unknown-identity sibling."""
+    hot_unknown = _snapshot(session_id="hot-unknown", account="", five_hour=UsageWindow(99, 10))
+    other_unknown = _snapshot(session_id="other-unknown", account="", five_hour=UsageWindow(5, 10))
+    grouped = evaluate_grouped([(hot_unknown, True), (other_unknown, True)], policy=UsagePolicy())
+    by_session = {item.session_id: item for item in grouped}
+
+    assert by_session["hot-unknown"].level == "pause"
+    assert by_session["other-unknown"].level == "ok"  # must never inherit the unrelated session's pause verdict
+    assert by_session["hot-unknown"].account == ""
+    assert by_session["other-unknown"].account == ""
+
+
+def test_evaluate_grouped_still_shares_a_verdict_across_the_same_real_account() -> None:
+    """The fail-closed isolation is specific to the unknown (blank) account
+    -- two sessions sharing a REAL, known account identity still correctly
+    share one account-level verdict, exactly as before."""
+    hot = _snapshot(session_id="hot-real", account="real@example.com", five_hour=UsageWindow(99, 10))
+    sibling = _snapshot(session_id="sibling-real", account="real@example.com", five_hour=UsageWindow(5, 10))
+    grouped = evaluate_grouped([(hot, True), (sibling, True)], policy=UsagePolicy())
+    assert {item.level for item in grouped} == {"pause"}
+
+
 def test_evaluate_grouped_propagates_approaching_verdict() -> None:
     fresh = _snapshot(session_id="fresh", account="shared@example.com", five_hour=UsageWindow(70, 10))
     stale = _snapshot(session_id="stale", account="shared@example.com", five_hour=UsageWindow(1, 10))
@@ -288,9 +311,7 @@ def test_evaluate_grouped_propagates_approaching_verdict() -> None:
 
 def test_usage_cli_evaluate_policy_and_flag_precedence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     current = datetime.now(UTC)
-    fresh = _snapshot(
-        five_hour=UsageWindow(75, 1_700_000_100), ts=current.isoformat(), session_id="fresh", account="shared@example.com"
-    )
+    fresh = _snapshot(five_hour=UsageWindow(75, 1_700_000_100), ts=current.isoformat(), session_id="fresh", account="shared@example.com")
     stale = _snapshot(
         five_hour=UsageWindow(99, 1_700_000_100),
         ts=(current - timedelta(hours=1)).isoformat(),

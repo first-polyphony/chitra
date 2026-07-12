@@ -94,6 +94,42 @@ class GuidancePolicy(BaseModel):
         return self
 
 
+class PausePolicy(BaseModel):
+    """Bounded deadlines/attempts for ``chitra.rate_limit_guard``'s pause/resume
+    transaction machine (see that module's docstring for the phase sequence).
+
+    Every deadline is a ceiling on how long a transaction may sit in one
+    in-progress phase before the sweep escalates instead of retrying forever
+    -- "no strand-forever" (see docs/SOL-ADVERSARIAL-REVIEW finding #2).
+    Escalating never clears a hold; the freeze only ever lifts once a resume
+    is actually confirmed delivered.
+    """
+
+    checkpoint_deadline_seconds: int = 180
+    stop_deadline_seconds: int = 180
+    quiescence_quiet_seconds: int = 30
+    quiescence_timeout_seconds: int = 900
+    resume_deadline_seconds: int = 180
+    max_retry_attempts: int = 3
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Self:
+        """Reject non-positive deadlines/attempts at configuration load time."""
+        for name in (
+            "checkpoint_deadline_seconds",
+            "stop_deadline_seconds",
+            "quiescence_quiet_seconds",
+            "quiescence_timeout_seconds",
+            "resume_deadline_seconds",
+            "max_retry_attempts",
+        ):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be at least 1")
+        if self.quiescence_quiet_seconds > self.quiescence_timeout_seconds:
+            raise ValueError("quiescence_quiet_seconds must not exceed quiescence_timeout_seconds")
+        return self
+
+
 class PolicyConfig(BaseModel):
     """The complete optional policy.yaml schema."""
 
@@ -101,6 +137,7 @@ class PolicyConfig(BaseModel):
     dispatch: DispatchPolicy = Field(default_factory=DispatchPolicy)
     usage: UsagePolicy = Field(default_factory=UsagePolicy)
     guidance: GuidancePolicy = Field(default_factory=GuidancePolicy)
+    pause: PausePolicy = Field(default_factory=PausePolicy)
 
 
 def resolve_guidance(config: PolicyConfig, cwd: Path) -> Path | None:
