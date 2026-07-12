@@ -4,6 +4,8 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-11
+
 ### Added
 - `chitra.convlog` v2 operator briefs now record a plain-language subject and progress summary, render those details as a grounding lead-in, and keep v1 conversation-log entries readable.
 - Roster reports now list every unreviewed published artifact by title and complete, copyable URL in deterministic oldest-first order.
