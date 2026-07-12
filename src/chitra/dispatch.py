@@ -96,13 +96,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from chitra.completion_gate import TodoItem
 from chitra.policy_config import PolicyConfig
+from chitra.reasoning import DecisionProvenance, ReasonedDecision
 
 from . import ledger as ledger_mod
 
@@ -208,6 +209,8 @@ class DispatchOrder(BaseModel):
     tag: str = "[C]"
     routing_hint: str | None = None
     task_type: str | None = None
+    decision_kind: Literal["legacy", "operator_relay", "answer", "nudge", "action"] = "legacy"
+    reasoning: ReasonedDecision | None = None
     input_baseline_hash: str | None = None
     input_seen_hash: str | None = None
     snapshot_tail_hash: str | None = None
@@ -236,7 +239,20 @@ class DispatchOrder(BaseModel):
     # order) controls the allowlist. See docs/SOL-ADVERSARIAL-REVIEW finding #7.
     bypass_rate_limit_freeze: bool = False
 
-
+    @model_validator(mode="after")
+    def validate_reasoning_attestation(self) -> DispatchOrder:
+        """Bind autonomous message bytes to their goal/principle provenance."""
+        reasoned_kinds = {"answer", "nudge", "action"}
+        if self.decision_kind in reasoned_kinds and self.reasoning is None:
+            raise ValueError(f"{self.decision_kind} dispatch requires reasoning provenance")
+        if self.decision_kind not in reasoned_kinds and self.reasoning is not None:
+            raise ValueError(f"{self.decision_kind} dispatch cannot carry autonomous reasoning")
+        if self.reasoning is not None:
+            if self.reasoning.outcome != "answer":
+                raise ValueError("an abstained decision cannot be dispatched")
+            if self.reasoning.answer != self.nudge:
+                raise ValueError("dispatch text must exactly match the reasoned answer")
+        return self
 class DispatchResult(BaseModel):
     """Result of processing a dispatch order.
 
@@ -267,6 +283,7 @@ class DispatchResult(BaseModel):
     resolved_model: str | None = None
     resolved_harness: str | None = None
     resolved_zdr: bool = False
+    decision_provenance: DecisionProvenance | None = None
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
