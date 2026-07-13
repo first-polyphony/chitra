@@ -36,7 +36,7 @@ chitra delivers to and observes LLM-driven sessions from the outside; its own co
 - **`chitra.draft_scanner`** — a periodic scan of `host:session:pane` targets for an unsubmitted draft sitting in the tmux input box. Flags only; never submits or discards anything.
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
 - **`chitra.board`** — the deterministic, operator-facing board renderer. It strictly validates the full facts schema, renders the bundled interactive HTML to `index.html` atomically, and records result freshness in `health.json`.
-- **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so any reader can later verify that chitra delivered an exact message at a given time — or that chitra never sent a given message.
+- **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so a reader with the signing key can verify an exact recorded delivery. Absence is only conventional evidence; see "Message tag and delivery authentication" below.
 - **`chitra.convlog`** — a deterministic operator-brief validator, BLUF renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
 
 ## Operator brief conversation log
@@ -65,13 +65,13 @@ Every step above runs against the **actual target host** — a plain local `tmux
 
 `dispatchd` guards against redelivery using a result file: before dispatching, it checks whether a result file already exists for an order id, and if so treats the order as already processed. This means **once a result file exists for an order, it is never redispatched**, even across a daemon restart.
 
-The one real gap: the result file is written *after* the paste already happened (paste -> optional ledger sign/log -> result write -> move to `processed/`). If the daemon crashes in that window — after the paste actually landed in the target pane but before the result file is written — the order file is still sitting in `orders/` with no result file, so the next run re-dispatches it and the message is delivered a second time. This window is small (no I/O happens between the paste and the result write beyond the ledger append), but it is real and not closed by anything in this package.
+Before a paste attempt, `dispatchd` writes a send-nonce beside the claimed order in `in_flight/`. If the worker crashes after the paste but before the result is written, the next pass sees that nonce and checks the target transcript before doing any second paste. A confirmed prior delivery produces a synthesized `SENT` result; only an unconfirmed attempt is dispatched again. Existing result files remain the final idempotency guard.
 
 ## Message tag and delivery authentication
 
 Every dispatched message carries a `tag` (default `"[C]"`) marking it as a chitra relay delivery. An operator typing directly into a pane needs no tag and no authentication; the pane is that operator's own channel. `DispatchOrder`/`DispatchResult` also carry an optional `routing_hint` (default `None`) — an opaque string recording a routing/model-preference decision the calling system already made; chitra never reads, validates, or acts on its contents, only passes it through unchanged into the result and the signed ledger entry for audit purposes.
 
-Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` signs an HMAC-SHA256 over `(timestamp, session_ref, tag, message_hash, routing_hint)` using a key stored in the state directory (generated on first use) and appends the signed record to an append-only JSON Lines (JSONL) ledger. This adds no extra step to a normal send.
+Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` appends a signed record to an append-only JSON Lines (JSONL) ledger. The current `sig_v3` HMAC-SHA256 payload covers `(timestamp, session_ref, tag, message_hash, routing_hint, task_type, routing_hint_source, resolved_model, resolved_harness, resolved_zdr)`; the verifier retains the versioned v1/v2 field sets for older entries. The signing key lives in the state directory and is generated on first use. This adds no extra step to a normal send.
 
 This is a trusted-host threat model: the ledger assumes whoever can write to the state directory is trusted (systemd-supervised `dispatchd`, plus the host's own root/admin). It is not designed to resist a malicious actor with filesystem write access to `ledger.jsonl`.
 
@@ -132,7 +132,7 @@ pytest
 
 ## Running the daemons
 
-Two command-line interface (CLI) entrypoints are installed: `dispatchd` and `triaged`, plus `draft-scanner` as an ad-hoc tool. The board renderer runs as `python -m chitra.board` (or `chitra-board` when installed). Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`. Copy them, edit the placeholders, and install as `chitra-dispatchd.service` / `chitra-triaged.service`.
+Eleven command-line interface (CLI) entrypoints are installed. `dispatchd` and `triaged` are the always-on daemons. Periodic or ad-hoc tools are `draft-scanner`, `chitra-board`, `chitra-goals`, `chitra-artifacts`, `chitra-usage`, `chitra-rate-limit-guard`, `chitra-convo`, `chitra-capabilities`, and `chitra-queue`. The board renderer also runs as `python -m chitra.board`. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`. Copy them, edit the placeholders, and install as `chitra-dispatchd.service` / `chitra-triaged.service`.
 
 ## Configuration
 

@@ -694,7 +694,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     from chitra.board import ROSTER_DEFAULT_FORMAT  # deferred: board imports goals at module top
 
-    roster_command = commands.add_parser("roster", help="Render the operator roster table.")
+    roster_command = commands.add_parser("roster", help="Render the operator roster.")
     add_root(roster_command)
     roster_command.add_argument("--format", choices=("cards", "box", "markdown"), default=ROSTER_DEFAULT_FORMAT)
     roster_command.add_argument("--lint", action="store_true", help="Print optional board roster-lint advice to stderr.")
