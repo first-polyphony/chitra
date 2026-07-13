@@ -77,9 +77,9 @@ def test_read_snapshots_marks_exact_staleness_boundary_and_names_malformed_file(
 
 def test_evaluate_covers_policy_branches_ties_margins_and_null_windows() -> None:
     assert evaluate(_snapshot()).level == "ok"
-    assert evaluate(_snapshot(five_hour=UsageWindow(70, 1), seven_day=None)).level == "approaching"
-    assert evaluate(_snapshot(five_hour=UsageWindow(85, 11), seven_day=None)).resume_at_epoch == 11
-    tied = evaluate(_snapshot(five_hour=UsageWindow(90, 11), seven_day=UsageWindow(97, 22)))
+    assert evaluate(_snapshot(five_hour=UsageWindow(80, 1), seven_day=None)).level == "approaching"
+    assert evaluate(_snapshot(five_hour=UsageWindow(92, 11), seven_day=None)).resume_at_epoch == 11
+    tied = evaluate(_snapshot(five_hour=UsageWindow(94, 11), seven_day=UsageWindow(97, 22)))
     assert (tied.level, tied.binding_window, tied.resume_at_epoch) == ("pause", "7d", 22)
     margin = evaluate(_snapshot(five_hour=UsageWindow(95, 11), seven_day=UsageWindow(95, 22)))
     assert margin.binding_window == "5h"
@@ -245,8 +245,8 @@ def test_codex_snapshot_errors_for_deadline_missing_binary_missing_result_and_no
 
 
 def test_evaluate_grouped_attributes_fresh_account_verdicts_to_stale_siblings() -> None:
-    hot_one = _snapshot(session_id="hot-one", account="hot@example.com", five_hour=UsageWindow(91, 10))
-    hot_two = _snapshot(session_id="hot-two", account="hot@example.com", five_hour=UsageWindow(91, 10))
+    hot_one = _snapshot(session_id="hot-one", account="hot@example.com", five_hour=UsageWindow(93, 10))
+    hot_two = _snapshot(session_id="hot-two", account="hot@example.com", five_hour=UsageWindow(93, 10))
     both_fresh = evaluate_grouped([(hot_one, True), (hot_two, True)], policy=UsagePolicy())
     assert [(item.level, item.self_fresh, item.account_attributed) for item in both_fresh] == [
         ("pause", True, False),
@@ -263,7 +263,7 @@ def test_evaluate_grouped_attributes_fresh_account_verdicts_to_stale_siblings() 
 
 def test_evaluate_grouped_keeps_accounts_separate_and_unknown_without_fresh_readings() -> None:
     stale = _snapshot(session_id="stale", account="stale@example.com", five_hour=UsageWindow(99, 10))
-    hot = _snapshot(session_id="hot", account="hot@example.com", five_hour=UsageWindow(91, 10))
+    hot = _snapshot(session_id="hot", account="hot@example.com", five_hour=UsageWindow(93, 10))
     okay = _snapshot(session_id="okay", account="okay@example.com", five_hour=UsageWindow(10, 10))
     empty = _snapshot(session_id="empty", account="", five_hour=UsageWindow(10, 10))
     grouped = evaluate_grouped([(stale, False), (hot, True), (okay, True), (empty, False)], policy=UsagePolicy())
@@ -303,7 +303,7 @@ def test_evaluate_grouped_still_shares_a_verdict_across_the_same_real_account() 
 
 
 def test_evaluate_grouped_propagates_approaching_verdict() -> None:
-    fresh = _snapshot(session_id="fresh", account="shared@example.com", five_hour=UsageWindow(70, 10))
+    fresh = _snapshot(session_id="fresh", account="shared@example.com", five_hour=UsageWindow(80, 10))
     stale = _snapshot(session_id="stale", account="shared@example.com", five_hour=UsageWindow(1, 10))
     grouped = evaluate_grouped([(fresh, True), (stale, False)], policy=UsagePolicy())
     assert [(item.level, item.account_attributed) for item in grouped] == [("approaching", False), ("approaching", True)]

@@ -157,7 +157,7 @@ def test_full_pause_sequence_checkpoint_stop_and_verified_quiescence(tmp_path: P
     transcript = tmp_path / "session.jsonl"
     monkeypatch.setenv("CHITRA_LOCAL_HOST", "tophand")
     upsert_goal(goals_root, _goal())
-    _write_snapshot(usage_dir, _snapshot(session_id="s1", tmux_session="lane1", five_hour_pct=91, ts=_iso()))
+    _write_snapshot(usage_dir, _snapshot(session_id="s1", tmux_session="lane1", five_hour_pct=93, ts=_iso()))
 
     report1 = sweep(usage_dir=usage_dir, host="tophand", goals_root=goals_root, queue_dir=queue_dir, policy=FAST_POLICY, now=_now())
     assert get_goal(goals_root, "tophand:lane1:0.0").status == "held"  # frozen immediately
