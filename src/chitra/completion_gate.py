@@ -3,8 +3,8 @@ claims against two concrete, checkable behaviors:
 
 (a) an open/in-progress todo-list item surviving under a "done"/"complete"
     claim -- a deferral being hidden.
-(b) a self-declared "done" claim with no deploy+live-verify evidence and no
-    operator-authorized close -- a fake-done claim.
+(b) a self-declared "done" claim missing deploy or live-verify evidence -- a
+    fake-done claim.
 
 This module is pure, deterministic logic: string/keyword matching and list
 comprehensions, no NLP, no LLM calls, no interpretation of what the text
@@ -137,11 +137,12 @@ def evaluate_completion_claim(
     """Audit a "done"/"complete" claim against todo residue, deferral
     language, and deploy+live-verify evidence.
 
-    ``evidence_gap`` is True iff the done-claim lacks BOTH deploy evidence
-    and live-verify evidence -- matching the fleet's four-rung completion
-    doctrine, under which health/status probes alone never count as
-    live-verify evidence (that determination is the caller's responsibility;
-    this function only takes the two booleans as given).
+    ``evidence_gap`` is True iff any evidence named by
+    ``policy.required_evidence`` is absent. The shipped policy requires both
+    deploy and live-verify evidence, matching the fleet's four-rung completion
+    doctrine. Health/status probes alone never count as live-verify evidence
+    (that determination is the caller's responsibility; this function only
+    takes the two booleans as given).
 
     This function never closes or dismisses the claim -- it only classifies.
     A ``CLEAN`` verdict is proof (empty residue, no deferral matches, both
