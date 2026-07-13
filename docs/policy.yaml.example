@@ -47,11 +47,11 @@ dispatch:
 # template to override the shipped defaults; chitra never pauses or resumes a lane.
 # usage:
 #   # Graceful-pause thresholds for Claude 5-hour/7-day windows (or Codex primary/secondary).
-#   pause_5h_pct: 85.0
-#   pause_7d_pct: 92.0
+#   pause_5h_pct: 92.0
+#   pause_7d_pct: 95.0
 #   # Approaching thresholds: the monitor should avoid assigning new work.
-#   warn_5h_pct: 70.0
-#   warn_7d_pct: 85.0
+#   warn_5h_pct: 80.0
+#   warn_7d_pct: 90.0
 #   # Dynamic running-lane cap; null disables deterministic throttle accounting.
 #   max_running: null
 #   # Whether the monitor may automatically re-arm timed holds after reset.

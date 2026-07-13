@@ -58,10 +58,10 @@ class DispatchPolicy(BaseModel):
 class UsagePolicy(BaseModel):
     """Operator-configurable thresholds and concurrency controls for usage."""
 
-    pause_5h_pct: float = 85.0
-    pause_7d_pct: float = 92.0
-    warn_5h_pct: float = 70.0
-    warn_7d_pct: float = 85.0
+    pause_5h_pct: float = 92.0
+    pause_7d_pct: float = 95.0
+    warn_5h_pct: float = 80.0
+    warn_7d_pct: float = 90.0
     max_running: int | None = None
     auto_resume: bool = True
 

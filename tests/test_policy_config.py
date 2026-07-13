@@ -25,6 +25,14 @@ def test_unconfigured_policy_is_the_current_shipped_behavior(monkeypatch: pytest
     ]
     assert policy.dispatch.extra_idle_input_regexes == []
     assert policy.usage == UsagePolicy()
+    assert policy.usage.model_dump() == {
+        "pause_5h_pct": 92.0,
+        "pause_7d_pct": 95.0,
+        "warn_5h_pct": 80.0,
+        "warn_7d_pct": 90.0,
+        "max_running": None,
+        "auto_resume": True,
+    }
 
 
 def test_usage_policy_loads_overrides_and_rejects_invalid_values(tmp_path: Path) -> None:

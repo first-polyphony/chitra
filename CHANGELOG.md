@@ -4,6 +4,11 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- Raised the default graceful-pause thresholds to 92% for the five-hour
+  window and 95% for the seven-day window, with approaching warnings at
+  80% and 90%, respectively.
+
 ## [0.8.1] - 2026-07-12
 
 A hardening patch, not a feature release. An independent adversarial review
