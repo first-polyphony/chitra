@@ -41,6 +41,25 @@ capabilities:
         params: []
         mutates: true
 
+  - name: sweepd
+    kind: daemon
+    purpose: Produce a compact delta digest from already-digested fleet state.
+    when_to_use: Run as the supervised sensing daemon so the foreground monitor can consume one small digest per sweep.
+    authority:
+      level: record
+      grants:
+        - Read compact Chitra state stores and write a delta digest plus its local baseline.
+      excludes:
+        - Read conversation transcripts or invoke an LLM.
+        - Dispatch messages, merge, approve, or modify pull requests.
+    default_enabled: true
+    commands:
+      - name: chitra-sweepd
+        description: Start the deterministic fleet-state digest daemon.
+        argv: [chitra-sweepd]
+        params: []
+        mutates: true
+
   - name: draft-scanner
     kind: daemon
     purpose: Detect unsubmitted drafts in configured tmux input boxes.
