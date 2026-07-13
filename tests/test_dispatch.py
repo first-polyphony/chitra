@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from chitra.dispatch import (
+    DISPATCH_VERIFY_WAIT_SECONDS,
     DispatchOrder,
     DispatchStatus,
     LaneLock,
@@ -793,6 +794,41 @@ def test_dispatch_to_tmux_sends_a_clean_order(tmp_path: Path) -> None:
         sleep=lambda _seconds: None,
     )
     assert result.status == DispatchStatus.SENT
+
+
+def test_dispatch_to_tmux_waits_through_an_observed_slow_transcript_flush(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    session_dir = projects_root / "some-project"
+    session_dir.mkdir(parents=True)
+    transcript = session_dir / "abc123.jsonl"
+    waits: list[float] = []
+
+    def runner(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["tmux", "capture-pane"]:
+            return fake_completed(0, "ubuntu@host:~$ ", "")
+        return fake_completed(0, "", "")
+
+    def input_runner(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        return fake_completed(0, "", "")
+
+    def complete_delayed_flush(seconds: float) -> None:
+        waits.append(seconds)
+        transcript.write_text(json.dumps({"text": "Resume the F9 objective."}) + "\n", encoding="utf-8")
+
+    order = DispatchOrder(order_id="o1", session_ref="localhost:f9:0.0", nudge="Resume the F9 objective.")
+    result = dispatch_to_tmux(
+        order,
+        runner=runner,
+        input_runner=input_runner,
+        local_extra={"localhost"},
+        projects_root=projects_root,
+        sleep=complete_delayed_flush,
+    )
+
+    assert waits == [DISPATCH_VERIFY_WAIT_SECONDS]
+    assert DISPATCH_VERIFY_WAIT_SECONDS == 15.0
+    assert result.status == DispatchStatus.SENT
+    assert result.transcript_path == str(transcript)
 
 
 def test_dispatch_to_tmux_delivers_to_a_fresh_session_showing_a_dim_placeholder(tmp_path: Path) -> None:
