@@ -1199,7 +1199,7 @@ def test_dispatchd_parser_exposes_policy_invalid_order_and_tuning_flags() -> Non
 def test_dispatchd_parser_uses_the_transcript_write_allowance_by_default() -> None:
     args = build_arg_parser().parse_args([])
 
-    assert args.post_paste_wait_seconds == DISPATCH_VERIFY_WAIT_SECONDS == 1.0
+    assert args.post_paste_wait_seconds == DISPATCH_VERIFY_WAIT_SECONDS == 15.0
 
 
 def test_malformed_routing_config_raises_clearly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
