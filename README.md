@@ -2,7 +2,7 @@
 
 Deterministic, systemd-supervised relay and dedup daemons for delivering text into `tmux`-hosted AI-agent sessions and watching their state. Built for fleets of Claude Code sessions; the tmux-level mechanics are agent-agnostic.
 
-**Scope:** chitra delivers messages to, and observes the state of, LLM-driven sessions in tmux. Delivery, queueing, evidence checks, and state transitions remain deterministic. The single bounded reasoning boundary is goal enforcement: at a watched lane's turn-end, `chitra.goal_enforcement` launches independent `claude -p` reviewer processes to compare that lane's direction, questions, and completion posture with its frozen goal. Reviewers never draft Chitra's response, and their identifiers, counts, and verdicts are retained only in Chitra's own logs—never pasted into the monitored lane.
+**Scope:** chitra delivers messages to, and observes the state of, LLM-driven sessions in tmux. Delivery, queueing, evidence checks, and state transitions remain deterministic. The single bounded reasoning boundary is goal enforcement: when a watched lane ends a turn with a completion claim, `chitra.goal_enforcement` launches independent `claude -p` reviewer processes to compare that lane's direction, questions, and completion posture with its frozen goal. Reviewers never draft Chitra's response, and their identifiers, counts, and verdicts are retained only in Chitra's own logs—never pasted into the monitored lane.
 
 ## Quickstart
 
@@ -29,7 +29,7 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.goal_enforcement`** — freezes the watched session's current goal, launches each adversarial reviewer in a separate process, requires unanimous acceptance, rejects stale or tampered bindings, and automatically restarts a redirected review with one reviewer while recording the restart in goal history. Spend, credentials, irreversible actions, and strategy redirects remain operator-gated even after unanimous acceptance.
 - **`chitra.reasoning`** — goal-first decision triangulation whose public dispatch record is the immutable `DecisionAttestation`. The attestation binds exact approved text, frozen-goal and corpus lineage, the watched-session review signal, and the operator-gate outcome. `dispatchd` logs it to Chitra's private `attestations.jsonl`; only the approved text is pasted.
 - **`chitra.completion_gate`** — citation-bearing completion review. Deploy and live-verification claims must retain concrete SHA, path, or probe citations; completed todo items need per-item proof; and delivery briefs must answer what was built, what it does, and whether it actually works.
-- **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs watched-session and completion review automatically. A turn without a completion claim becomes `turn-finished-unverified`, while a disputed claim becomes `completion-disputed`, so neither can render idle-green.
+- **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs the deterministic completion audit, while only a completion claim launches isolated watched-session reviewers. A turn without a completion claim becomes `turn-finished-unverified`, while a disputed claim becomes `completion-disputed`, so neither can render idle-green.
 - **`chitra.account_registry`** — a freshness-bounded fact table of which account each tracked lane was last observed under. Used by `chitra.rate_limit_guard` to surface a missing usage snapshot or a mid-session account change as an operator escalation, instead of silently ignoring it or silently merging it with an unrelated lane.
 - **`chitra.rate_limit_state`** — the durable transaction outbox behind `chitra.rate_limit_guard`'s pause/resume state machine (see below). A crash between sweeps, or between any two phases, is never a data-loss event: the next sweep re-reads the transaction and continues from wherever it stopped.
 - **`chitra.rate_limit_guard`** (`chitra-rate-limit-guard`, `default_enabled: false`) — advances a durable pause/resume transaction for a session nearing its provider rate/session limit through `pause_requested → checkpoint_sent → stop_sent → awaiting_quiescence → held → resume_requested → resume_sent`. A checkpoint nudge is enqueued and confirmed delivered, then a second, deterministic `/goal clear` stop order is enqueued and confirmed, then the target session's own transcript is watched (across sweeps, no in-process sleeping) until it has gone quiet — only then is the lane marked `held`: a graceful pause proves the turn stopped, it does not just label the goal held. A resume enqueues its re-arm nudge and only clears the hold once that delivery is confirmed, then requeues any orders `chitra.dispatchd` deferred while the lane was held. Every waiting phase is bounded by a configurable deadline with bounded retries, then escalates for operator visibility without ever dropping the freeze. Run it under an external timer (systemd timer / cron) once per host — it is not a daemon and adds none. Codex host-wide pause fan-out is an explicit, documented, fail-closed gap (no per-lane Codex usage snapshot exists yet).
@@ -42,6 +42,23 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.board`** — the deterministic, operator-facing board renderer. It strictly validates the full facts schema, renders the bundled interactive HTML to `index.html` atomically, and records result freshness in `health.json`.
 - **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so a reader with the signing key can verify an exact recorded delivery. Absence is only conventional evidence; see "Message tag and delivery authentication" below.
 - **`chitra.convlog`** — a deterministic operator-brief validator, BLUF renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
+
+### Watchd reviewer configuration
+
+The normal completion-claim review round uses two isolated reviewers and pins
+the subprocess model to `claude-haiku-4-5`. Operators can tune the round down
+to one reviewer or point it at a credential wrapper without changing code:
+
+- `CHITRA_WATCHD_REVIEWER_MODEL` / `--reviewer-model` — reviewer model
+  (default `claude-haiku-4-5`).
+- `CHITRA_WATCHD_REVIEWER_COUNT` / `--reviewer-count` — normal-round reviewer
+  count, which must be at least 1 (default 2). A goal redirect still restarts
+  with exactly one reviewer.
+- `CHITRA_WATCHD_REVIEWER_COMMAND` / `--reviewer-command` — subprocess command
+  (default `claude`).
+
+The subprocess inherits the watchd service environment, including `HOME` and
+`CLAUDE_CONFIG_DIR`; provisioning that credential path belongs to deployment.
 
 ## Operator brief conversation log
 
