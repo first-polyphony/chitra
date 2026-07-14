@@ -5,6 +5,10 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 ## [Unreleased]
 
 ### Added
+- A durable per-pause recovery ledger records the held session, reason,
+  existing transcript pointer, goal-derived resume note, and reset time.
+  Attached operator sessions remain pausable; only Chitra's own Trailhead
+  `monitor` and `boomtown` monitor/harness sessions are excluded.
 - Forced completion review at every detected lane turn-end. `watchd` now
   distinguishes an ordinary finished turn from a completion claim, requires
   concrete deploy/live citations and per-item verification for a clean claim,
