@@ -1,15 +1,29 @@
 # Review log
 
-## 2026-07-09 — completion gate (v1 feature)
+## 2026-07-14 — forced completion and goal-enforcement gate (v0.8.2)
+
+`watchd` now treats a finished pane turn as a mandatory event boundary. It
+runs isolated watched-session reviewers against the frozen goal and then
+classifies the turn as a completion claim or a distinct non-completion turn.
+Completion claims require citation-bearing deploy/live proof and a valid
+delivery brief; outgoing completion claims are also recognized in `dispatchd`
+without caller opt-in. `DecisionAttestation` replaces the former
+`DecisionProvenance`/`ReasonedDecision` pair and binds only the exact approved
+text that may be pasted. Review and attestation metadata stays in Chitra's own
+logs.
+
+## 2026-07-09 — completion gate v1 (historical, superseded by v0.8.2)
 
 ### What landed
 
 `src/chitra/taxonomy.json` + `src/chitra/taxonomy.py` (typed loader),
-`src/chitra/completion_gate.py` (audit logic), plus a small, opt-in wiring
+The original version landed `src/chitra/completion_gate.py` plus opt-in wiring
 change to `src/chitra/dispatch.py` (`DispatchOrder`'s three new optional
 `completion_*` fields, a new `DispatchStatus.COMPLETION_DISPUTE` member) and
 `src/chitra/dispatchd.py` (`process_one_order` runs the audit before
-delivery when an order opts in). See `docs/evasion-taxonomy.md` for what the
+delivery when an order opted in). That optional, boolean-evidence contract is
+no longer current; it is retained here only as design history. See
+`docs/evasion-taxonomy.md` for what the
 taxonomy is and its honest scope note.
 
 ### Why this was built now
@@ -49,7 +63,7 @@ absence of verification as permanent.
   Rather than retrofit that minimal contract (which would be a bigger,
   riskier change touching an existing, tested parsing path), this feature
   adds a small, standalone marker scoped only to completion-gate callers.
-- **Wiring lives in `dispatchd.py`, via optional `DispatchOrder` fields, not
+- **Historical v1 wiring lived in `dispatchd.py`, via optional `DispatchOrder` fields, not
   a rewrite of `dispatch.py`'s core paste/verify logic.** `dispatchd.py` is
   the daemon that already owns the "before delivery, check something, and
   possibly block" pattern (see its existing lane-lock and
@@ -57,10 +71,11 @@ absence of verification as permanent.
   check of that same shape, run before `dispatch_to_tmux` is ever called.
   `dispatch.py`'s hardened tmux mechanics (paste-buffer bug fixes,
   copy-mode detection, transcript-grep verification) are untouched. The
-  three new fields on `DispatchOrder` are optional with safe defaults
+  The three v1 fields on `DispatchOrder` were optional with safe defaults
   (`completion_todo_items: list[TodoItem] | None = None`), so every existing
   caller and every existing order is completely unaffected unless it
-  explicitly opts in by setting `completion_todo_items`.
+  explicitly opted in by setting `completion_todo_items`. v0.8.2 replaced
+  the booleans with cited evidence and added the forced `watchd` boundary.
 - **A new `DispatchStatus.COMPLETION_DISPUTE` member, not reuse of
   `BLOCKED`.** A disputed completion claim is a distinct outcome from "an
   operator draft is pending in the pane" (the existing `BLOCKED` case) — it
@@ -72,8 +87,8 @@ absence of verification as permanent.
   `COMPLETION_DISPUTE` result, or log a `CLEAN` audit as the proof an
   operator can use to authorize a close). Nothing in this change adds a
   close/dismiss/auto-resolve path anywhere. This matches `docs/DESIGN.md`'s
-  "What chitra is not" scope statement — deterministic plumbing, not
-  judgment.
+  deterministic completion-audit contract; isolated goal review is a separate
+  bounded input signal.
 - **`scan_deferral_language` is explicitly simple substring matching, not
   NLP.** The docstring says so directly; false positives (a phrase matching
   in an unrelated context) are an accepted tradeoff for determinism and

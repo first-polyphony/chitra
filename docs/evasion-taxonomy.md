@@ -22,17 +22,22 @@ Pydantic models). Consumer: `src/chitra/completion_gate.py`.
 
 ## How the completion gate uses it
 
-`chitra.completion_gate.evaluate_completion_claim` audits a "done"/"complete"
-claim against two concrete, checkable behaviors:
+`watchd` calls `evaluate_turn_end` automatically whenever a pane finishes a
+turn. A turn with no completion claim is recorded as finished but unverified;
+a completion claim is passed to `evaluate_completion_claim` and audited
+against concrete, checkable behaviors:
 
 1. An open/in-progress todo-list item surviving under a done claim
    (`check_todo_residue`) — a deferral being hidden.
-2. A self-declared done claim with no deploy+live-verify evidence
-   (`evidence_gap`) — a fake-done claim, with no operator-authorized close.
+2. A self-declared done claim with no concrete deploy SHA and live probe/log
+   citations (`evidence_gap`) — a bare boolean or "CI evidence" assertion does
+   not count.
+3. Missing per-item verification, an invalid three-question delivery brief,
+   or a blocked-todo posture with no disclosed open ask/blocker.
 
 `scan_deferral_language` additionally does simple, case-insensitive substring
-matching against a fixed phrase list (`"you'll need to"`, `"TODO"`, `"out of
-scope"`, `"deferred"`, etc.) drawn from the `DEFERRAL_STUB` cue text.
+matching against a fixed phrase list (`"you'll need to"`, `"TODO"`,
+`"conditionally healthy"`, `"parse-only"`, `"CI evidence"`, etc.).
 
 ## Honest scope note
 

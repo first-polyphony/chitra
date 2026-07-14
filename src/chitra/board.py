@@ -77,7 +77,9 @@ ROSTER_MARKERS: dict[GoalStatus, str] = {
     "held": "🟡",
     "idle": "🟡",
     "working": "🟢",
-    "done-pending-verification": "🟢",
+    "turn-finished-unverified": "🟡",
+    "completion-disputed": "🔴",
+    "done-pending-verification": "🟡",
     "done-pending-close": "🟢",
 }
 
@@ -124,7 +126,7 @@ class ArtifactRosterRecord(Protocol):
 
 
 def marker_for(status: GoalStatus) -> str:
-    """Return the status-only marker, rejecting status outside the six states."""
+    """Return the status-only marker, rejecting status outside the known states."""
     try:
         return ROSTER_MARKERS[status]
     except KeyError as exc:
@@ -136,14 +138,14 @@ def compute_marker(record: RosterRecord) -> str:
 
     Open asks or ``blocked`` are red first because they need a named human
     unblock. ``held`` and ``idle`` are yellow because they are idle by design.
-    ``working`` and the active Chitra completion states are green. Any other
-    status is uncolorable.
+    A finished-but-unverified turn is yellow and a completion dispute is red;
+    only genuine work or a verified completion awaiting close is green.
     """
-    if record.open_asks or record.status == "blocked":
+    if record.open_asks or record.status in ("blocked", "completion-disputed"):
         return "🔴"
-    if record.status in ("held", "idle"):
+    if record.status in ("held", "idle", "turn-finished-unverified", "done-pending-verification"):
         return "🟡"
-    if record.status in ("working", "done-pending-verification", "done-pending-close"):
+    if record.status in ("working", "done-pending-close"):
         return "🟢"
     raise ValueError(f"uncolorable status: {record.status}")
 

@@ -17,6 +17,7 @@ import chitra.ledger as ledger_mod
 from chitra.dispatch import DISPATCH_VERIFY_WAIT_SECONDS, DispatchOrder, DispatchResult, DispatchStatus
 from chitra.dispatchd import build_arg_parser, main, process_one_order, requeue_deferred_for_session, resolve_session_prefixes, run_once
 from chitra.goals import GoalRecord, hold_goal, upsert_goal
+from chitra.reasoning import DecisionAttestation
 from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
 
@@ -52,6 +53,63 @@ def test_run_once_processes_pending_orders_and_moves_them(tmp_path: Path, monkey
     assert (queue_dir / "results" / "ord-1.json").exists()
     # A successful send is signed and logged automatically, no extra step.
     assert (tmp_path / "ledger.jsonl").exists()
+
+
+def test_reasoned_order_logs_attestation_our_side_without_leaking_metadata_into_lane_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_nudges: list[str] = []
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        seen_nudges.append(order.nudge)
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    approved = "Use the existing typed boundary."
+    attestation = DecisionAttestation.create(
+        outcome="answer",
+        message_kind="reasoned_answer",
+        approved_text=approved,
+        source="goal",
+        goal_contract_id="sha256:" + "1" * 64,
+        goal_version=1,
+        goal_fields=("scope",),
+        corpus_id="sha256:" + "2" * 64,
+        confidence_basis="the frozen goal directly determines this answer",
+        review_signal_id="sha256:" + "3" * 64,
+        review_verdict="accept",
+        reviewer_count=2,
+        autonomy="autonomous",
+        operator_confirmation_required=False,
+    )
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(
+            order_id="attested",
+            session_ref="localhost:s:0.0",
+            nudge=approved,
+            message_kind="reasoned_answer",
+            decision_attestation=attestation,
+        ),
+    )
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "delivery.jsonl",
+        ledger_key_path=tmp_path / "ledger.key",
+        attestation_ledger_path=tmp_path / "attestations.jsonl",
+    )[0]
+
+    entry = ledger_mod.AttestationLedgerEntry.model_validate_json(
+        (tmp_path / "attestations.jsonl").read_text(encoding="utf-8")
+    )
+    assert entry.attestation == attestation
+    assert result.decision_attestation_id == attestation.attestation_id
+    assert seen_nudges == [approved]
+    assert attestation.attestation_id not in seen_nudges[0]
+    assert "reviewer" not in seen_nudges[0]
 
 
 def test_remote_delivery_writes_a_ledger_entry_same_as_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1255,10 +1313,12 @@ def test_policy_file_is_wired_to_completion_gate(tmp_path: Path, monkeypatch: py
         DispatchOrder(
             order_id="policy-gate",
             session_ref="localhost:s:0.0",
-            nudge="complete",
+            nudge=(
+                "What was built: The configured policy gate was completed.\n"
+                "What it does: It exercises the configured evidence requirements.\n"
+                "Does it actually work: Local probe status=200 with 1 check; /tmp/policy-proof.json."
+            ),
             completion_todo_items=[],
-            completion_has_deploy_evidence=False,
-            completion_has_live_verify_evidence=False,
         ),
     )
 

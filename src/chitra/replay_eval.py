@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-from .completion_gate import TodoItem, evaluate_completion_claim
+from .completion_gate import CompletionEvidence, TodoItem, evaluate_completion_claim
 from .dispatch import directive_voice_violation
 from .policy_config import PolicyConfig, load_policy_config
 from .taxonomy import load_taxonomy
@@ -22,8 +22,9 @@ class CompletionFixtureCase(BaseModel):
     id: str
     todo_items: list[TodoItem]
     transcript_text: str
-    has_deploy_evidence: bool
-    has_live_verify_evidence: bool
+    evidence: list[CompletionEvidence]
+    open_asks: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
     expected_verdict: Literal["CLEAN", "COMPLETION_DISPUTE"]
 
 
@@ -69,10 +70,11 @@ def evaluate_fixtures(cases: list[FixtureCase], policy: PolicyConfig) -> dict[st
             verdict = evaluate_completion_claim(
                 case.todo_items,
                 case.transcript_text,
-                case.has_deploy_evidence,
-                case.has_live_verify_evidence,
+                case.evidence,
                 taxonomy,
                 policy=policy.completion_gate,
+                open_asks=case.open_asks,
+                blockers=case.blockers,
             ).verdict
             if verdict == case.expected_verdict:
                 correct += 1

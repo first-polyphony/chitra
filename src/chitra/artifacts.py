@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -29,6 +30,16 @@ REVIEW_STATUSES: tuple[ReviewStatus, ...] = ("unreviewed", "reviewed")
 ARTIFACT_URL_PREFIX = "https://claude.ai/code/artifact/"
 SCHEMA = "chitra.artifacts.v1"
 
+_BRIEF_LABEL_RE = re.compile(
+    r"(?im)^\s*(what was built|what it does|does it actually work)\s*:\s*",
+)
+_PROCESS_ONLY_RE = re.compile(r"\b(i (?:reviewed|worked|investigated|started|followed)|steps? (?:taken|performed))\b", re.I)
+_WORK_EVIDENCE_RE = re.compile(
+    r"(?:\b[0-9a-f]{7,40}\b|(?:^|\s)(?:/|\./)[^\s]+|\b\d+\s+(?:passed|requests?|checks?)\b|"
+    r"\b(?:status|http|probe|exit)\s*[=: ]\s*\d+\b)",
+    re.I,
+)
+
 
 class ArtifactValidationError(ValueError):
     """Raised when an artifact record is not valid monitor doctrine."""
@@ -39,6 +50,40 @@ class ArtifactNotFoundError(KeyError):
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryBrief:
+    """The three outcome questions required before an artifact is recorded."""
+
+    what_was_built: str
+    what_it_does: str
+    does_it_actually_work: str
+
+
+def validate_delivery_brief(brief: str) -> DeliveryBrief:
+    """Require outcome content and concrete work evidence, not narration."""
+    text = brief.strip()
+    matches = list(_BRIEF_LABEL_RE.finditer(text))
+    sections: dict[str, str] = {}
+    names = {
+        "what was built": "what_was_built",
+        "what it does": "what_it_does",
+        "does it actually work": "does_it_actually_work",
+    }
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[names[match.group(1).lower()]] = text[match.end() : end].strip()
+    missing = [label for label, field in names.items() if not sections.get(field)]
+    if missing:
+        raise ArtifactValidationError("brief must answer what was built, what it does, and does it actually work")
+    if any(len(value.split()) < 3 for value in sections.values()):
+        raise ArtifactValidationError("brief answers must contain concrete outcome detail")
+    if all(_PROCESS_ONLY_RE.search(value) for value in sections.values()):
+        raise ArtifactValidationError("brief is process narration rather than a delivery result")
+    if not _WORK_EVIDENCE_RE.search(sections["does_it_actually_work"]):
+        raise ArtifactValidationError("does-it-actually-work must cite a SHA, path, probe result, or numbered check output")
+    return DeliveryBrief(**sections)
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactRecord:
     """The canonical persisted artifact metadata and explicit review state."""
 
@@ -46,6 +91,7 @@ class ArtifactRecord:
     title: str
     kind: ArtifactKind
     source: str
+    brief: str = ""
     published_at: str = ""
     updated_at: str = ""
     review_status: ReviewStatus = "unreviewed"
@@ -58,6 +104,7 @@ class ArtifactRecord:
             "title": self.title,
             "kind": self.kind,
             "source": self.source,
+            "brief": self.brief,
             "published_at": self.published_at,
             "updated_at": self.updated_at,
             "review_status": self.review_status,
@@ -135,6 +182,7 @@ def _record_from_dict(payload: object) -> ArtifactRecord:
         title=values["title"],
         kind=cast(ArtifactKind, values["kind"]),
         source=values["source"],
+        brief=payload.get("brief", "") if isinstance(payload.get("brief", ""), str) else "",
         published_at=values["published_at"],
         updated_at=values["updated_at"],
         review_status=cast(ReviewStatus, values["review_status"]),
@@ -201,6 +249,7 @@ def list_unreviewed_artifacts(root: Path | None = None) -> list[ArtifactRecord]:
 
 def upsert_artifact(root: Path | None, rec: ArtifactRecord) -> ArtifactRecord:
     """Atomically record an artifact, resetting its review state on every upsert."""
+    validate_delivery_brief(rec.brief)
     issues = validate_artifact(rec)
     if issues:
         raise ArtifactValidationError("; ".join(issues))
@@ -211,6 +260,7 @@ def upsert_artifact(root: Path | None, rec: ArtifactRecord) -> ArtifactRecord:
         title=rec.title,
         kind=rec.kind,
         source=rec.source,
+        brief=rec.brief,
         published_at=existing.published_at if existing is not None else now,
         updated_at=now,
     )
@@ -253,6 +303,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     record_command.add_argument("--title", required=True)
     record_command.add_argument("--kind", choices=ARTIFACT_KINDS, required=True)
     record_command.add_argument("--source", required=True)
+    record_command.add_argument("--brief", required=True)
 
     reviewed_command = commands.add_parser("mark-reviewed", help="Mark an existing artifact as reviewed.")
     add_root(reviewed_command)
@@ -278,7 +329,13 @@ def main(argv: list[str] | None = None) -> int:
             _print_record(
                 upsert_artifact(
                     args.root,
-                    ArtifactRecord(url=args.url, title=args.title, kind=cast(ArtifactKind, args.kind), source=args.source),
+                    ArtifactRecord(
+                        url=args.url,
+                        title=args.title,
+                        kind=cast(ArtifactKind, args.kind),
+                        source=args.source,
+                        brief=args.brief,
+                    ),
                 )
             )
         elif args.command == "mark-reviewed":

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from chitra.dispatch import DispatchOrder
+from chitra.goal_enforcement import SessionReviewSignal, WatchedSessionBehavior, freeze_goal
 from chitra.goals import GoalRecord
 from chitra.reasoning import (
     DecisionQuestion,
@@ -58,11 +59,11 @@ def test_goal_judgment_wins_without_principle_or_oracle() -> None:
         oracle=oracle,
     )
 
-    assert decision.answer == "Open a pull request; do not deploy."
-    assert decision.provenance.source == "goal"
-    assert decision.provenance.goal_version == 3
-    assert decision.provenance.goal_fields == ["done_when", "scope"]
-    assert decision.provenance.principle_ids == []
+    assert decision.approved_text == "Open a pull request; do not deploy."
+    assert decision.source == "goal"
+    assert decision.goal_version == 3
+    assert decision.goal_fields == ("done_when", "scope")
+    assert decision.principle_ids == ()
     assert calls == []
 
 
@@ -80,9 +81,9 @@ def test_principle_fills_goal_gap_without_oracle() -> None:
         oracle=oracle,
     )
 
-    assert decision.provenance.source == "principle"
-    assert decision.provenance.principle_ids == ["A04"]
-    assert "docs/agent_docs/rules/must-rules.md" in decision.provenance.principle_citations
+    assert decision.source == "principle"
+    assert decision.principle_ids == ("A04",)
+    assert "docs/agent_docs/rules/must-rules.md" in decision.principle_citations
     assert calls == []
 
 
@@ -109,8 +110,8 @@ def test_oracle_is_called_only_after_goal_and_principles_are_insufficient() -> N
         oracle=oracle,
     )
 
-    assert decision.provenance.source == "oracle-escalated"
-    assert decision.provenance.oracle_escalated is True
+    assert decision.source == "oracle-escalated"
+    assert decision.oracle_escalated is True
     assert len(calls) == 1
     assert all(match.confidence < 0.75 for match in calls[0].principle_matches)
     assert len(decision.insufficiency_reasons) == 2
@@ -131,7 +132,7 @@ def test_routine_insufficiency_abstains_without_oracle() -> None:
     )
 
     assert decision.outcome == "abstain"
-    assert decision.provenance.source == "abstained"
+    assert decision.source == "abstained"
     assert calls == []
 
 
@@ -163,7 +164,7 @@ def test_incomplete_goal_fails_before_any_reasoning() -> None:
         )
 
 
-def test_reasoned_dispatch_requires_exact_answer_and_provenance() -> None:
+def test_reasoned_dispatch_requires_exact_answer_and_attestation() -> None:
     decision = DecisionReasoner(PrinciplesIndex()).decide(
         _goal(),
         GoalJudgment(
@@ -175,31 +176,98 @@ def test_reasoned_dispatch_requires_exact_answer_and_provenance() -> None:
         DecisionQuestion(text="Should this be deployed?"),
     )
 
+    confirmed = decision.with_operator_confirmation()
     order = DispatchOrder(
         order_id="reasoned-1",
         session_ref="localhost:lane:0.0",
-        nudge=decision.answer,
-        decision_kind="answer",
-        reasoning=decision,
+        nudge=confirmed.approved_text,
+        message_kind="reasoned_answer",
+        decision_attestation=confirmed,
     )
-    assert order.reasoning is not None
-    assert order.reasoning.provenance.source == "goal"
+    assert order.decision_attestation is not None
+    assert order.decision_attestation.source == "goal"
 
     with pytest.raises(ValueError, match="exactly match"):
         DispatchOrder(
             order_id="reasoned-2",
             session_ref="localhost:lane:0.0",
             nudge="mutated after review",
-            decision_kind="answer",
-            reasoning=decision,
+            message_kind="reasoned_answer",
+            decision_attestation=confirmed,
         )
 
 
 def test_reasoned_dispatch_cannot_omit_attestation() -> None:
-    with pytest.raises(ValueError, match="requires reasoning provenance"):
+    with pytest.raises(ValueError, match="requires decision_attestation"):
         DispatchOrder(
             order_id="reasoned-3",
             session_ref="localhost:lane:0.0",
             nudge="Unattested autonomous answer",
-            decision_kind="answer",
+            message_kind="reasoned_answer",
         )
+
+
+def _accepted_review(goal: GoalRecord) -> SessionReviewSignal:
+    frozen = freeze_goal(goal)
+    behavior = WatchedSessionBehavior.from_turn(goal.session_ref, "The lane asks a bounded technical question.")
+    return SessionReviewSignal.create(
+        session_ref=goal.session_ref,
+        goal_contract_id=frozen.contract_id,
+        behavior_sha256=behavior.behavior_sha256,
+        verdict="accept",
+        reviewer_ids=("reviewer-1", "reviewer-2"),
+    )
+
+
+def test_unanimous_in_scope_technical_answer_is_autonomous_but_sensitive_actions_are_operator_gated() -> None:
+    goal = _goal()
+    judgment = GoalJudgment(
+        determines_answer=True,
+        answer="Use the existing typed boundary.",
+        goal_fields=["scope"],
+        inference="The scope directly settles this bounded implementation choice.",
+    )
+    review = _accepted_review(goal)
+    autonomous = DecisionReasoner(PrinciplesIndex()).decide(
+        goal,
+        judgment,
+        DecisionQuestion(text="May the lane use the existing typed boundary?", session_review=review),
+    )
+    assert autonomous.autonomy == "autonomous"
+    assert autonomous.operator_confirmation_required is False
+
+    for flag in ("spend", "credentials", "irreversible", "strategy_redirect"):
+        gated = DecisionReasoner(PrinciplesIndex()).decide(
+            goal,
+            judgment,
+            DecisionQuestion(
+                text="May the lane take this sensitive action?",
+                session_review=review,
+                **{flag: True},
+            ),
+        )
+        assert gated.autonomy == "operator_required"
+        assert gated.operator_confirmation_required is True
+
+    textually_gated = DecisionReasoner(PrinciplesIndex()).decide(
+        goal,
+        judgment,
+        DecisionQuestion(text="May the lane use an API key to purchase a paid plan?", session_review=review),
+    )
+    assert set(textually_gated.operator_gate_reasons) >= {"credentials", "spend"}
+
+
+def test_none_cannot_be_hashed_or_attested_as_approved_text() -> None:
+    decision = DecisionReasoner(PrinciplesIndex()).decide(
+        _goal(),
+        GoalJudgment(
+            determines_answer=True,
+            answer="A concrete answer.",
+            goal_fields=["scope"],
+            inference="The scope settles it.",
+        ),
+        DecisionQuestion(text="What is the answer?"),
+    )
+    payload = decision.model_dump(mode="python", exclude={"attestation_id", "approved_text", "approved_text_sha256"})
+    with pytest.raises(ReasoningContractError, match="approved_text"):
+        type(decision).create(approved_text=None, **payload)

@@ -19,7 +19,12 @@ from chitra.artifacts import (
     main,
     mark_reviewed,
     upsert_artifact,
+    validate_delivery_brief,
 )
+
+VALID_BRIEF = """What was built: A durable operator interview artifact.
+What it does: It records the reviewed operator findings for later use.
+Does it actually work: Render probe status=200 with 3 checks; /tmp/artifact-proof.json."""
 
 
 def _record(**changes: str) -> ArtifactRecord:
@@ -35,6 +40,7 @@ def _record(**changes: str) -> ArtifactRecord:
         title=values["title"],
         kind=cast(ArtifactKind, values["kind"]),
         source=values["source"],
+        brief=VALID_BRIEF,
     )
 
 
@@ -55,6 +61,8 @@ def test_record_get_round_trip_and_atomic_write(tmp_path: Path, capsys: pytest.C
                 record.kind,
                 "--source",
                 record.source,
+                "--brief",
+                record.brief,
             ]
         )
         == 0
@@ -78,6 +86,33 @@ def test_record_get_round_trip_and_atomic_write(tmp_path: Path, capsys: pytest.C
 def test_url_validation_rejects_non_claude_artifact_urls(tmp_path: Path) -> None:
     with pytest.raises(ArtifactValidationError, match="url must start"):
         upsert_artifact(tmp_path, _record(url="https://example.com/artifact/one"))
+
+
+def test_record_requires_outcome_brief_and_rejects_process_narration(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    record = _record()
+    with pytest.raises(ArtifactValidationError, match="what was built"):
+        validate_delivery_brief("I reviewed the task and followed the requested process.")
+    assert (
+        main(
+            [
+                "record",
+                "--root",
+                str(tmp_path),
+                "--url",
+                record.url,
+                "--title",
+                record.title,
+                "--kind",
+                record.kind,
+                "--source",
+                record.source,
+                "--brief",
+                "What was built: I reviewed steps.\nWhat it does: I followed steps.\nDoes it actually work: I worked on steps.",
+            ]
+        )
+        == 1
+    )
+    assert "process narration" in capsys.readouterr().err
 
 
 def test_upsert_resets_review_state_for_republished_content(tmp_path: Path) -> None:
@@ -140,7 +175,7 @@ def test_list_uses_published_time_then_url_order(tmp_path: Path, capsys: pytest.
     assert main(["list", "--root", str(tmp_path)]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert [json.loads(line)["url"] for line in lines] == [later.url, earlier.url]
-    assert all(": " not in line for line in lines)
+    assert all('"url":"' in line and '"title":"' in line for line in lines)
 
 
 def test_missing_url_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
