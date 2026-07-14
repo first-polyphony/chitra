@@ -10,6 +10,14 @@ chitra delivers messages to, and observes the state of, sessions that are themse
 
 General-purpose agent orchestration, task decomposition, and response generation remain out of scope. They belong in a higher-level system that uses chitra's delivery and audit surfaces. This bounded exception exists to make the completion and goal gates real rather than trusting the lane's own self-report.
 
+## Done-condition ownership and close boundary
+
+Done conditions belong to the operator and the material used to enroll a session. Chitra never enumerates, derives, proposes, authors, annotates, or rewrites `done_when`; post-hoc authorship would let the system fit the condition to whatever already exists. Enrollment-time interactive elicitation requires a separate operator-interaction channel and is outside this release.
+
+`chitra.close_gate` therefore has a deliberately narrower role. It deterministically reads explicit items and counts already present in `done_when`, compares them with caller-supplied delivered items or explicit `CompletionEvidence.todo_item` bindings, and blocks `chitra-goals close` before state deletion when the inventory is short. It also treats follow-on/out-of-scope/deferred/future-work language over a currently required item as the F8 close tell unless a recorded operator redirect removed that condition or the caller supplies an explicit operator acknowledgement.
+
+The companion done-condition lint is surfacing-only. At `chitra-goals set`, missing or vague aggregate conditions add one fixed persistent `open_asks` flag for the board's `AWAITING RULING` section. Enrollment is not blocked, the supplied value is unchanged, and Chitra emits no replacement or suggested enumeration.
+
 ## Distribution and packaging
 
 - **Distribution:** git-installable (`pip install git+https://...@<tag>`) for now, not yet on PyPI. chitra's current consumers install a pinned revision onto systemd hosts they provision themselves — PyPI's advantages (name-based discovery, version-range resolution for downstream packagers) don't apply yet. The build backend (hatchling, standards-based `pyproject.toml`) keeps a future PyPI release a small, mechanical step rather than a rewrite.

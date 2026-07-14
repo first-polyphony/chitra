@@ -11,7 +11,9 @@ from typing import cast
 
 import pytest
 
+from chitra import board
 from chitra.artifacts import ARTIFACT_URL_PREFIX, ArtifactRecord, upsert_artifact
+from chitra.close_gate import DONE_WHEN_OPERATOR_FLAG, CloseGateError
 from chitra.goals import (
     GoalNotFoundError,
     GoalRecord,
@@ -556,10 +558,125 @@ def test_upsert_rejects_invalid_records(tmp_path: Path, record: GoalRecord, mess
 def test_close_removes_record_and_raises_for_absent_goal(tmp_path: Path) -> None:
     stored = upsert_goal(tmp_path, _record())
 
-    assert close_goal(tmp_path, stored.session_ref) == stored
+    assert close_goal(tmp_path, stored.session_ref, delivered_items=("full suite", "static checks")) == stored
     assert list_goals(tmp_path) == []
     with pytest.raises(GoalNotFoundError):
         close_goal(tmp_path, stored.session_ref)
+
+
+def test_close_blocks_f8_shape_and_preserves_goal_until_operator_ack(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    stored = upsert_goal(
+        tmp_path,
+        _record(done_when="both the X client and the Y client pass live validation"),
+    )
+
+    with pytest.raises(CloseGateError, match="F8 close tell"):
+        close_goal(
+            tmp_path,
+            stored.session_ref,
+            delivered_items=("X client",),
+            close_notes=("Y client is follow-on.",),
+        )
+    assert get_goal(tmp_path, stored.session_ref) == stored
+
+    close_args = [
+        "close",
+        "--root",
+        str(tmp_path),
+        "--session-ref",
+        stored.session_ref,
+        "--delivered-item",
+        "X client",
+        "--close-note",
+        "Y client is follow-on.",
+    ]
+    assert main(close_args) == 1
+    assert "F8 close tell" in capsys.readouterr().err
+    assert main([*close_args, "--operator-acknowledged-item", "Y client"]) == 0
+    assert get_goal(tmp_path, stored.session_ref) is None
+
+
+def test_close_passes_after_operator_redirect_records_descope(tmp_path: Path) -> None:
+    stored = upsert_goal(
+        tmp_path,
+        _record(done_when="both the X client and the Y client pass live validation"),
+    )
+    redirected = redirect_goal(
+        tmp_path,
+        stored.session_ref,
+        reason="operator descoped the Y client",
+        done_when="The X client passes live validation",
+    )
+
+    closed = close_goal(
+        tmp_path,
+        redirected.session_ref,
+        delivered_items=("X client",),
+        close_notes=("Y client is future work.",),
+    )
+
+    assert closed.goal_version == 2
+    assert closed.goal_history[0]["done_when"] == "both the X client and the Y client pass live validation"
+    assert get_goal(tmp_path, redirected.session_ref) is None
+
+
+def test_goal_cli_set_surfaces_vague_done_when_without_rewriting(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    record = _record(done_when="representative consumers pass live validation")
+
+    assert (
+        main(
+            [
+                "set",
+                "--root",
+                str(tmp_path),
+                "--session-ref",
+                record.session_ref,
+                "--goal",
+                record.goal,
+                "--done-when",
+                record.done_when,
+                "--source",
+                record.source,
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    stored = get_goal(tmp_path, record.session_ref)
+
+    assert stored is not None
+    assert stored.done_when == "representative consumers pass live validation"
+    assert stored.open_asks == (DONE_WHEN_OPERATOR_FLAG,)
+    assert "missing or vague" in output
+    assert DONE_WHEN_OPERATOR_FLAG in board.render_roster([stored], fmt="markdown")
+
+
+def test_goal_cli_set_does_not_surface_vague_flag_for_explicit_both(tmp_path: Path) -> None:
+    record = _record(done_when="both consumer A and consumer B pass live validation")
+
+    assert (
+        main(
+            [
+                "set",
+                "--root",
+                str(tmp_path),
+                "--session-ref",
+                record.session_ref,
+                "--goal",
+                record.goal,
+                "--done-when",
+                record.done_when,
+                "--source",
+                record.source,
+            ]
+        )
+        == 0
+    )
+    stored = get_goal(tmp_path, record.session_ref)
+
+    assert stored is not None
+    assert stored.done_when == "both consumer A and consumer B pass live validation"
+    assert stored.open_asks == ()
 
 
 @pytest.mark.parametrize(

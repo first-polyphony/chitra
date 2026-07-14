@@ -126,7 +126,7 @@ def test_compute_delta_surfaces_changed_new_spec_pending_and_disappeared_lanes(t
 
     upsert_goal(tmp_path, replace(stable, status="blocked", now="waiting for quota reset confirmation"))
     new_lane = upsert_goal(tmp_path, _goal("trailhead:new:0.0"))
-    close_goal(tmp_path, pending.session_ref)
+    close_goal(tmp_path, pending.session_ref, delivered_items=("compact verified delta digest",))
     after = build_snapshot(tmp_path, flags_path=flags_path, now=NOW)
     delta = compute_delta(baseline, after, now=NOW)
     changed = {change.lane.session_ref: change.change for change in delta.changed_lanes}
