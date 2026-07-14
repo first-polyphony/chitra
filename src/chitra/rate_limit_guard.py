@@ -873,7 +873,7 @@ def clear_superseded_holds(*, goals_root: Path | None) -> list[str]:
     for record in list_goals(goals_root):
         if record.status != "held" or not record.hold_reason.startswith("superseded-by:"):
             continue
-        close_goal(goals_root, record.session_ref)
+        close_goal(goals_root, record.session_ref, administrative=True)
         remove_transaction(goals_root, record.session_ref)
         cleared.append(record.session_ref)
         logger.info("rate_limit_guard_superseded_hold_cleared", session_ref=record.session_ref)

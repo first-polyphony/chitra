@@ -9,6 +9,14 @@ All notable changes to this project are documented here, in the [Keep a Changelo
   existing transcript pointer, goal-derived resume note, and reset time.
   Attached operator sessions remain pausable; only Chitra's own Trailhead
   `monitor` and `boomtown` monitor/harness sessions are excluded.
+- Close-time inventory diffing for `chitra-goals close`, which blocks when
+  caller-stated delivered items do not satisfy the operator-stated
+  `done_when` or when a required item is relabeled as follow-on/out of scope/
+  deferred/future work without an operator-recorded descope or explicit
+  acknowledgement. `chitra-goals set` now also surfaces a persistent operator
+  flag for missing or vague aggregate done conditions while storing the input
+  unchanged. Chitra consumes done conditions; it never enumerates, proposes,
+  authors, derives, annotates, or rewrites them.
 - Forced completion review at every detected lane turn-end. `watchd` now
   distinguishes an ordinary finished turn from a completion claim, requires
   concrete deploy/live citations and per-item verification for a clean claim,

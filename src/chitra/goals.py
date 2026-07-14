@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +21,8 @@ from typing import Any, Literal, cast
 
 import structlog
 
+from chitra.close_gate import lint_done_when, require_close_inventory
+from chitra.completion_gate import CompletionEvidence
 from chitra.state_paths import state_dir
 
 logger = structlog.get_logger(__name__)
@@ -636,13 +638,38 @@ def list_goals(root: Path | None = None) -> list[GoalRecord]:
     return load_goals(root)
 
 
-def close_goal(root: Path | None, session_ref: str) -> GoalRecord:
-    """Remove a closed record from the deliberately small current-state store."""
+def close_goal(
+    root: Path | None,
+    session_ref: str,
+    *,
+    delivered_items: Sequence[str] = (),
+    completion_evidence: Sequence[CompletionEvidence] = (),
+    close_notes: Sequence[str] = (),
+    operator_acknowledged_items: Sequence[str] = (),
+    administrative: bool = False,
+) -> GoalRecord:
+    """Remove a record.
+
+    A completion close (the default) must first satisfy the operator-stated
+    inventory diff. An ``administrative`` close is a discard of a dead lane
+    (e.g. a superseded hold being reconciled by the sweep janitor), NOT a
+    completion claim, so the delivery-inventory gate does not apply to it.
+    """
     with _goal_store_lock(root):
         records = load_goals(root)
         closed = next((record for record in records if record.session_ref == session_ref), None)
         if closed is None:
             raise GoalNotFoundError(session_ref)
+        if not administrative:
+            require_close_inventory(
+                closed.done_when,
+                delivered_items,
+                evidence=completion_evidence,
+                close_notes=close_notes,
+                operator_acknowledged_items=operator_acknowledged_items,
+                goal_version=closed.goal_version,
+                goal_history=closed.goal_history,
+            )
         _write_goals(root, [record for record in records if record.session_ref != session_ref])
     logger.info("goal_mutated", session_ref=session_ref, action="close")
     return closed
@@ -684,9 +711,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     add_root(list_command)
     list_command.add_argument("--json", action="store_true")
 
-    close_command = commands.add_parser("close", help="Remove a closed lane goal.")
+    close_command = commands.add_parser("close", help="Inventory-check and remove a closed lane goal.")
     add_root(close_command)
     close_command.add_argument("--session-ref", required=True)
+    close_command.add_argument(
+        "--delivered-item",
+        action="append",
+        default=[],
+        help="Caller-verified delivered item; repeat once per delivered item.",
+    )
+    close_command.add_argument(
+        "--close-note",
+        action="append",
+        default=[],
+        help="Exact close note to check for follow-on/out-of-scope reclassification; repeat as needed.",
+    )
+    close_command.add_argument(
+        "--operator-acknowledged-item",
+        action="append",
+        default=[],
+        help="Required item the operator explicitly acknowledged may close without delivery; repeat as needed.",
+    )
 
     hold_command = commands.add_parser("hold", help="Hold an existing lane without discarding its goal.")
     add_root(hold_command)
@@ -773,7 +818,11 @@ def main(argv: list[str] | None = None) -> int:
                 open_asks=tuple(args.open_ask),
                 needs=args.needs if args.needs is not None else (existing.needs if existing is not None else ""),
             )
-            _print_record(upsert_goal(args.root, requested_record, clear_open_asks=args.clear_asks))
+            stored = upsert_goal(args.root, requested_record, clear_open_asks=args.clear_asks)
+            done_when_flag = lint_done_when(stored.done_when)
+            if done_when_flag is not None:
+                stored = add_ask(args.root, stored.session_ref, done_when_flag.message)
+            _print_record(stored)
         elif args.command == "get":
             found_record = get_goal(args.root, args.session_ref)
             if found_record is None:
@@ -787,7 +836,15 @@ def main(argv: list[str] | None = None) -> int:
                 for record in records:
                     print(f"{record.session_ref}\t{record.status}\t{record.goal}\t{json.dumps(list(record.open_asks))}")
         elif args.command == "close":
-            _print_record(close_goal(args.root, args.session_ref))
+            _print_record(
+                close_goal(
+                    args.root,
+                    args.session_ref,
+                    delivered_items=tuple(args.delivered_item),
+                    close_notes=tuple(args.close_note),
+                    operator_acknowledged_items=tuple(args.operator_acknowledged_item),
+                )
+            )
         elif args.command == "hold":
             _print_record(hold_goal(args.root, args.session_ref, reason=args.reason, resume_at=args.resume_at))
         elif args.command == "resume":
