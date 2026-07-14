@@ -1,6 +1,6 @@
 # chitra next-version plan
 
-chitra is deliberately small. Every item below is scoped to justify itself against that — if an idea would make the core daemons bigger, more dependent, or reasoning-capable, it belongs in a separate tool that *consumes* chitra's output, not in chitra.
+chitra is deliberately small. General orchestration and response generation belong in separate consumers. The bounded exception is the v0.8.2 goal-enforcement boundary: isolated reviewers inspect a watched lane's completed turn against its frozen goal and produce a typed input signal; they never draft Chitra's response.
 
 This document was previously titled "v1.1" and framed as a wishlist. It's retitled here because most of what's below isn't a loose set of ideas — it's a consolidation of decisions and research already made across this program (PyPI publishing mechanics, a security audit, a routing-preferences design study) plus the pre-existing pull-only beads plan and the self-improvement observer plan, carried over largely unchanged. There is no committed version number attached to this plan; treat it as "what's next," not a numbered release promise.
 
@@ -18,11 +18,12 @@ Fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](ht
 
 ### Completion gate
 
-A deterministic audit of "done"/"complete" claims against todo residue and
-deploy+live-verify evidence gaps — see `docs/evasion-taxonomy.md` and
-`docs/review.md` for the design rationale. Wired into `dispatchd.py` as an
-opt-in pre-delivery check; never auto-closes anything, only classifies and
-surfaces. See [PR #14](https://github.com/first-polyphony/chitra/pull/14).
+A forced audit of every watched turn-end. Completion claims require concrete
+deploy and live-verification citations, per-item todo proof, and a valid
+three-question delivery brief; a turn without a completion claim is recorded
+separately as finished but unverified. `dispatchd` also recognizes outgoing
+completion claims without relying on a caller to opt in. The gate never
+auto-closes a lane.
 
 ## v1.1
 
@@ -57,8 +58,8 @@ inside chitra's scope test because the store is deterministic with no LLM call
 in its own code path (it records the monitor's stated goal; it does not
 generate or reason about one).
 
-Deliberately left out of scope: Kai's LLM-reasoner nudge generation. Reasoning
-belongs in a consuming tool, per the scope statement at the top of this file.
+General nudge generation remains out of scope. The shipped reasoning surface
+only attests exact caller-approved text after frozen-goal and reviewer checks.
 
 ---
 
@@ -123,7 +124,7 @@ These fixes were already designed and coded this program; they are not new roadm
 
 - **`CHITRA_*` env var naming** — genericized per PR #5 (chitra) / #1917 (monorepo mirror).
 - **`liveness_check` test coverage** — added in the same PRs (#5 / #1917).
-- **LLM-scope-statement clarity fix** — PR #8 (chitra) / #1918 (monorepo mirror) tightens the wording that chitra has no internal LLM calls anywhere in its own code path while still managing LLM-driven sessions in the panes it dispatches to. The self-improvement and beads sections below use this same framing deliberately — see each section.
+- **Historical LLM-scope statement** — PR #8 / #1918 originally documented a zero-call boundary. v0.8.2 narrows that statement to deterministic relay/storage plus the explicit isolated watched-session review boundary described above.
 
 ---
 
@@ -140,7 +141,7 @@ For real-world naming precedent on what a deployment's `task_type` values might 
 
 **Ledger provenance gap — closed.** The ledger now records `task_type` and a `routing_hint_source` provenance flag (`explicit` / `config` / `route` / `unset`) alongside `routing_hint`, and — for resolved `routes` selections — the concrete `resolved_model` / `resolved_harness` / `resolved_zdr`. All are part of the HMAC-signed payload (ledger `sig_v` bumped to 3; older v1/v2 entries still verify). An auditor reading `ledger.jsonl` can now distinguish a caller-chosen hint from a config default from an actively-resolved route, and see the exact model+harness chitra selected.
 
-**Explicitly out of scope for chitra — a named scope boundary, not a quiet omission.** A more ambitious idea was also discussed this program: chitra actively *suggesting* how a receiving session should organize its own sub-agent hierarchy (e.g., "this looks like a multi-file refactor, consider a plan→build→validate breakdown"). This does **not** belong inside chitra. Generating a task-aware suggestion requires evaluating the content/class of a task and producing a judgment about appropriate structure — that's reasoning, not plumbing, and doing it would require either an LLM call (violating chitra's zero-LLM-calls invariant) or a hardcoded rule table far richer than the flat `task_type -> routing_hint` map above. This conclusion should not be softened: if this capability is built, it belongs in a **separate, higher-level advisor system** that reads chitra's order/ledger data (`routing_hint`, delivery history per `session_ref`, dispatch outcomes) as its data source, does its own reasoning there, and feeds the *result* back to chitra as an ordinary dispatched `nudge` — keeping chitra's own code path LLM-free.
+**Explicitly out of scope for chitra — a named scope boundary, not a quiet omission.** Chitra does not suggest how a receiving session should organize its own sub-agent hierarchy. That general task-aware advice belongs in a separate higher-level system that reads chitra's order and ledger data and feeds approved text back as an attested nudge. The isolated goal reviewers do not widen into this role.
 
 ---
 
@@ -155,7 +156,7 @@ The study's own recommendation was a lighter-weight, file-based sequencer built 
 - **This is not built inside chitra.** Per chitra's stated design philosophy (`DESIGN.md`: orchestration logic belongs in "a separate, higher-level system that uses chitra as its delivery/dedup layer") and per the study's own scope-boundary finding, the workflow manager is a **separate tool** that consumes chitra's existing artifacts (the order queue, the signed ledger, `evaluate_completion_claim`'s verdicts) rather than new code inside `dispatchd`/`triaged`.
 - **The hybrid concession identified by the study still applies**: chitra itself gains two small, opaque, pass-through fields — `workflow_id` and `step_id` — on `DispatchOrder`/`DispatchResult`/`LedgerEntry`, carried and signed exactly like the existing `tag` and `routing_hint` fields, never interpreted or acted on by chitra. This is what lets the signed ledger double as a workflow-execution audit trail without chitra learning anything about workflows.
 - **Shape coverage, per the study's translation analysis** — of the nine cataloged patterns, three translate cleanly into a deterministic step-DAG (Heartbeat, Orchestrator-Workers, Ratchet), two require mandating structured/enum verdicts rather than free-text votes (Quorum, Compost), two are deterministic but a different machinery class entirely — counters/promotion state and cron-verified predicates, not a DAG (Trust Ledger, Standing Goals) — and two do not fit a deterministic engine at all and should stay agent-internal or fixed-round degraded forms (Sparring, Executor-Advisor/Oracle). The Temporal workflow manager should implement the first five categories as real, versioned shape templates and explicitly document the last two as out of scope rather than force-fitting them.
-- **Every judgment call inside a shape is itself a dispatch to an external agent.** The engine (Temporal or otherwise) walks the DAG, evaluates structured verdicts, and advances state — it never summarizes, scores, or judges content itself. This preserves chitra's zero-LLM-calls invariant at the layer that touches chitra; Temporal's own workflow code is judgment-free plumbing over agent-produced verdicts.
+- **Every general workflow judgment inside a shape is itself a dispatch to an external agent.** The engine walks the DAG and advances structured state; this remains separate from the narrow watched-session review boundary.
 
 Not yet scheduled or estimated; this section records the decision and scope, not a committed timeline. Implementation should start with the `workflow_id`/`step_id` field addition in chitra (small, reviewable independently) before the separate Temporal tool is built against it.
 
@@ -167,9 +168,9 @@ Not yet scheduled or estimated; this section records the decision and scope, not
 
 ## Self-improvement: a separate, read-only observer — not a framework
 
-chitra's daemons already emit plain, documented artifacts (dispatch results, triage events, the delivery ledger). The plan for "learning from operational traces" is a **separate, read-only observer process** that computes simple rolling statistics over those artifacts — dispatch success rate, queue latency, dedup hit/miss rate — and surfaces threshold-based flags (e.g., "the dedup window looks too short given N near-miss collisions this week"). That's it: statistical monitoring and flagging, not an automated mutator of chitra's own config, and not a new dependency inside chitra itself. To state this with the same clarity as PR #8's scope-statement fix elsewhere in this repo: **chitra's own code path contains no LLM calls anywhere**, including in this observer — the observer computes deterministic rolling statistics over chitra's artifacts, full stop; it does not itself reason about them. (Separately, and outside this roadmap's scope: a sidecar LLM-driven observer capability used elsewhere in the fleet to watch *sessions* chitra dispatches into — confirmed live and unaffected by any change in this program — is a consumer of chitra's output, not a part of chitra, and needs no action here.)
+chitra's daemons emit plain, documented artifacts (dispatch results, triage events, delivery and attestation ledgers). The plan for learning from operational traces remains a separate read-only statistics process, not an automated config mutator. This is distinct from v0.8.2's synchronous frozen-goal review of a just-finished watched turn.
 
-Explicitly ruled out, with reasons: **DSPy** optimizes LLM prompt/pipeline behavior against a scoring metric — chitra has no LLM call anywhere in its core, so there's no prompt to optimize and no natural role for a DSPy-style optimizer here. **RL-from-logs / closed-loop auto-tuning** is a real technique but a heavier lift (defined action space, reward shaping, an evaluation harness) than a read-only observer, and a closed loop that silently rewrites chitra's runtime config is exactly the kind of complexity this project is trying to avoid. Both stay out of scope.
+Explicitly ruled out: DSPy/RL prompt optimization and closed-loop config mutation are broader learning systems than the fixed goal-review contract and remain out of scope.
 
 ### Deviance-pattern awareness (external research, abstracted internal taxonomy)
 

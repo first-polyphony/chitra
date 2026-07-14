@@ -4,7 +4,31 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- Forced completion review at every detected lane turn-end. `watchd` now
+  distinguishes an ordinary finished turn from a completion claim, requires
+  concrete deploy/live citations and per-item verification for a clean claim,
+  records the review on Chitra's side, and drives explicit unverified or
+  disputed roster states instead of idle-green.
+- An isolated watched-session adversarial loop bound to the frozen goal. The
+  initial round requires unanimous independent process results; a mid-review
+  goal redirect is logged and automatically restarted with one reviewer.
+  Reversible informational and in-scope technical answers may release after
+  unanimous acceptance, while spend, credentials, irreversible actions, and
+  strategy redirects always require operator confirmation.
+- Required delivery briefs for `chitra-artifacts record`, covering what was
+  built, what it does, and whether it actually works with concrete evidence.
+
 ### Changed
+- Consolidated `DecisionProvenance` and `ReasonedDecision` into the immutable
+  `DecisionAttestation` API. Every reasoned answer or nudge is bound to the
+  exact approved text and logged to Chitra's own attestation ledger before
+  dispatch; review identifiers and gate metadata are never pasted into the
+  monitored lane.
+- Completion evidence is now a list of typed, citation-bearing records rather
+  than caller-asserted deploy/live booleans. The default healthy-hedge lexicon
+  also recognizes "conditionally healthy", "correctly blocked", "parse-only",
+  "not publication-ready", "repaired and covered by tests", and "CI evidence".
 - Raised the default graceful-pause thresholds to 92% for the five-hour
   window and 95% for the seven-day window, with approaching warnings at
   80% and 90%, respectively.

@@ -13,11 +13,12 @@ import re
 from collections.abc import Callable
 from importlib.resources import files
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chitra.goal_enforcement import SessionReviewSignal, freeze_goal
 from chitra.goals import GoalRecord, check_specification
 
 logger = structlog.get_logger(__name__)
@@ -25,6 +26,12 @@ logger = structlog.get_logger(__name__)
 RiskClass = Literal["a0", "a1", "a2", "a3"]
 DecisionSource = Literal["goal", "principle", "oracle-escalated", "abstained"]
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_OPERATOR_GATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("spend", re.compile(r"\b(spend|purchase|buy|billing|payment|paid plan|costs?\s+\$)\b", re.I)),
+    ("credentials", re.compile(r"\b(credentials?|password|secret|api[- ]?key|oauth|login|authentication token)\b", re.I)),
+    ("irreversible action", re.compile(r"\b(irreversible|delete|destroy|drop database|force[- ]push|terminate|revoke)\b", re.I)),
+    ("strategy redirect", re.compile(r"\b(redirect|change (?:the )?goal|switch objectives?|expand (?:the )?scope)\b", re.I)),
+)
 
 
 class ReasoningContractError(ValueError):
@@ -52,7 +59,12 @@ class DecisionQuestion(BaseModel):
     risk_class: RiskClass = "a1"
     genuinely_ambiguous: bool = False
     expensive_to_reverse: bool = False
+    spend: bool = False
+    credentials: bool = False
+    irreversible: bool = False
+    strategy_redirect: bool = False
     evidence_refs: list[str] = Field(default_factory=list)
+    session_review: SessionReviewSignal | None = None
 
 
 class PrincipleRecord(BaseModel):
@@ -90,22 +102,80 @@ class OracleVerdict(BaseModel):
     confidence_basis: str = Field(min_length=1)
 
 
-class DecisionProvenance(BaseModel):
-    source: DecisionSource
-    goal_version: int
-    goal_fields: list[str]
-    principle_ids: list[str]
-    principle_citations: list[str]
-    evidence_refs: list[str]
-    oracle_escalated: bool
-    confidence_basis: str
+class DecisionAttestation(BaseModel):
+    """Immutable pre-dispatch decision record bound to exact approved text."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-class ReasonedDecision(BaseModel):
+    attestation_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     outcome: Literal["answer", "abstain"]
-    answer: str
-    provenance: DecisionProvenance
-    insufficiency_reasons: list[str] = Field(default_factory=list)
+    message_kind: Literal["reasoned_answer", "reasoned_nudge", "reasoned_action"]
+    approved_text: str = Field(min_length=1)
+    approved_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: DecisionSource
+    goal_contract_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    goal_version: int = Field(ge=1)
+    goal_fields: tuple[str, ...]
+    corpus_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    principle_ids: tuple[str, ...] = ()
+    principle_citations: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    oracle_escalated: bool = False
+    confidence_basis: str = Field(min_length=1)
+    insufficiency_reasons: tuple[str, ...] = ()
+    review_signal_id: str | None = None
+    review_verdict: Literal["accept", "reject"] | None = None
+    reviewer_count: int = Field(default=0, ge=0)
+    autonomy: Literal["autonomous", "operator_required"]
+    operator_gate_reasons: tuple[str, ...] = ()
+    operator_confirmation_required: bool
+    operator_confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> Self:
+        if self.approved_text_sha256 != hashlib.sha256(self.approved_text.encode("utf-8")).hexdigest():
+            raise ValueError("approved_text_sha256 does not match approved_text")
+        if self.operator_confirmed and not self.operator_confirmation_required:
+            raise ValueError("operator confirmation cannot be attached to an autonomous decision")
+        if self.autonomy == "autonomous" and (self.operator_confirmation_required or self.review_verdict != "accept"):
+            raise ValueError("autonomous release requires unanimous watched-session acceptance and no operator gate")
+        payload = self.model_dump(mode="json", exclude={"attestation_id"})
+        expected = f"sha256:{hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}"
+        if self.attestation_id != expected:
+            raise ValueError("attestation_id does not match the attestation record")
+        return self
+
+    @classmethod
+    def create(cls, **values: object) -> DecisionAttestation:
+        """Build a fully bound attestation; ``None`` can never become text."""
+        approved_text = values.get("approved_text")
+        if not isinstance(approved_text, str) or not approved_text.strip():
+            raise ReasoningContractError("approved_text must be non-empty text")
+        payload: dict[str, object] = {
+            "principle_ids": (),
+            "principle_citations": (),
+            "evidence_refs": (),
+            "oracle_escalated": False,
+            "insufficiency_reasons": (),
+            "review_signal_id": None,
+            "review_verdict": None,
+            "reviewer_count": 0,
+            "operator_gate_reasons": (),
+            "operator_confirmed": False,
+            **values,
+            "approved_text": approved_text,
+            "approved_text_sha256": hashlib.sha256(approved_text.encode("utf-8")).hexdigest(),
+        }
+        attestation_id = f"sha256:{hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}"
+        return cls.model_validate({**payload, "attestation_id": attestation_id})
+
+    def with_operator_confirmation(self) -> DecisionAttestation:
+        """Return a new immutable record carrying an explicit operator ruling."""
+        if not self.operator_confirmation_required:
+            raise ReasoningContractError("this decision does not require operator confirmation")
+        payload = self.model_dump(mode="python", exclude={"attestation_id", "approved_text_sha256"})
+        payload["operator_confirmed"] = True
+        return DecisionAttestation.create(**payload)
 
 
 class PrinciplesIndex:
@@ -164,11 +234,17 @@ class DecisionReasoner:
         question: DecisionQuestion,
         *,
         oracle: Oracle | None = None,
-    ) -> ReasonedDecision:
+    ) -> DecisionAttestation:
         """Resolve from goal, then principles, then the oracle when warranted."""
         goal_issues = check_specification(goal)
         if goal_issues:
             raise ReasoningContractError("frozen goal fails strict specification: " + "; ".join(goal_issues))
+        frozen_goal = freeze_goal(goal)
+        if question.session_review is not None:
+            if question.session_review.session_ref != goal.session_ref:
+                raise ReasoningContractError("watched-session review belongs to a different session")
+            if question.session_review.goal_contract_id != frozen_goal.contract_id:
+                raise ReasoningContractError("watched-session review is stale for the frozen goal")
         if goal_judgment.determines_answer:
             if not goal_judgment.answer or not goal_judgment.goal_fields:
                 raise ReasoningContractError("determining goal judgment requires an answer and cited goal fields")
@@ -176,6 +252,7 @@ class DecisionReasoner:
                 answer=goal_judgment.answer,
                 source="goal",
                 goal=goal,
+                question=question,
                 goal_fields=list(goal_judgment.goal_fields),
                 evidence_refs=question.evidence_refs,
                 confidence_basis="the frozen goal record directly determines the answer",
@@ -189,6 +266,7 @@ class DecisionReasoner:
                 answer=best.principle.guidance,
                 source="principle",
                 goal=goal,
+                question=question,
                 goal_fields=list(goal_judgment.goal_fields),
                 principles=[best.principle],
                 evidence_refs=question.evidence_refs,
@@ -220,6 +298,7 @@ class DecisionReasoner:
                 answer=verdict.verdict,
                 source="oracle-escalated",
                 goal=goal,
+                question=question,
                 goal_fields=list(goal_judgment.goal_fields),
                 evidence_refs=[*question.evidence_refs, *verdict.evidence_refs],
                 confidence_basis=verdict.confidence_basis,
@@ -233,6 +312,7 @@ class DecisionReasoner:
             ),
             source="abstained",
             goal=goal,
+            question=question,
             goal_fields=list(goal_judgment.goal_fields),
             evidence_refs=question.evidence_refs,
             confidence_basis="routine residuals do not justify oracle escalation",
@@ -240,32 +320,69 @@ class DecisionReasoner:
             outcome="abstain",
         )
 
-    @staticmethod
     def _decision(
+        self,
         *,
         answer: str,
         source: DecisionSource,
         goal: GoalRecord,
+        question: DecisionQuestion,
         goal_fields: list[str],
         principles: list[PrincipleRecord] | None = None,
         evidence_refs: list[str],
         confidence_basis: str,
         insufficiency: list[str] | None = None,
         outcome: Literal["answer", "abstain"] = "answer",
-    ) -> ReasonedDecision:
+    ) -> DecisionAttestation:
         selected = principles or []
-        return ReasonedDecision(
+        review = question.session_review
+        gate_reasons: list[str] = []
+        if review is None:
+            gate_reasons.append("missing unanimous watched-session review")
+        elif review.verdict != "accept":
+            gate_reasons.append("watched-session review rejected the lane behavior")
+        if question.spend:
+            gate_reasons.append("spend")
+        if question.credentials:
+            gate_reasons.append("credentials")
+        if question.irreversible or question.expensive_to_reverse:
+            gate_reasons.append("irreversible action")
+        if question.strategy_redirect:
+            gate_reasons.append("strategy redirect")
+        if question.risk_class == "a3":
+            gate_reasons.append("a3 consequence")
+        combined_text = f"{question.text}\n{answer}"
+        for reason, pattern in _OPERATOR_GATE_PATTERNS:
+            if pattern.search(combined_text):
+                gate_reasons.append(reason)
+        if outcome == "abstain":
+            gate_reasons.append("abstained decision")
+        operator_required = bool(gate_reasons)
+        message_kind = {
+            "answer": "reasoned_answer",
+            "nudge": "reasoned_nudge",
+            "action": "reasoned_action",
+        }[question.answer_category]
+        return DecisionAttestation.create(
             outcome=outcome,
-            answer=answer,
-            provenance=DecisionProvenance(
-                source=source,
-                goal_version=goal.goal_version,
-                goal_fields=goal_fields,
-                principle_ids=[item.principle_id for item in selected],
-                principle_citations=[citation for item in selected for citation in item.citations],
-                evidence_refs=evidence_refs,
-                oracle_escalated=source == "oracle-escalated",
-                confidence_basis=confidence_basis,
-            ),
-            insufficiency_reasons=insufficiency or [],
+            message_kind=message_kind,
+            approved_text=answer,
+            source=source,
+            goal_contract_id=freeze_goal(goal).contract_id,
+            goal_version=goal.goal_version,
+            goal_fields=tuple(goal_fields),
+            corpus_id=self.principles.corpus_id,
+            principle_ids=tuple(item.principle_id for item in selected),
+            principle_citations=tuple(citation for item in selected for citation in item.citations),
+            evidence_refs=tuple(evidence_refs),
+            oracle_escalated=source == "oracle-escalated",
+            confidence_basis=confidence_basis,
+            insufficiency_reasons=tuple(insufficiency or ()),
+            review_signal_id=review.signal_id if review is not None else None,
+            review_verdict=review.verdict if review is not None else None,
+            reviewer_count=len(review.reviewer_ids) if review is not None else 0,
+            autonomy="operator_required" if operator_required else "autonomous",
+            operator_gate_reasons=tuple(dict.fromkeys(gate_reasons)),
+            operator_confirmation_required=operator_required,
+            operator_confirmed=False,
         )

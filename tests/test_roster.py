@@ -62,7 +62,9 @@ def test_marker_for_covers_every_status_and_rejects_unknown() -> None:
     assert marker_for("held") == "🟡"
     assert marker_for("idle") == "🟡"
     assert marker_for("working") == "🟢"
-    assert marker_for("done-pending-verification") == "🟢"
+    assert marker_for("turn-finished-unverified") == "🟡"
+    assert marker_for("completion-disputed") == "🔴"
+    assert marker_for("done-pending-verification") == "🟡"
     assert marker_for("done-pending-close") == "🟢"
     with pytest.raises(ValueError, match="unknown goal status"):
         marker_for(cast(GoalStatus, "unknown"))
@@ -72,7 +74,9 @@ def test_marker_for_covers_every_status_and_rejects_unknown() -> None:
     ("status", "open_asks", "expected"),
     [
         ("working", (), "🟢"),
-        ("done-pending-verification", (), "🟢"),
+        ("turn-finished-unverified", (), "🟡"),
+        ("completion-disputed", (), "🔴"),
+        ("done-pending-verification", (), "🟡"),
         ("done-pending-close", (), "🟢"),
         ("held", (), "🟡"),
         ("idle", (), "🟡"),

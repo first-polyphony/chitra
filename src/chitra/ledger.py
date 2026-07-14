@@ -35,6 +35,7 @@ No LLM calls in this module's own code path — deterministic signing/logging on
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import os
@@ -43,6 +44,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from .reasoning import DecisionAttestation
 from .state_paths import default_ledger_key_path
 
 _KEY_BYTES = 32
@@ -69,6 +71,49 @@ class LedgerEntry(BaseModel):
     message_hash: str
     sent_at: str
     signature: str
+
+
+class AttestationLedgerEntry(BaseModel):
+    """One our-side decision record, deliberately separate from delivery proof."""
+
+    order_id: str
+    session_ref: str
+    attestation: DecisionAttestation
+    logged_at: str
+
+
+def append_attestation(
+    ledger_path: Path,
+    *,
+    order_id: str,
+    session_ref: str,
+    attestation: DecisionAttestation,
+) -> AttestationLedgerEntry:
+    """Durably append an attestation once; never expose it in pane text."""
+    entry = AttestationLedgerEntry(
+        order_id=order_id,
+        session_ref=session_ref,
+        attestation=attestation,
+        logged_at=datetime.now(UTC).isoformat(),
+    )
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger_path.with_name(ledger_path.name + ".lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            if ledger_path.exists():
+                for line in ledger_path.read_text(encoding="utf-8").splitlines():
+                    try:
+                        existing = AttestationLedgerEntry.model_validate_json(line)
+                    except ValueError:
+                        continue
+                    if existing.order_id == order_id and existing.attestation.attestation_id == attestation.attestation_id:
+                        return existing
+            with ledger_path.open("a", encoding="utf-8") as output:
+                output.write(entry.model_dump_json() + "\n")
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return entry
 
 
 def message_hash(nudge: str) -> str:

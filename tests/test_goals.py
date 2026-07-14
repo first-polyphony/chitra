@@ -599,6 +599,11 @@ def test_roster_command_reads_unreviewed_artifacts_from_the_shared_store(tmp_pat
             title="Operator artifact",
             kind="page",
             source="tophand:/var/lib/chitra/artifact.html",
+            brief=(
+                "What was built: An operator-facing artifact roster entry.\n"
+                "What it does: It exposes the full copyable artifact link.\n"
+                "Does it actually work: Roster probe status=200 with 1 rendered link; /tmp/roster-proof.json."
+            ),
         ),
     )
     capsys.readouterr()

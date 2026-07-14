@@ -96,7 +96,7 @@ from pathlib import Path
 import structlog
 
 from . import ledger as ledger_mod
-from .completion_gate import evaluate_completion_claim
+from .completion_gate import evaluate_completion_claim, is_completion_claim
 from .dispatch import (
     DISPATCH_VERIFY_WAIT_SECONDS,
     DispatchOrder,
@@ -113,7 +113,7 @@ from .dispatch import (
 from .goals import RATE_LIMIT_HOLD_REASON_PREFIX, get_goal
 from .policy_config import PolicyConfig, load_policy_config
 from .routing_config import RoutingConfig, load_routing_config, resolve_route, resolve_routing_hint
-from .state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
+from .state_paths import default_attestation_ledger_path, default_ledger_key_path, default_ledger_path, default_queue_dir
 from .taxonomy import load_taxonomy
 
 logger = structlog.get_logger(__name__)
@@ -306,6 +306,7 @@ def process_one_order(
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
+    attestation_ledger_path: Path | None = None,
     routing_config: RoutingConfig | None = None,
     policy: PolicyConfig | None = None,
     invalid_dir: Path | None = None,
@@ -390,6 +391,7 @@ def process_one_order(
             lock_dir=lock_dir,
             ledger_path=ledger_path,
             ledger_key_path=ledger_key_path,
+            attestation_ledger_path=attestation_ledger_path,
             routing_config=routing_config,
             policy=policy,
             invalid_dir=invalid_dir,
@@ -416,6 +418,7 @@ def _process_claimed_order(
     lock_dir: Path | None,
     ledger_path: Path | None,
     ledger_key_path: Path | None,
+    attestation_ledger_path: Path | None,
     routing_config: RoutingConfig | None,
     policy: PolicyConfig,
     invalid_dir: Path | None,
@@ -479,6 +482,29 @@ def _process_claimed_order(
             claimed_path.replace(processed_dir / claimed_path.name)
         return None
 
+    attestation_id = order.decision_attestation.attestation_id if order.decision_attestation is not None else None
+    if order.decision_attestation is not None:
+        try:
+            ledger_mod.append_attestation(
+                attestation_ledger_path or default_attestation_ledger_path(),
+                order_id=order.order_id,
+                session_ref=order.session_ref,
+                attestation=order.decision_attestation,
+            )
+        except OSError as exc:
+            logger.error("dispatchd_attestation_log_failed", order_id=order.order_id, error=str(exc))
+            result = DispatchResult(
+                order_id=order.order_id,
+                session_ref=order.session_ref,
+                status=DispatchStatus.FAILED,
+                reason=f"attestation-log-failed: {exc}",
+                decision_attestation_id=attestation_id,
+            )
+            _write_result_atomic(results_dir, result)
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            claimed_path.replace(processed_dir / claimed_path.name)
+            return result
+
     scope_violation = session_scope_violation(
         order.session_ref,
         allowed_session_prefixes=allowed_session_prefixes,
@@ -502,28 +528,33 @@ def _process_claimed_order(
             resolved_model=resolved_model,
             resolved_harness=resolved_harness,
             resolved_zdr=resolved_zdr,
-            decision_provenance=order.reasoning.provenance if order.reasoning is not None else None,
+            decision_attestation_id=attestation_id,
         )
         _write_result_atomic(results_dir, result)
         processed_dir.mkdir(parents=True, exist_ok=True)
         claimed_path.replace(processed_dir / claimed_path.name)
         return result
 
-    # Completion-claim audit: opt-in via completion_todo_items being set (see
-    # DispatchOrder's docstring). A disputed claim is never delivered as an
+    # Completion claims are recognized at this boundary even when a caller
+    # omitted todo metadata. A disputed claim is never delivered as an
     # ordinary "sent" nudge -- it is surfaced as its own distinct status and
     # the tmux paste never happens. A clean claim proceeds to normal
     # dispatch below; the CLEAN audit itself (logged) is the proof an
     # operator can use to authorize a close -- this daemon never closes
     # anything itself, only classifies and surfaces.
-    if order.completion_todo_items is not None:
+    completion_gate_applies = order.task_type not in _RATE_LIMIT_GUARD_TASK_TYPES and (
+        is_completion_claim(order.nudge) or order.completion_todo_items is not None
+    )
+    if completion_gate_applies:
         audit = evaluate_completion_claim(
-            order.completion_todo_items,
+            order.completion_todo_items or [],
             order.nudge,
-            order.completion_has_deploy_evidence,
-            order.completion_has_live_verify_evidence,
+            order.completion_evidence,
             load_taxonomy(policy.completion_gate.taxonomy_path),
             policy=policy.completion_gate,
+            delivery_brief=order.completion_brief,
+            open_asks=order.completion_open_asks,
+            blockers=order.completion_blockers,
         )
         if audit.verdict == "COMPLETION_DISPUTE":
             logger.warning(
@@ -543,7 +574,7 @@ def _process_claimed_order(
                 resolved_model=resolved_model,
                 resolved_harness=resolved_harness,
                 resolved_zdr=resolved_zdr,
-                decision_provenance=order.reasoning.provenance if order.reasoning is not None else None,
+                decision_attestation_id=attestation_id,
             )
             _write_result_atomic(results_dir, result)
             processed_dir.mkdir(parents=True, exist_ok=True)
@@ -572,7 +603,7 @@ def _process_claimed_order(
             resolved_zdr=resolved_zdr,
             status=DispatchStatus.BLOCKED,
             reason=f"lane lock unavailable: {exc}",
-            decision_provenance=order.reasoning.provenance if order.reasoning is not None else None,
+            decision_attestation_id=attestation_id,
         )
         _write_result_atomic(results_dir, result)
         claimed_path.replace(processed_dir / claimed_path.name)
@@ -663,7 +694,7 @@ def _process_claimed_order(
     result.resolved_model = resolved_model
     result.resolved_harness = resolved_harness
     result.resolved_zdr = resolved_zdr
-    result.decision_provenance = order.reasoning.provenance if order.reasoning is not None else None
+    result.decision_attestation_id = attestation_id
     logger.info(
         "dispatchd_order_processed",
         order_id=order.order_id,
@@ -717,6 +748,7 @@ def run_once(
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
+    attestation_ledger_path: Path | None = None,
     routing_config_path: Path | None = None,
     policy_config_path: Path | None = None,
     invalid_dir: Path | None = None,
@@ -762,6 +794,7 @@ def run_once(
             lock_dir=lock_dir,
             ledger_path=ledger_path,
             ledger_key_path=ledger_key_path,
+            attestation_ledger_path=attestation_ledger_path,
             routing_config=routing_config,
             policy=policy,
             invalid_dir=invalid_dir,
@@ -785,6 +818,7 @@ def run_forever(
     lock_dir: Path | None = None,
     ledger_path: Path | None = None,
     ledger_key_path: Path | None = None,
+    attestation_ledger_path: Path | None = None,
     routing_config_path: Path | None = None,
     policy_config_path: Path | None = None,
     invalid_dir: Path | None = None,
@@ -802,6 +836,7 @@ def run_forever(
             lock_dir=lock_dir,
             ledger_path=ledger_path,
             ledger_key_path=ledger_key_path,
+            attestation_ledger_path=attestation_ledger_path,
             routing_config_path=routing_config_path,
             policy_config_path=policy_config_path,
             invalid_dir=invalid_dir,
@@ -824,6 +859,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ledger-path", type=Path, default=None, help="Delivery ledger JSONL path (default: next to the state dir).")
     parser.add_argument("--ledger-key-path", type=Path, default=None, help="HMAC signing key path (generated on first use if missing).")
+    parser.add_argument(
+        "--attestation-ledger-path",
+        type=Path,
+        default=None,
+        help="Our-side decision-attestation JSONL path (default: CHITRA_STATE_DIR/attestations.jsonl).",
+    )
     parser.add_argument(
         "--routing-config-path",
         type=Path,
@@ -881,6 +922,7 @@ def main(argv: list[str] | None = None) -> int:
             lock_dir=args.lock_dir,
             ledger_path=args.ledger_path,
             ledger_key_path=args.ledger_key_path,
+            attestation_ledger_path=args.attestation_ledger_path,
             routing_config_path=args.routing_config_path,
             policy_config_path=args.policy_config_path,
             invalid_dir=args.invalid_orders_dir,
@@ -897,6 +939,7 @@ def main(argv: list[str] | None = None) -> int:
         lock_dir=args.lock_dir,
         ledger_path=args.ledger_path,
         ledger_key_path=args.ledger_key_path,
+        attestation_ledger_path=args.attestation_ledger_path,
         routing_config_path=args.routing_config_path,
         policy_config_path=args.policy_config_path,
         invalid_dir=args.invalid_orders_dir,

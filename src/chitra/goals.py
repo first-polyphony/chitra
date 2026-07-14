@@ -25,12 +25,23 @@ from chitra.state_paths import state_dir
 
 logger = structlog.get_logger(__name__)
 
-GoalStatus = Literal["working", "held", "idle", "blocked", "done-pending-verification", "done-pending-close"]
+GoalStatus = Literal[
+    "working",
+    "held",
+    "idle",
+    "blocked",
+    "turn-finished-unverified",
+    "completion-disputed",
+    "done-pending-verification",
+    "done-pending-close",
+]
 GOAL_STATUSES: tuple[GoalStatus, ...] = (
     "working",
     "held",
     "idle",
     "blocked",
+    "turn-finished-unverified",
+    "completion-disputed",
     "done-pending-verification",
     "done-pending-close",
 )
@@ -276,14 +287,22 @@ def _goal_history_from_payload(payload: dict[str, object]) -> tuple[dict[str, st
     raw_history = payload.get("goal_history", [])
     if not isinstance(raw_history, list):
         raise ValueError("goal record goal_history must be a list of objects")
-    fields = ("goal", "done_when", "intent", "scope", "revised_at", "reason")
+    strategic_fields = {"goal", "done_when", "intent", "scope", "revised_at", "reason"}
+    review_restart_fields = {
+        "event",
+        "previous_contract_id",
+        "restarted_contract_id",
+        "behavior_sha256",
+        "revised_at",
+        "reason",
+    }
     history: list[dict[str, str]] = []
     for entry in raw_history:
-        if not isinstance(entry, dict) or set(entry) != set(fields):
-            raise ValueError("goal record goal_history entries must contain strategic prior values")
-        if not all(isinstance(entry[field], str) for field in fields):
+        if not isinstance(entry, dict) or set(entry) not in (strategic_fields, review_restart_fields):
+            raise ValueError("goal record goal_history entries must contain strategic prior values or a review restart event")
+        if not all(isinstance(value, str) for value in entry.values()):
             raise ValueError("goal record goal_history entries must contain strings")
-        history.append({field: entry[field] for field in fields})
+        history.append({str(field): value for field, value in entry.items()})
     return tuple(history)
 
 
@@ -444,6 +463,40 @@ def redirect_goal(
         records.append(stored)
         _write_goals(root, records)
     logger.info("goal_mutated", session_ref=session_ref, action="redirect")
+    return stored
+
+
+def record_review_restart(
+    root: Path | None,
+    session_ref: str,
+    *,
+    previous_contract_id: str,
+    restarted_contract_id: str,
+    behavior_sha256: str,
+) -> GoalRecord:
+    """Append the required revert trail for an automatic redirect restart.
+
+    This is monitor-owned history, not an operator ask or a lane message. It
+    deliberately leaves every strategic field and the goal version unchanged;
+    ``redirect_goal`` already recorded the strategic revision itself.
+    """
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        event = {
+            "event": "adversarial-review-redirect-restart",
+            "previous_contract_id": previous_contract_id,
+            "restarted_contract_id": restarted_contract_id,
+            "behavior_sha256": behavior_sha256,
+            "revised_at": _utc_now(),
+            "reason": "goal redirected during watched-session review; automatically restarted with one reviewer",
+        }
+        stored = replace(existing, goal_history=(*existing.goal_history, event), updated_at=_utc_now())
+        records = [record for record in load_goals(root) if record.session_ref != session_ref]
+        records.append(stored)
+        _write_goals(root, records)
+    logger.info("goal_review_restarted", session_ref=session_ref, behavior_sha256=behavior_sha256)
     return stored
 
 

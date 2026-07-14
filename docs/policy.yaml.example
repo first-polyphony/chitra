@@ -20,6 +20,12 @@ completion_gate:
     - "left as an exercise"
     - "in a future pr"
     - "future work"
+    - "conditionally healthy"
+    - "correctly blocked"
+    - "parse-only"
+    - "not publication-ready"
+    - "repaired and covered by tests"
+    - "CI evidence"
   # Todo statuses treated as complete; all others are residue.
   complete_todo_statuses: [done]
   # Allowed values are deploy and live_verify. An empty list disables this check.

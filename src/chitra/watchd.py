@@ -1,9 +1,9 @@
 """watchd — deterministic tmux-pane change emitter for ``chitra.triaged``.
 
-The events log is intentionally a small wire contract: each change is one
-``<ISO8601> <LANE_ID> <TEXT>`` line, which is consumed directly by
-``chitra.triaged``.  This module only observes panes; it never interprets
-their contents or invokes an LLM.
+The events log remains a small wire contract consumed by ``chitra.triaged``.
+At a detected turn-end, this watcher also forces the completion boundary and
+launches isolated watched-session reviewers against the lane's frozen goal.
+Review metadata is written only to Chitra-owned ledgers and never to pane text.
 """
 
 from __future__ import annotations
@@ -20,10 +20,27 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import structlog
 
+from chitra.completion_gate import (
+    CompletionReviewRecord,
+    append_completion_review,
+    evaluate_turn_end,
+    extract_completion_evidence,
+)
+from chitra.goal_enforcement import (
+    BehaviorReviewer,
+    ClaudeProcessReviewer,
+    GoalReviewError,
+    WatchedSessionBehavior,
+    review_watched_session,
+)
+from chitra.goals import GoalStatus, add_ask, list_goals, update_now
+from chitra.policy_config import load_policy_config
 from chitra.state_paths import state_dir as default_state_dir
+from chitra.taxonomy import load_taxonomy
 
 logger = structlog.get_logger(__name__)
 
@@ -42,6 +59,7 @@ _VOLATILE_LINE_RE = re.compile(
     r"^[\s]*[·✻✽✳✢✶*●○◐◯]|tokens\b|🪟|⏵⏵|esc to interrupt|ctrl\+b|^─+$|^[\s]*$|Press up to edit|globalVersion: [0-9.]+"
 )
 _TIMING_CHROME_RE = re.compile(r"\([0-9]+m? ?[0-9]*s?[^)]*\)")
+_ACTIVE_TURN_RE = re.compile(r"esc to interrupt|thinking|working…|working\.\.\.|running…|running\.\.\.", re.I)
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -63,6 +81,11 @@ class WatchdConfig:
     session_prefixes: tuple[str, ...] | None = None
     excluded_session_prefixes: tuple[str, ...] = ()
     max_log_bytes: int = DEFAULT_MAX_LOG_BYTES
+    goals_root: Path | None = None
+    completion_review_log: Path | None = None
+    reviewer_count: int = 2
+    reviewer_command: str = "claude"
+    reviewer_model: str | None = None
 
 
 def normalize(content: str) -> list[str]:
@@ -92,6 +115,14 @@ def normalized_snapshot(content: str) -> tuple[str, list[str]]:
     tail = normalize(content)[-NORMALIZED_TAIL_LINES:]
     text = "\n".join(tail)
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(), tail
+
+
+def pane_turn_finished(content: str) -> bool:
+    """Recognize a stable input prompt after a completed lane turn."""
+    lines = content.splitlines()
+    has_prompt = any(line.lstrip().startswith("❯") for line in lines)
+    active = any(_ACTIVE_TURN_RE.search(line) for line in lines[-12:])
+    return has_prompt and not active and bool(normalize(content))
 
 
 def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -179,7 +210,9 @@ class Watchd:
 
     config: WatchdConfig
     runner: CommandRunner = _run_command
+    reviewer: BehaviorReviewer | None = None
     baselines: dict[str, str] = field(default_factory=dict)
+    reviewed_turns: set[tuple[str, str]] = field(default_factory=set)
 
     def _raw_capture_path(self, pane_id: str) -> Path:
         """Return a filesystem-safe diagnostic capture path for one pane."""
@@ -193,6 +226,121 @@ class Watchd:
             raw_path.write_text(content, encoding="utf-8")
         except OSError as exc:
             logger.warning("watchd_raw_capture_write_failed", pane_id=pane_id, path=str(raw_path), error=str(exc))
+
+    def _session_ref(self, pane: Pane) -> str | None:
+        root = self.config.goals_root or self.config.state_dir
+        suffix = f":{pane.target}"
+        matches = [record.session_ref for record in list_goals(root) if record.session_ref.endswith(suffix)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning("watchd_ambiguous_goal_mapping", pane_id=pane.pane_id, target=pane.target, matches=matches)
+        return None
+
+    def _review_turn_end(self, pane: Pane, content: str) -> None:
+        """Force the completion/direction gate and persist only our-side detail."""
+        text = "\n".join(normalize(content)).strip()
+        behavior_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        key = (pane.pane_id, behavior_sha256)
+        if key in self.reviewed_turns:
+            return
+        self.reviewed_turns.add(key)
+        root = self.config.goals_root or self.config.state_dir
+        review_log = self.config.completion_review_log or self.config.state_dir / "completion_reviews.jsonl"
+        session_ref = self._session_ref(pane)
+        if session_ref is None:
+            append_completion_review(
+                review_log,
+                CompletionReviewRecord(
+                    session_ref=pane.target,
+                    pane_id=pane.pane_id,
+                    behavior_sha256=behavior_sha256,
+                    condition="turn_end_without_completion_claim",
+                    review_verdict="unavailable",
+                    status="untracked",
+                    summary="turn-end review failed closed: no unique frozen goal maps to this pane",
+                ),
+            )
+            return
+
+        goal = next(record for record in list_goals(root) if record.session_ref == session_ref)
+        behavior = WatchedSessionBehavior.from_turn(session_ref, text)
+        reviewer = self.reviewer or ClaudeProcessReviewer(
+            command=self.config.reviewer_command,
+            model=self.config.reviewer_model,
+        )
+        review_signal = None
+        review_error = ""
+        try:
+            review_signal = review_watched_session(
+                root,
+                session_ref,
+                behavior,
+                reviewer=reviewer,
+                reviewer_count=self.config.reviewer_count,
+            )
+        except (GoalReviewError, OSError, ValueError) as exc:
+            review_error = str(exc)
+
+        policy = load_policy_config().completion_gate
+        turn_audit = evaluate_turn_end(
+            text,
+            todo_items=[],
+            evidence=extract_completion_evidence(text),
+            taxonomy=load_taxonomy(policy.taxonomy_path),
+            policy=policy,
+            open_asks=goal.open_asks,
+            blockers=(goal.needs,) if goal.needs else (),
+        )
+        completion_verdict = turn_audit.completion.verdict if turn_audit.completion is not None else None
+        ask = ""
+        if review_signal is None:
+            status: GoalStatus = "blocked"
+            summary = f"turn-end review unavailable: {review_error}"
+            ask = "Review the lane manually because isolated watched-session review could not complete."
+            review_verdict: Literal["accept", "reject", "unavailable"] = "unavailable"
+        elif review_signal.verdict == "reject":
+            status = "blocked"
+            summary = "watched-session direction or completion posture was rejected against the frozen goal"
+            ask = "Review the lane's rejected direction or completion posture against its frozen goal."
+            review_verdict = "reject"
+        elif turn_audit.condition == "turn_end_without_completion_claim":
+            status = "turn-finished-unverified"
+            summary = turn_audit.summary
+            review_verdict = "accept"
+        elif completion_verdict == "CLEAN":
+            status = "done-pending-close"
+            summary = turn_audit.summary
+            review_verdict = "accept"
+        else:
+            status = "completion-disputed"
+            summary = turn_audit.summary
+            ask = "Resolve the cited completion-gate gaps before treating this lane as complete."
+            review_verdict = "accept"
+
+        update_now(
+            root,
+            session_ref,
+            now=summary,
+            status=status,
+            last_verified=datetime.now(UTC).isoformat() if status == "done-pending-close" else goal.last_verified,
+        )
+        if ask:
+            add_ask(root, session_ref, ask)
+        append_completion_review(
+            review_log,
+            CompletionReviewRecord(
+                session_ref=session_ref,
+                pane_id=pane.pane_id,
+                behavior_sha256=behavior_sha256,
+                condition=turn_audit.condition,
+                completion_verdict=completion_verdict,
+                review_signal_id=review_signal.signal_id if review_signal is not None else None,
+                review_verdict=review_verdict,
+                status=status,
+                summary=summary,
+            ),
+        )
 
     def poll_once(self) -> int:
         """Capture all current panes and emit an event for each real change."""
@@ -208,6 +356,8 @@ class Watchd:
                 continue
             self._save_raw_capture(pane.pane_id, content)
             digest, tail = normalized_snapshot(content)
+            if pane_turn_finished(content):
+                self._review_turn_end(pane, content)
             previous = self.baselines.get(pane.pane_id)
             if previous is None:
                 self.baselines[pane.pane_id] = digest

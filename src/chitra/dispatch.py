@@ -72,11 +72,9 @@ growing task list is not drift.
 Completion-claim auditing
 --------------------------
 
-``DispatchOrder`` carries three optional fields (``completion_todo_items``,
-``completion_has_deploy_evidence``, ``completion_has_live_verify_evidence``)
-consumed by ``chitra.completion_gate`` and checked in
-``dispatchd.process_one_order`` before delivery. This module still performs
-no reasoning itself — it only carries the typed inputs the gate needs.
+``DispatchOrder`` carries citation-bearing completion evidence consumed by
+``chitra.completion_gate``. Bare booleans are not evidence and no longer form
+part of the order contract.
 """
 
 from __future__ import annotations
@@ -101,9 +99,9 @@ from typing import Literal, Protocol
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
-from chitra.completion_gate import TodoItem
+from chitra.completion_gate import CompletionEvidence, TodoItem
 from chitra.policy_config import PolicyConfig
-from chitra.reasoning import DecisionProvenance, ReasonedDecision
+from chitra.reasoning import DecisionAttestation
 
 from . import ledger as ledger_mod
 
@@ -209,24 +207,20 @@ class DispatchOrder(BaseModel):
     tag: str = "[C]"
     routing_hint: str | None = None
     task_type: str | None = None
-    decision_kind: Literal["legacy", "operator_relay", "answer", "nudge", "action"] = "legacy"
-    reasoning: ReasonedDecision | None = None
+    message_kind: Literal["legacy", "operator_relay", "reasoned_answer", "reasoned_nudge", "reasoned_action"] = "legacy"
+    decision_attestation: DecisionAttestation | None = None
     input_baseline_hash: str | None = None
     input_seen_hash: str | None = None
     snapshot_tail_hash: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
-    # Optional completion-claim audit inputs. All three are opt-in: a caller
-    # that leaves ``completion_todo_items`` as None is asserting no
-    # completion-gate check applies to this order (e.g. it isn't a done/
-    # complete claim at all), and dispatchd.process_one_order skips the
-    # audit entirely in that case -- existing callers/orders are unaffected.
-    # When ``completion_todo_items`` IS set, dispatchd runs
-    # chitra.completion_gate.evaluate_completion_claim before delivery; see
-    # that module's docstring and docs/evasion-taxonomy.md.
+    # Explicit todo state remains optional because watchd now forces the
+    # event-boundary review even when no TodoWrite state is available.
     completion_todo_items: list[TodoItem] | None = None
-    completion_has_deploy_evidence: bool = False
-    completion_has_live_verify_evidence: bool = False
+    completion_evidence: list[CompletionEvidence] = Field(default_factory=list)
+    completion_open_asks: list[str] = Field(default_factory=list)
+    completion_blockers: list[str] = Field(default_factory=list)
+    completion_brief: str | None = None
 
     # Opt-in exemption from dispatchd's rate-limit freeze check (see
     # dispatchd.process_one_order). False for every ordinary order -- the
@@ -241,17 +235,21 @@ class DispatchOrder(BaseModel):
 
     @model_validator(mode="after")
     def validate_reasoning_attestation(self) -> DispatchOrder:
-        """Bind autonomous message bytes to their goal/principle provenance."""
-        reasoned_kinds = {"answer", "nudge", "action"}
-        if self.decision_kind in reasoned_kinds and self.reasoning is None:
-            raise ValueError(f"{self.decision_kind} dispatch requires reasoning provenance")
-        if self.decision_kind not in reasoned_kinds and self.reasoning is not None:
-            raise ValueError(f"{self.decision_kind} dispatch cannot carry autonomous reasoning")
-        if self.reasoning is not None:
-            if self.reasoning.outcome != "answer":
+        """Bind autonomous message bytes to one pre-dispatch attestation."""
+        reasoned_kinds = {"reasoned_answer", "reasoned_nudge", "reasoned_action"}
+        if self.message_kind in reasoned_kinds and self.decision_attestation is None:
+            raise ValueError(f"{self.message_kind} dispatch requires decision_attestation")
+        if self.message_kind not in reasoned_kinds and self.decision_attestation is not None:
+            raise ValueError(f"{self.message_kind} dispatch cannot carry a decision_attestation")
+        if self.decision_attestation is not None:
+            if self.decision_attestation.outcome != "answer":
                 raise ValueError("an abstained decision cannot be dispatched")
-            if self.reasoning.answer != self.nudge:
-                raise ValueError("dispatch text must exactly match the reasoned answer")
+            if self.decision_attestation.message_kind != self.message_kind:
+                raise ValueError("message_kind must match the decision attestation")
+            if self.decision_attestation.approved_text != self.nudge:
+                raise ValueError("nudge must exactly match the attested approved_text")
+            if self.decision_attestation.operator_confirmation_required and not self.decision_attestation.operator_confirmed:
+                raise ValueError("operator-gated decisions require explicit confirmation before dispatch")
         return self
 class DispatchResult(BaseModel):
     """Result of processing a dispatch order.
@@ -283,7 +281,7 @@ class DispatchResult(BaseModel):
     resolved_model: str | None = None
     resolved_harness: str | None = None
     resolved_zdr: bool = False
-    decision_provenance: DecisionProvenance | None = None
+    decision_attestation_id: str | None = None
     at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

@@ -4,9 +4,11 @@
 
 chitra began as an internal extraction: a tmux dispatch function that had two real, silently-triggering bugs (documented in `src/chitra/dispatch.py`'s module docstring), pulled out into its own hardened, tested library alongside a small set of daemons that turn "occasionally invoke this function from an interactive AI session" into "always-on, deterministic, systemd-supervised background service."
 
-## What chitra is not
+## Bounded reasoning boundary
 
-chitra delivers messages to, and observes the state of, sessions that are themselves driven by an LLM (e.g. Claude Code instances running in tmux) — that IS chitra's purpose. What chitra never does is call an LLM API *itself* to decide what to say or how to act: every decision about message content, timing, and target is made by the caller (a human operator or an orchestrating session) before it reaches chitra. Put another way, chitra manages/orchestrates LLM sessions from the outside, but contains no LLM calls internally — like a mail carrier that doesn't read the letters it delivers. If a request would add an LLM call, a decision-making surface, or general-purpose agent orchestration *inside chitra's own code*, it belongs in a different, higher-level system that *uses* chitra as its delivery/dedup layer — not in chitra itself. This is a scope statement, not an oversight: keeping chitra small is a design goal.
+chitra delivers messages to, and observes the state of, sessions that are themselves driven by an LLM. Its queue, dispatch, evidence, and storage paths remain deterministic. Goal enforcement is the one narrow process boundary: `watchd` invokes separate `claude -p` reviewers to scrutinize the watched session's completed turn against a frozen goal. The reviewers do not draft or review Chitra's prospective response, share context, mutate state, or bypass the operator gates for spend, credentials, irreversible actions, and strategy redirects. Their structured signal is an input to `DecisionAttestation`; only the attested approved text can reach the pane.
+
+General-purpose agent orchestration, task decomposition, and response generation remain out of scope. They belong in a higher-level system that uses chitra's delivery and audit surfaces. This bounded exception exists to make the completion and goal gates real rather than trusting the lane's own self-report.
 
 ## Distribution and packaging
 

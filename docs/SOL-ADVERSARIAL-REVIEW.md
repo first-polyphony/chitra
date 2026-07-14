@@ -149,6 +149,11 @@ On the next `sol-cc` launch, `sed` materializes `CCR_CLAUDE_CLIENT_KEY` into JSO
 
 ### 13. MEDIUM — The completion gate is optional and self-attested, so “CLEAN is proof” overstates what it establishes
 
+**Resolved in v0.8.2:** turn-end classification is now forced in `watchd`,
+`dispatchd` recognizes completion claims without caller opt-in, and typed
+evidence retains concrete citations instead of boolean assertions. The text
+below describes the pre-v0.8.2 failure that motivated the repair.
+
 **Evidence:** `/opt/polyphony/chitra-main/src/chitra/dispatchd.py:161-176`; `/opt/polyphony/chitra-main/src/chitra/completion_gate.py:128-168`.
 
 **Failure scenario:** A caller omits `completion_todo_items`, so dispatchd skips the gate entirely, or supplies an empty list plus `completion_has_deploy_evidence=true` and `completion_has_live_verify_evidence=true`. The gate returns CLEAN without checking a deployment, a live endpoint, or an evidence artifact. Its own docstring admits evidence determination is the caller's responsibility, but then calls CLEAN “proof.” This catches honest wiring mistakes; it is not an adversarial completion proof.

@@ -25,6 +25,11 @@ def default_ledger_path() -> Path:
     return state_dir() / "ledger.jsonl"
 
 
+def default_attestation_ledger_path() -> Path:
+    """Return Chitra's internal decision-attestation ledger path."""
+    return state_dir() / "attestations.jsonl"
+
+
 def default_convlog_path() -> Path:
     """Return the default operator conversation-log path."""
     return state_dir() / "conversation.jsonl"
