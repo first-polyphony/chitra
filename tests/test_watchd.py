@@ -74,6 +74,22 @@ def test_list_panes_uses_live_tmux_enumeration_and_deduplicates_pane_id() -> Non
     assert seen_commands == [["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"]]
 
 
+def test_list_panes_can_isolate_a_session_namespace() -> None:
+    def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        return _completed(
+            command,
+            "%1\tmonitor:0.0\n%2\tboomtown:0.0\n%3\tboomtown-design-a:0.0\n%4\tother:0.0\n",
+        )
+
+    assert list_panes(runner=runner, session_prefixes=("boomtown-",)) == [
+        Pane(pane_id="%3", target="boomtown-design-a:0.0")
+    ]
+    assert list_panes(runner=runner, excluded_session_prefixes=("boomtown",)) == [
+        Pane(pane_id="%1", target="monitor:0.0"),
+        Pane(pane_id="%4", target="other:0.0"),
+    ]
+
+
 def test_event_line_matches_triaged_reader_contract() -> None:
     line = event_line("%9", ["state: waiting", "needs operator input"])
 
@@ -100,9 +116,13 @@ def test_resolve_config_uses_chitra_state_and_watchd_environment(monkeypatch: py
     monkeypatch.setenv("CHITRA_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CHITRA_WATCHD_INTERVAL", "2.5")
     monkeypatch.setenv("CHITRA_WATCHD_PANES", "%1, %2")
+    monkeypatch.setenv("CHITRA_WATCHD_SESSION_PREFIXES", "boomtown-, boomtown-review-")
+    monkeypatch.setenv("CHITRA_WATCHD_EXCLUDE_SESSION_PREFIXES", "boomtown-control")
 
     config = resolve_config()
 
     assert config.events_log == tmp_path / "state" / "events.log"
     assert config.interval_seconds == 2.5
     assert config.panes_override == ("%1", "%2")
+    assert config.session_prefixes == ("boomtown-", "boomtown-review-")
+    assert config.excluded_session_prefixes == ("boomtown-control",)
