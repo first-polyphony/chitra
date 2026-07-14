@@ -38,10 +38,17 @@ All notable changes to this project are documented here, in the [Keep a Changelo
   priority, last-shed-first recovery, and backend-neutral Watchd activity facts.
 
 ### Changed
-- Pinned `watchd`'s isolated reviewer to the cheap `claude-haiku-4-5` model,
-  exposed its model, normal-round count, and command through environment and
-  CLI configuration, and scoped subprocess reviews to completion-claim
-  turn-ends while retaining deterministic auditing for every finished turn.
+- Moved isolated completion review onto a bounded two-worker pool so
+  `poll_once` never waits on `claude -p`; in-flight lanes remain yellow and
+  later polls apply the completed verdict. Delivery-brief validation now
+  defaults to visible warn mode and can be restored to disputing enforcement
+  with `completion_gate.brief_gate_mode: enforce`.
+- Defaulted `watchd`'s isolated reviewer to the ambient monitor model (ruling
+  3A: same model as the monitor, different context), exposed its model,
+  normal-round count, and command through environment and CLI configuration
+  (operators may still pin a cheaper model deliberately), and scoped
+  subprocess reviews to completion-claim turn-ends while retaining
+  deterministic auditing for every finished turn.
 - Consolidated `DecisionProvenance` and `ReasonedDecision` into the immutable
   `DecisionAttestation` API. Every reasoned answer or nudge is bound to the
   exact approved text and logged to Chitra's own attestation ledger before

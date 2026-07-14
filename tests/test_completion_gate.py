@@ -162,6 +162,54 @@ def test_deferral_language_disputes_even_with_full_evidence_and_no_todos() -> No
     assert audit.deferral_matches
 
 
+def test_brief_gate_warn_records_issue_without_disputing_otherwise_clean_claim() -> None:
+    claim = "Completed and deployed at SHA abc1234. Live health probe status=200 with 12 requests."
+
+    audit = evaluate_completion_claim(
+        [],
+        claim,
+        GOOD_EVIDENCE,
+        load_taxonomy(),
+        policy=GatePolicy(brief_gate_mode="warn"),
+    )
+
+    assert audit.verdict == "CLEAN"
+    assert audit.brief_issues
+    assert "brief (warn)" in audit.summary
+
+
+def test_brief_gate_enforce_disputes_otherwise_clean_claim() -> None:
+    claim = "Completed and deployed at SHA abc1234. Live health probe status=200 with 12 requests."
+
+    audit = evaluate_completion_claim(
+        [],
+        claim,
+        GOOD_EVIDENCE,
+        load_taxonomy(),
+        policy=GatePolicy(brief_gate_mode="enforce"),
+    )
+
+    assert audit.verdict == "COMPLETION_DISPUTE"
+    assert audit.brief_issues
+    assert "delivery brief invalid" in audit.summary
+
+
+def test_brief_warn_mode_keeps_deferral_and_evidence_checks_enforcing() -> None:
+    audit = evaluate_completion_claim(
+        [],
+        "Completed, but TODO: deploy and verify this later.",
+        [],
+        load_taxonomy(),
+        policy=GatePolicy(brief_gate_mode="warn"),
+    )
+
+    assert audit.verdict == "COMPLETION_DISPUTE"
+    assert audit.deferral_matches
+    assert audit.evidence_gap is True
+    assert audit.brief_issues
+    assert "brief (warn)" in audit.summary
+
+
 def test_configured_completion_policy_controls_statuses_phrases_and_evidence() -> None:
     policy = GatePolicy(complete_todo_statuses=["closed"], deferral_phrases=["later phrase"], required_evidence=[])
     audit = evaluate_completion_claim(

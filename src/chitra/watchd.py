@@ -18,6 +18,7 @@ import signal
 import subprocess
 import threading
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ import structlog
 
 from chitra.completion_gate import (
     CompletionReviewRecord,
+    TurnEndAudit,
     append_completion_review,
     evaluate_turn_end,
     extract_completion_evidence,
@@ -35,7 +37,7 @@ from chitra.completion_gate import (
 from chitra.goal_enforcement import (
     BehaviorReviewer,
     ClaudeProcessReviewer,
-    GoalReviewError,
+    SessionReviewSignal,
     WatchedSessionBehavior,
     review_watched_session,
 )
@@ -60,7 +62,11 @@ DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_LOG_BYTES = 5 * 1024 * 1024
 DEFAULT_REVIEWER_COUNT = 2
 DEFAULT_REVIEWER_COMMAND = "claude"
-DEFAULT_REVIEWER_MODEL = "claude-haiku-4-5"
+# Default to None so the reviewer inherits the ambient monitor model (ruling 3A:
+# same model as the monitor, different context). Operators may still pin a
+# cheaper model via --reviewer-model / CHITRA_WATCHD_REVIEWER_MODEL.
+DEFAULT_REVIEWER_MODEL: str | None = None
+DEFAULT_REVIEW_MAX_WORKERS = 2
 CAPTURE_LINES = 60
 NORMALIZED_TAIL_LINES = 25
 
@@ -71,6 +77,7 @@ _TIMING_CHROME_RE = re.compile(r"\([0-9]+m? ?[0-9]*s?[^)]*\)")
 _ACTIVE_TURN_RE = re.compile(r"esc to interrupt|thinking|working…|working\.\.\.|running…|running\.\.\.", re.I)
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+ReviewKey = tuple[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +108,18 @@ class WatchdConfig:
     def __post_init__(self) -> None:
         if self.reviewer_count < 1:
             raise ValueError("reviewer_count must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class PendingCompletionReview:
+    """Poll-thread-owned state for one isolated review running off-thread."""
+
+    pane_id: str
+    session_ref: str
+    behavior_sha256: str
+    turn_audit: TurnEndAudit
+    last_verified: str
+    future: Future[SessionReviewSignal]
 
 
 def normalize(content: str) -> list[str]:
@@ -250,7 +269,16 @@ class Watchd:
     runner: CommandRunner = _run_command
     reviewer: BehaviorReviewer | None = None
     baselines: dict[str, str] = field(default_factory=dict)
-    reviewed_turns: set[tuple[str, str]] = field(default_factory=set)
+    reviewed_turns: set[ReviewKey] = field(default_factory=set)
+    pending_reviews: dict[ReviewKey, PendingCompletionReview] = field(default_factory=dict)
+    _review_executor: ThreadPoolExecutor = field(init=False, repr=False)
+    _review_executor_shutdown: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._review_executor = ThreadPoolExecutor(
+            max_workers=DEFAULT_REVIEW_MAX_WORKERS,
+            thread_name_prefix="chitra-watchd-review",
+        )
 
     def _raw_capture_path(self, pane_id: str) -> Path:
         """Return a filesystem-safe diagnostic capture path for one pane."""
@@ -275,18 +303,92 @@ class Watchd:
             logger.warning("watchd_ambiguous_goal_mapping", pane_id=pane.pane_id, target=pane.target, matches=matches)
         return None
 
+    def _finalize_turn_review(
+        self,
+        pending: PendingCompletionReview,
+        *,
+        review_signal: SessionReviewSignal | None,
+        review_error: str = "",
+    ) -> None:
+        """Apply one completed review result on the poll thread."""
+        root = self.config.goals_root or self.config.state_dir
+        review_log = self.config.completion_review_log or self.config.state_dir / "completion_reviews.jsonl"
+        completion_verdict = pending.turn_audit.completion.verdict if pending.turn_audit.completion is not None else None
+        ask = ""
+        if pending.turn_audit.condition == "turn_end_without_completion_claim":
+            status: GoalStatus = "turn-finished-unverified"
+            summary = f"{pending.turn_audit.summary}; no completion claim, so isolated review was not run"
+            review_verdict: Literal["accept", "reject", "unavailable"] = "unavailable"
+        elif review_signal is None:
+            status = "blocked"
+            summary = f"turn-end review unavailable: {review_error}"
+            ask = "Review the lane manually because isolated watched-session review could not complete."
+            review_verdict = "unavailable"
+        elif review_signal.verdict == "reject":
+            status = "blocked"
+            summary = "watched-session direction or completion posture was rejected against the frozen goal"
+            ask = "Review the lane's rejected direction or completion posture against its frozen goal."
+            review_verdict = "reject"
+        elif completion_verdict == "CLEAN":
+            status = "done-pending-close"
+            summary = pending.turn_audit.summary
+            review_verdict = "accept"
+        else:
+            status = "completion-disputed"
+            summary = pending.turn_audit.summary
+            ask = "Resolve the cited completion-gate gaps before treating this lane as complete."
+            review_verdict = "accept"
+
+        update_now(
+            root,
+            pending.session_ref,
+            now=summary,
+            status=status,
+            last_verified=datetime.now(UTC).isoformat() if status == "done-pending-close" else pending.last_verified,
+        )
+        if ask:
+            add_ask(root, pending.session_ref, ask)
+        append_completion_review(
+            review_log,
+            CompletionReviewRecord(
+                session_ref=pending.session_ref,
+                pane_id=pending.pane_id,
+                behavior_sha256=pending.behavior_sha256,
+                condition=pending.turn_audit.condition,
+                completion_verdict=completion_verdict,
+                review_signal_id=review_signal.signal_id if review_signal is not None else None,
+                review_verdict=review_verdict,
+                status=status,
+                summary=summary,
+            ),
+        )
+
+    def _drain_completed_reviews(self) -> None:
+        """Collect ready futures without waiting; all shared-state writes stay here."""
+        for key, pending in list(self.pending_reviews.items()):
+            if not pending.future.done():
+                continue
+            del self.pending_reviews[key]
+            try:
+                review_signal = pending.future.result()
+            except Exception as exc:  # noqa: BLE001 - any reviewer failure must fail closed
+                review_error = str(exc) or type(exc).__name__
+                self._finalize_turn_review(pending, review_signal=None, review_error=review_error)
+            else:
+                self._finalize_turn_review(pending, review_signal=review_signal)
+
     def _review_turn_end(self, pane: Pane, content: str) -> None:
-        """Force the completion/direction gate and persist only our-side detail."""
+        """Run the cheap gate inline and schedule completion review off-thread."""
         text = "\n".join(normalize(content)).strip()
         behavior_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
         key = (pane.pane_id, behavior_sha256)
         if key in self.reviewed_turns:
             return
-        self.reviewed_turns.add(key)
         root = self.config.goals_root or self.config.state_dir
         review_log = self.config.completion_review_log or self.config.state_dir / "completion_reviews.jsonl"
         session_ref = self._session_ref(pane)
         if session_ref is None:
+            self.reviewed_turns.add(key)
             append_completion_review(
                 review_log,
                 CompletionReviewRecord(
@@ -312,77 +414,61 @@ class Watchd:
             open_asks=goal.open_asks,
             blockers=(goal.needs,) if goal.needs else (),
         )
-        review_signal = None
-        review_error = ""
-        if is_completion_claim(text):
-            behavior = WatchedSessionBehavior.from_turn(session_ref, text)
-            reviewer = self.reviewer or ClaudeProcessReviewer(
-                command=self.config.reviewer_command,
-                model=self.config.reviewer_model,
+        pending = PendingCompletionReview(
+            pane_id=pane.pane_id,
+            session_ref=session_ref,
+            behavior_sha256=behavior_sha256,
+            turn_audit=turn_audit,
+            last_verified=goal.last_verified,
+            future=Future(),
+        )
+        if not is_completion_claim(text):
+            self.reviewed_turns.add(key)
+            self._finalize_turn_review(pending, review_signal=None)
+            return
+
+        if len(self.pending_reviews) >= DEFAULT_REVIEW_MAX_WORKERS:
+            update_now(
+                root,
+                session_ref,
+                now=f"{turn_audit.summary}; isolated review is waiting for bounded reviewer capacity",
+                status="turn-finished-unverified",
             )
-            try:
-                review_signal = review_watched_session(
-                    root,
-                    session_ref,
-                    behavior,
-                    reviewer=reviewer,
-                    reviewer_count=self.config.reviewer_count,
-                )
-            except (GoalReviewError, OSError, ValueError) as exc:
-                review_error = str(exc)
+            return
 
-        completion_verdict = turn_audit.completion.verdict if turn_audit.completion is not None else None
-        ask = ""
-        if turn_audit.condition == "turn_end_without_completion_claim":
-            status: GoalStatus = "turn-finished-unverified"
-            summary = f"{turn_audit.summary}; no completion claim, so isolated review was not run"
-            review_verdict: Literal["accept", "reject", "unavailable"] = "unavailable"
-        elif review_signal is None:
-            status = "blocked"
-            summary = f"turn-end review unavailable: {review_error}"
-            ask = "Review the lane manually because isolated watched-session review could not complete."
-            review_verdict = "unavailable"
-        elif review_signal.verdict == "reject":
-            status = "blocked"
-            summary = "watched-session direction or completion posture was rejected against the frozen goal"
-            ask = "Review the lane's rejected direction or completion posture against its frozen goal."
-            review_verdict = "reject"
-        elif completion_verdict == "CLEAN":
-            status = "done-pending-close"
-            summary = turn_audit.summary
-            review_verdict = "accept"
-        else:
-            status = "completion-disputed"
-            summary = turn_audit.summary
-            ask = "Resolve the cited completion-gate gaps before treating this lane as complete."
-            review_verdict = "accept"
-
+        behavior = WatchedSessionBehavior.from_turn(session_ref, text)
+        reviewer = self.reviewer or ClaudeProcessReviewer(
+            command=self.config.reviewer_command,
+            model=self.config.reviewer_model,
+        )
+        future = self._review_executor.submit(
+            review_watched_session,
+            root,
+            session_ref,
+            behavior,
+            reviewer=reviewer,
+            reviewer_count=self.config.reviewer_count,
+        )
+        pending = PendingCompletionReview(
+            pane_id=pane.pane_id,
+            session_ref=session_ref,
+            behavior_sha256=behavior_sha256,
+            turn_audit=turn_audit,
+            last_verified=goal.last_verified,
+            future=future,
+        )
+        self.pending_reviews[key] = pending
+        self.reviewed_turns.add(key)
         update_now(
             root,
             session_ref,
-            now=summary,
-            status=status,
-            last_verified=datetime.now(UTC).isoformat() if status == "done-pending-close" else goal.last_verified,
-        )
-        if ask:
-            add_ask(root, session_ref, ask)
-        append_completion_review(
-            review_log,
-            CompletionReviewRecord(
-                session_ref=session_ref,
-                pane_id=pane.pane_id,
-                behavior_sha256=behavior_sha256,
-                condition=turn_audit.condition,
-                completion_verdict=completion_verdict,
-                review_signal_id=review_signal.signal_id if review_signal is not None else None,
-                review_verdict=review_verdict,
-                status=status,
-                summary=summary,
-            ),
+            now=f"{turn_audit.summary}; isolated review is in flight",
+            status="turn-finished-unverified",
         )
 
     def poll_once(self) -> int:
         """Capture all current panes and emit an event for each real change."""
+        self._drain_completed_reviews()
         emitted = 0
         root = self.config.goals_root or self.config.state_dir
         existing_activity = {record.session_ref: record for record in load_lane_activity(root)}
@@ -426,8 +512,17 @@ class Watchd:
             append_event(self.config.events_log, event_line(pane.pane_id, tail), max_log_bytes=self.config.max_log_bytes)
             self.baselines[pane.pane_id] = digest
             emitted += 1
+        self._drain_completed_reviews()
         upsert_lane_activity(root, activity_updates)
         return emitted
+
+    def shutdown(self) -> None:
+        """Finish running reviews, cancel queued work, and collect every result."""
+        if self._review_executor_shutdown:
+            return
+        self._review_executor_shutdown = True
+        self._review_executor.shutdown(wait=True, cancel_futures=True)
+        self._drain_completed_reviews()
 
 
 def _env_value(name: str) -> str | None:
@@ -523,11 +618,13 @@ def resolve_config(
     )
     if not configured_reviewer_command:
         raise ValueError("reviewer_command must be non-empty")
-    configured_reviewer_model = (
-        _env_value(REVIEWER_MODEL_ENV_VAR) or DEFAULT_REVIEWER_MODEL if reviewer_model is None else reviewer_model.strip()
-    )
-    if not configured_reviewer_model:
-        raise ValueError("reviewer_model must be non-empty")
+    # None means "inherit the ambient monitor model" (ruling 3A); only a
+    # non-empty override pins a specific model. An explicit empty value falls
+    # back to the ambient model rather than erroring.
+    if reviewer_model is not None:
+        configured_reviewer_model = reviewer_model.strip() or None
+    else:
+        configured_reviewer_model = _env_value(REVIEWER_MODEL_ENV_VAR) or DEFAULT_REVIEWER_MODEL
     return WatchdConfig(
         state_dir=configured_state_dir,
         events_log=configured_events_log,
@@ -546,9 +643,12 @@ def run_forever(watchd: Watchd, *, stop_event: threading.Event | None = None) ->
     """Run until a SIGTERM/SIGINT handler (or caller) requests a clean stop."""
     stop_event = stop_event or threading.Event()
     logger.info("watchd_started", events_log=str(watchd.config.events_log), interval_seconds=watchd.config.interval_seconds)
-    while not stop_event.is_set():
-        watchd.poll_once()
-        stop_event.wait(watchd.config.interval_seconds)
+    try:
+        while not stop_event.is_set():
+            watchd.poll_once()
+            stop_event.wait(watchd.config.interval_seconds)
+    finally:
+        watchd.shutdown()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -590,7 +690,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reviewer-model",
         default=None,
-        help="Pinned isolated reviewer model (default: CHITRA_WATCHD_REVIEWER_MODEL or claude-haiku-4-5).",
+        help="Pinned isolated reviewer model (default: CHITRA_WATCHD_REVIEWER_MODEL, else the ambient monitor model).",
     )
     parser.add_argument("--once", action="store_true", help="Capture and compare once, then exit.")
     return parser
@@ -613,7 +713,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     watcher = Watchd(config)
     if args.once:
-        print(f"{{\"emitted\": {watcher.poll_once()}}}")
+        try:
+            print(f"{{\"emitted\": {watcher.poll_once()}}}")
+        finally:
+            watcher.shutdown()
         return 0
 
     stop_event = threading.Event()

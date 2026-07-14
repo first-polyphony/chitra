@@ -6,10 +6,15 @@
 first classifies the turn deterministically. Only a completion claim runs
 isolated watched-session reviewers against the frozen goal; a non-claim is
 recorded as `turn-finished-unverified` without launching a subprocess.
-Completion claims require citation-bearing deploy/live proof and a valid
-delivery brief; outgoing completion claims are also recognized in `dispatchd`
-without caller opt-in. The reviewer command, pinned model, and normal-round
-count are configurable through `CHITRA_WATCHD_REVIEWER_COMMAND`,
+Completion claims require citation-bearing deploy/live proof. Delivery-brief
+issues are recorded as `brief (warn)` by default without causing a dispute;
+set `completion_gate.brief_gate_mode: enforce` in the policy file to make them
+disputing. All other completion checks enforce in both modes. Outgoing
+completion claims are also recognized in `dispatchd` without caller opt-in.
+The isolated review runs on a bounded two-worker pool, so `poll_once` never
+waits on `claude -p`; it marks the lane `turn-finished-unverified` while the
+review is in flight and collects completed verdicts on later polls. The
+reviewer command, pinned model, and normal-round count are configurable through `CHITRA_WATCHD_REVIEWER_COMMAND`,
 `CHITRA_WATCHD_REVIEWER_MODEL`, and `CHITRA_WATCHD_REVIEWER_COUNT` (or their
 matching CLI flags). `DecisionAttestation` replaces the former
 `DecisionProvenance`/`ReasonedDecision` pair and binds only the exact approved

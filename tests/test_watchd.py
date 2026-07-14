@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -104,6 +105,91 @@ def _tracked_goal(root: Path) -> GoalRecord:
             status="working",
         ),
     )
+
+
+class _BlockingReviewer:
+    """A reviewer whose review() blocks until released, to prove poll_once
+    never runs the isolated review inline on the sensing thread."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.entered = threading.Event()
+        self.calls: list[str] = []
+
+    def review(self, goal, behavior, reviewer_id: str) -> ReviewerVerdict:
+        self.entered.set()
+        # Block until the test releases us. If poll_once ran this inline it would
+        # deadlock the sensing loop; the test proceeding past poll_once proves
+        # the review is off-thread.
+        self.release.wait(timeout=30)
+        self.calls.append(reviewer_id)
+        return ReviewerVerdict(
+            reviewer_id=reviewer_id,
+            goal_contract_id=goal.contract_id,
+            behavior_sha256=behavior.behavior_sha256,
+            verdict="accept",
+        )
+
+
+_CITED_CLAIM_CAPTURE = """What was built: The forced completion review was completed and deployed at SHA abc1234.
+What it does: It reviews every finished lane turn before any done state is trusted.
+Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-review.log.
+\u276f
+"""
+
+
+def test_poll_once_does_not_block_on_a_slow_reviewer_and_later_drains_it(tmp_path: Path) -> None:
+    goal = _tracked_goal(tmp_path)
+    reviewer = _BlockingReviewer()
+    state = {"polls": 0}
+
+    def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if command[1] == "list-panes":
+            return _completed(command, "%1\tfleet:0.0\n")
+        if command[1] == "capture-pane":
+            # First capture is a mid-turn baseline; every capture after the
+            # baseline is the finished completion-claim turn (stable content).
+            content = "working on the implementation\nesc to interrupt\n\u276f\n" if state["polls"] == 0 else _CITED_CLAIM_CAPTURE
+            return _completed(command, content)
+        raise AssertionError(f"unexpected command: {command}")
+
+    watcher = Watchd(
+        WatchdConfig(state_dir=tmp_path, events_log=tmp_path / "events.log"),
+        runner=runner,
+        reviewer=reviewer,
+    )
+    try:
+        # First poll: no completion claim yet, establishes the baseline.
+        watcher.poll_once()
+        state["polls"] = 1
+        # Second poll: completion-claim turn-end. This SUBMITS the review to the
+        # executor and returns; if it ran the blocking reviewer inline the call
+        # would hang for the reviewer's 30s wait and never return here.
+        watcher.poll_once()
+        # The review is genuinely running off-thread (it entered review()).
+        assert reviewer.entered.wait(timeout=5)
+        # ...but it has NOT finalized: the lane is in-flight, not done/blocked.
+        stored = get_goal(tmp_path, goal.session_ref)
+        assert stored is not None
+        assert stored.status == "turn-finished-unverified"
+        assert "in flight" in stored.now
+        assert reviewer.calls == []  # reviewer still blocked, no verdict yet
+
+        # Release the reviewer; a later poll drains the completed future.
+        reviewer.release.set()
+        for _ in range(50):
+            watcher.poll_once()
+            drained = get_goal(tmp_path, goal.session_ref)
+            assert drained is not None
+            if drained.status == "done-pending-close":
+                break
+            threading.Event().wait(0.05)
+        drained = get_goal(tmp_path, goal.session_ref)
+        assert drained is not None
+        assert drained.status == "done-pending-close"
+    finally:
+        reviewer.release.set()
+        watcher.shutdown()
 
 
 def test_turn_end_automatically_runs_review_and_marks_cited_completion_pending_close(tmp_path: Path) -> None:
@@ -274,7 +360,7 @@ def test_reviewer_config_precedence_is_cli_then_env_then_pinned_defaults(
     defaults = resolve_config(state_dir=tmp_path / "defaults")
     assert defaults.reviewer_count == 2
     assert defaults.reviewer_command == "claude"
-    assert defaults.reviewer_model == "claude-haiku-4-5"
+    assert defaults.reviewer_model is None
 
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COUNT", "1")
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COMMAND", "env-claude")

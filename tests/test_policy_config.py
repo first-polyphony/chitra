@@ -26,6 +26,7 @@ def test_unconfigured_policy_is_the_current_shipped_behavior(monkeypatch: pytest
     assert policy.completion_gate.deferral_phrases == list(_DEFERRAL_PHRASES)
     assert policy.completion_gate.complete_todo_statuses == ["done"]
     assert policy.completion_gate.required_evidence == ["deploy", "live_verify"]
+    assert policy.completion_gate.brief_gate_mode == "warn"
     assert policy.dispatch.banned_attribution_patterns == [
         r"\boperator\b",
         r"\bthe monitor\b",
@@ -130,6 +131,12 @@ def test_policy_loads_from_environment_when_no_path_is_given(tmp_path: Path, mon
     assert load_policy_config().dispatch.extra_idle_input_regexes == ["READY"]
 
 
+def test_policy_loads_brief_gate_enforcement_mode(tmp_path: Path) -> None:
+    configured = tmp_path / "policy.yaml"
+    configured.write_text(yaml.safe_dump({"completion_gate": {"brief_gate_mode": "enforce"}}), encoding="utf-8")
+    assert load_policy_config(configured).completion_gate.brief_gate_mode == "enforce"
+
+
 def test_policy_configured_errors_are_not_silently_ignored(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         load_policy_config(tmp_path / "missing.yaml")
@@ -143,6 +150,7 @@ def test_policy_configured_errors_are_not_silently_ignored(tmp_path: Path) -> No
     "data",
     [
         {"completion_gate": {"required_evidence": ["unknown"]}},
+        {"completion_gate": {"brief_gate_mode": "invalid"}},
         {"dispatch": {"banned_attribution_patterns": ["["]}},
         {"dispatch": {"extra_idle_input_regexes": ["["]}},
     ],

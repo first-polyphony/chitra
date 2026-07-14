@@ -228,15 +228,19 @@ def evaluate_completion_claim(
     blocked_todos = [item.text for item in todo_items if item.status.lower() in {"blocked", "stalled"}]
     posture_mismatch = bool(blocked_todos and not open_asks and not blockers)
 
+    brief_disputes = policy.brief_gate_mode == "enforce" and bool(brief_issues)
     clean = not (
         todo_residue
         or deferral_matches
         or evidence_gap
         or per_item_evidence_gap
-        or brief_issues
+        or brief_disputes
         or posture_mismatch
     )
     if clean:
+        summary = "clean: cited deploy and live verification evidence, per-item proof, and delivery brief all validate"
+        if brief_issues:
+            summary = f"clean: all enforcing completion checks validate; brief (warn): {brief_issues[0]}"
         return CompletionAudit(
             verdict="CLEAN",
             todo_residue=[],
@@ -244,9 +248,9 @@ def evaluate_completion_claim(
             evidence_gap=False,
             invalid_evidence=[],
             per_item_evidence_gap=[],
-            brief_issues=[],
+            brief_issues=brief_issues,
             posture_mismatch=False,
-            summary="clean: cited deploy and live verification evidence, per-item proof, and delivery brief all validate",
+            summary=summary,
         )
 
     gaps: list[str] = []
@@ -261,7 +265,8 @@ def evaluate_completion_claim(
     if per_item_evidence_gap:
         gaps.append(f"missing per-item verification: {per_item_evidence_gap!r}")
     if brief_issues:
-        gaps.append(f"delivery brief invalid: {brief_issues[0]}")
+        prefix = "delivery brief invalid" if brief_disputes else "brief (warn)"
+        gaps.append(f"{prefix}: {brief_issues[0]}")
     if posture_mismatch:
         gaps.append(f"blocked todo posture has no open ask or blocker: {blocked_todos!r}")
     return CompletionAudit(
