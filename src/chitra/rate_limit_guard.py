@@ -144,6 +144,7 @@ from .rate_limit_state import (
     upsert_load_state,
     upsert_transaction,
 )
+from .recovery import record_pause_recovery
 from .state_paths import default_queue_dir
 from .usage import AccountedVerdict, CodexSnapshotError, codex_snapshot, evaluate_grouped, read_snapshots
 
@@ -223,6 +224,8 @@ class CodexLanePauseStrategy:
 
 def _pause_strategy(backend: PauseBackend) -> LanePauseStrategy:
     return CodexLanePauseStrategy() if backend == "codex" else ClaudeLanePauseStrategy()
+
+NEVER_PAUSE_SESSION_PREFIXES = ("trailhead:monitor:", "trailhead:boomtown:")
 
 
 def _resume_nudge(record: GoalRecord) -> str:
@@ -400,6 +403,9 @@ def plan_pauses(
         session_ref = _session_ref_for(verdict, host=host)
         if session_ref is None:
             skipped.append(f"{verdict.session_id}: no tmux_session on this snapshot -- cannot resolve a dispatch target")
+            continue
+        if session_ref.startswith(NEVER_PAUSE_SESSION_PREFIXES):
+            skipped.append(f"{session_ref}: Chitra's own monitor/harness session is never paused")
             continue
         existing = get_goal(goals_root, session_ref)
         if existing is None:
@@ -594,7 +600,10 @@ def _progress_pause_transaction(
         return _Advance(advanced, note=f"{txn.session_ref}: stop-clear confirmed sent; verifying the turn actually stopped")
 
     if txn.phase == "awaiting_quiescence":
-        return _advance_quiescence(txn, pause_policy=pause_policy, activity_root=activity_root, now=now)
+        advance = _advance_quiescence(txn, pause_policy=pause_policy, activity_root=activity_root, now=now)
+        if advance.txn.phase == "held":
+            record_pause_recovery(activity_root, advance.txn, paused_at=now.isoformat())
+        return advance
 
     return _Advance(txn)  # "held": nothing left for the pause side to do
 

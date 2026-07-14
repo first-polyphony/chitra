@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ import pytest
 
 import chitra.dispatchd as dispatchd_mod
 from chitra.account_registry import RegistryEntry, get_entry
-from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
+from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus, liveness_check
 from chitra.goals import LOAD_SHED_HOLD_REASON_PREFIX, RATE_LIMIT_HOLD_REASON_PREFIX, GoalRecord, get_goal, hold_goal, upsert_goal
 from chitra.lane_activity import LaneActivity, upsert_lane_activity
 from chitra.load_shed import PressureSample
@@ -28,6 +29,7 @@ from chitra.rate_limit_guard import (
     sweep,
 )
 from chitra.rate_limit_state import LoadHostState, Transaction, get_load_state, get_transaction, upsert_load_state, upsert_transaction
+from chitra.recovery import load_recovery_records, recovery_records_path
 from chitra.usage import AccountedVerdict, UsageSnapshot, UsageWindow
 
 FAST_POLICY = PolicyConfig(
@@ -123,6 +125,58 @@ def test_plan_pauses_skips_untracked_sessions_and_foreign_holds(tmp_path: Path) 
     to_pause, skipped = plan_pauses(verdicts, host="tophand", goals_root=tmp_path)
     assert [v.tmux_session for v in to_pause] == ["tracked"]
     assert any("untracked" in reason and "no chitra goal record" in reason for reason in skipped)
+
+
+def test_plan_pauses_selects_an_attached_non_chitra_session(tmp_path: Path) -> None:
+    def attached_runner(command: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        assert command[:3] == ["tmux", "list-clients", "-t"]
+        assert timeout == 5
+        return subprocess.CompletedProcess(command, 0, stdout="operator-client\n", stderr="")
+
+    session_ref = "trailhead:operator-work:0.0"
+    assert liveness_check(session_ref, runner=attached_runner, local_extra={"trailhead"}) is True
+    upsert_goal(tmp_path, _goal(session_ref))
+    verdict = AccountedVerdict(
+        session_id="attached-operator-session",
+        tmux_session="operator-work",
+        kind="claude",
+        account="a",
+        level="pause",
+        binding_window="5h",
+        resume_at_epoch=1_700_000_000,
+        self_fresh=True,
+        account_attributed=False,
+    )
+
+    to_pause, skipped = plan_pauses([verdict], host="trailhead", goals_root=tmp_path)
+
+    assert to_pause == [verdict]
+    assert skipped == []
+
+
+def test_plan_pauses_never_selects_chitra_monitor_or_boomtown(tmp_path: Path) -> None:
+    upsert_goal(tmp_path, _goal("trailhead:monitor:0.0"))
+    upsert_goal(tmp_path, _goal("trailhead:boomtown:0.0"))
+    verdicts = [
+        AccountedVerdict(
+            session_id=f"chitra-{tmux_session}",
+            tmux_session=tmux_session,
+            kind="claude",
+            account="a",
+            level="pause",
+            binding_window=binding_window,
+            resume_at_epoch=1_700_000_000,
+            self_fresh=True,
+            account_attributed=False,
+        )
+        for tmux_session, binding_window in (("monitor", "5h"), ("boomtown", "7d"))
+    ]
+
+    to_pause, skipped = plan_pauses(verdicts, host="trailhead", goals_root=tmp_path)
+
+    assert to_pause == []
+    assert len(skipped) == 2
+    assert all("Chitra's own monitor/harness session is never paused" in reason for reason in skipped)
 
 
 def test_apply_pause_freezes_immediately_and_starts_pause_requested(tmp_path: Path) -> None:
@@ -314,6 +368,18 @@ def test_full_pause_sequence_checkpoint_stop_and_verified_quiescence(tmp_path: P
     assert txn.phase == "held"
     assert len(report_final.paused) == 1
     assert report_final.paused[0].session_ref == "tophand:lane1:0.0"
+    recovery_records = load_recovery_records(goals_root)
+    assert len(recovery_records) == 1
+    recovery = recovery_records[0]
+    assert recovery.pause_id
+    assert recovery.session_ref == "tophand:lane1:0.0"
+    assert recovery.hold_reason == "rate-limit:5h"
+    assert recovery.transcript_path == str(transcript)
+    assert "Ship the tested rate-limit guard safely" in recovery.resume_note
+    assert "Tests pass and the full suite is green" in recovery.resume_note
+    assert recovery.resume_at
+    assert recovery.paused_at == _iso(minutes=5, seconds=31)
+    assert recovery_records_path(goals_root).exists()
     # The goal itself was never re-touched to something other than held.
     assert get_goal(goals_root, "tophand:lane1:0.0").status == "held"
 
