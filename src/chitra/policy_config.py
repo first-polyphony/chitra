@@ -130,6 +130,57 @@ class PausePolicy(BaseModel):
         return self
 
 
+class LoadPolicy(BaseModel):
+    """Host-pressure ladder and concurrency caps for load shedding.
+
+    Pressure is sampled on the host running ``chitra-rate-limit-guard``.  The
+    active level is persisted per host, so this policy remains deterministic
+    even though the guard itself is a one-shot CLI.
+    """
+
+    baseline_max_running: int = 8
+    l1_max_running: int = 6
+    l2_max_running: int = 4
+    l3_max_running: int = 2
+    l1_mem_available_pct: float = 25.0
+    l2_mem_available_pct: float = 15.0
+    l3_mem_available_pct: float = 8.0
+    l1_memory_some_avg60: float = 10.0
+    l2_memory_some_avg60: float = 25.0
+    l3_memory_full_avg60: float = 10.0
+    l1_cpu_some_avg60: float = 60.0
+    clear_mem_available_pct: float = 30.0
+    clear_memory_some_avg60: float = 5.0
+    consecutive_sweeps: int = 2
+    l3_pause: PausePolicy = Field(
+        default_factory=lambda: PausePolicy(
+            checkpoint_deadline_seconds=60,
+            stop_deadline_seconds=60,
+            quiescence_quiet_seconds=15,
+            quiescence_timeout_seconds=300,
+            resume_deadline_seconds=60,
+            max_retry_attempts=3,
+        )
+    )
+
+    @model_validator(mode="after")
+    def validate_ladder(self) -> Self:
+        """Reject inverted pressure thresholds or concurrency ladders."""
+        if not 0 < self.l3_mem_available_pct < self.l2_mem_available_pct < self.l1_mem_available_pct:
+            raise ValueError("load MemAvailable thresholds must increase from L3 through L1")
+        if not self.l1_mem_available_pct < self.clear_mem_available_pct <= 100:
+            raise ValueError("clear_mem_available_pct must exceed the L1 threshold and be at most 100")
+        if not 0 <= self.clear_memory_some_avg60 < self.l1_memory_some_avg60 < self.l2_memory_some_avg60:
+            raise ValueError("load memory PSI some thresholds must increase from clear through L2")
+        if self.l3_memory_full_avg60 <= 0 or self.l1_cpu_some_avg60 <= 0:
+            raise ValueError("load PSI thresholds must be positive")
+        if not 1 <= self.l3_max_running <= self.l2_max_running <= self.l1_max_running <= self.baseline_max_running:
+            raise ValueError("load running caps must increase from L3 through baseline")
+        if self.consecutive_sweeps < 1:
+            raise ValueError("load consecutive_sweeps must be at least 1")
+        return self
+
+
 class PolicyConfig(BaseModel):
     """The complete optional policy.yaml schema."""
 
@@ -138,6 +189,7 @@ class PolicyConfig(BaseModel):
     usage: UsagePolicy = Field(default_factory=UsagePolicy)
     guidance: GuidancePolicy = Field(default_factory=GuidancePolicy)
     pause: PausePolicy = Field(default_factory=PausePolicy)
+    load: LoadPolicy = Field(default_factory=LoadPolicy)
 
 
 def resolve_guidance(config: PolicyConfig, cwd: Path) -> Path | None:

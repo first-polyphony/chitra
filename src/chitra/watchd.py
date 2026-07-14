@@ -40,6 +40,7 @@ from chitra.goal_enforcement import (
     review_watched_session,
 )
 from chitra.goals import GoalStatus, add_ask, list_goals, update_now
+from chitra.lane_activity import LaneActivity, LaneBackend, load_lane_activity, upsert_lane_activity
 from chitra.policy_config import load_policy_config
 from chitra.state_paths import state_dir as default_state_dir
 from chitra.taxonomy import load_taxonomy
@@ -78,6 +79,8 @@ class Pane:
 
     pane_id: str
     target: str
+    attached: bool = True
+    backend: LaneBackend = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +144,16 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
 
+def _pane_backend(command: str) -> LaneBackend:
+    """Classify only explicit pane commands; unknown commands remain unknown."""
+    lowered = command.lower()
+    if "codex" in lowered:
+        return "codex"
+    if "claude" in lowered:
+        return "claude"
+    return "unknown"
+
+
 def list_panes(
     *,
     runner: CommandRunner = _run_command,
@@ -164,7 +177,15 @@ def list_panes(
     included = tuple(prefix.strip() for prefix in (session_prefixes or ()) if prefix.strip())
     excluded = tuple(prefix.strip() for prefix in excluded_session_prefixes if prefix.strip())
 
-    result = runner(["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"])
+    result = runner(
+        [
+            "tmux",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_attached}\t#{pane_current_command}",
+        ]
+    )
     if result.returncode != 0:
         logger.warning("watchd_list_panes_failed", stderr=result.stderr.strip())
         return []
@@ -172,7 +193,10 @@ def list_panes(
     panes: list[Pane] = []
     seen: set[str] = set()
     for line in result.stdout.splitlines():
-        pane_id, separator, target = line.partition("\t")
+        fields = line.split("\t")
+        pane_id = fields[0] if fields else ""
+        target = fields[1] if len(fields) >= 2 else ""
+        separator = "\t" if len(fields) >= 2 else ""
         if not separator or not pane_id or not target or pane_id in seen:
             continue
         session_name, _separator, _pane = target.partition(":")
@@ -181,7 +205,9 @@ def list_panes(
         if any(session_name.startswith(prefix) for prefix in excluded):
             continue
         seen.add(pane_id)
-        panes.append(Pane(pane_id=pane_id, target=target))
+        attached = len(fields) < 3 or fields[2] != "0"
+        backend = _pane_backend(fields[3]) if len(fields) >= 4 else "unknown"
+        panes.append(Pane(pane_id=pane_id, target=target, attached=attached, backend=backend))
     return panes
 
 
@@ -358,6 +384,9 @@ class Watchd:
     def poll_once(self) -> int:
         """Capture all current panes and emit an event for each real change."""
         emitted = 0
+        root = self.config.goals_root or self.config.state_dir
+        existing_activity = {record.session_ref: record for record in load_lane_activity(root)}
+        activity_updates: list[LaneActivity] = []
         for pane in list_panes(
             runner=self.runner,
             panes_override=self.config.panes_override,
@@ -369,9 +398,26 @@ class Watchd:
                 continue
             self._save_raw_capture(pane.pane_id, content)
             digest, tail = normalized_snapshot(content)
+            observed_at = datetime.now(UTC).isoformat()
+            session_ref = self._session_ref(pane)
             if pane_turn_finished(content):
                 self._review_turn_end(pane, content)
             previous = self.baselines.get(pane.pane_id)
+            changed = previous is None or previous != digest
+            if session_ref is not None:
+                prior_activity = existing_activity.get(session_ref)
+                activity_updates.append(
+                    LaneActivity(
+                        session_ref=session_ref,
+                        pane_id=pane.pane_id,
+                        last_change_at=(observed_at if changed or prior_activity is None else prior_activity.last_change_at),
+                        last_seen_at=observed_at,
+                        attached=pane.attached,
+                        backend=pane.backend
+                        if pane.backend != "unknown"
+                        else ("unknown" if prior_activity is None else prior_activity.backend),
+                    )
+                )
             if previous is None:
                 self.baselines[pane.pane_id] = digest
                 continue
@@ -380,6 +426,7 @@ class Watchd:
             append_event(self.config.events_log, event_line(pane.pane_id, tail), max_log_bytes=self.config.max_log_bytes)
             self.baselines[pane.pane_id] = digest
             emitted += 1
+        upsert_lane_activity(root, activity_updates)
         return emitted
 
 

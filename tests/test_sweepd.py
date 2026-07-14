@@ -9,7 +9,7 @@ from pathlib import Path
 
 from chitra.account_registry import update_registry
 from chitra.goals import GoalRecord, GoalStatus, close_goal, upsert_goal
-from chitra.rate_limit_state import Transaction, upsert_transaction
+from chitra.rate_limit_state import LoadHostState, Transaction, upsert_load_state, upsert_transaction
 from chitra.sweepd import SweepSnapshot, build_snapshot, compute_delta, load_snapshot, resolve_config, run_once
 from chitra.usage import AccountedVerdict
 
@@ -91,6 +91,10 @@ def test_compute_delta_surfaces_changed_new_spec_pending_and_disappeared_lanes(t
             attempts=2,
         ),
     )
+    upsert_load_state(
+        tmp_path,
+        LoadHostState(host="trailhead", load_level=2, shed_lanes=(stable.session_ref,), updated_at=NOW.isoformat()),
+    )
     _register_account(tmp_path, "stable")
     flags_path = tmp_path / "flags.log"
     flags_path.write_text(
@@ -105,10 +109,13 @@ def test_compute_delta_surfaces_changed_new_spec_pending_and_disappeared_lanes(t
     assert first_lanes[stable.session_ref].change == "new"
     assert first_lanes[stable.session_ref].lane.due is True
     assert first_lanes[stable.session_ref].lane.rate_limit_phase == "held"
+    assert first_lanes[stable.session_ref].lane.load_level == 2
     assert first_lanes[stable.session_ref].lane.account == "monitor@example.test"
     assert first_lanes[pending.session_ref].lane.pending_decisions == ("Approve the irreversible production deploy?",)
     assert first_lanes[bad_spec.session_ref].lane.specification_failures
     assert first.changed_flags[0].flag.rule == "rate_limit"
+    assert first.load_level == {"trailhead": 2}
+    assert first.shed_lanes == (stable.session_ref,)
 
     unchanged = compute_delta(baseline, baseline, now=NOW)
     assert unchanged.changed_lanes == ()

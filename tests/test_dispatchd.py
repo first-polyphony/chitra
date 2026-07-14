@@ -102,9 +102,7 @@ def test_reasoned_order_logs_attestation_our_side_without_leaking_metadata_into_
         attestation_ledger_path=tmp_path / "attestations.jsonl",
     )[0]
 
-    entry = ledger_mod.AttestationLedgerEntry.model_validate_json(
-        (tmp_path / "attestations.jsonl").read_text(encoding="utf-8")
-    )
+    entry = ledger_mod.AttestationLedgerEntry.model_validate_json((tmp_path / "attestations.jsonl").read_text(encoding="utf-8"))
     assert entry.attestation == attestation
     assert result.decision_attestation_id == attestation.attestation_id
     assert seen_nudges == [approved]
@@ -501,6 +499,39 @@ def test_sealed_task_type_bypass_is_delivered_despite_the_hold(tmp_path: Path, m
     assert results[0].status == DispatchStatus.SENT
 
 
+def test_load_shed_hold_defers_ordinary_work_but_allows_guard_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        calls.append(order.order_id)
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    goals_root = tmp_path / "goals"
+    upsert_goal(goals_root, _tracked_goal())
+    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="load-shed:tophand:2")
+    queue_dir = tmp_path / "queue"
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(order_id="ordinary", session_ref="tophand:feeds-111:0.0", nudge="new work"),
+    )
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(
+            order_id="load-checkpoint",
+            session_ref="tophand:feeds-111:0.0",
+            nudge="checkpoint now",
+            task_type="load-shed-checkpoint",
+            bypass_rate_limit_freeze=True,
+        ),
+    )
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
+
+    assert [result.status for result in results] == [DispatchStatus.DEFERRED, DispatchStatus.SENT]
+    assert calls == ["load-checkpoint"]
+
+
 def test_no_goals_root_configured_leaves_dispatch_unaffected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Backward compatibility: a caller that never passes goals_root sees no
     behavior change -- the freeze check is a pure read of an explicitly
@@ -835,9 +866,7 @@ def test_dead_preclaim_reservation_is_reclaimed_before_processing(tmp_path: Path
     assert (queue_dir / "processed" / "ord-stale-reservation.json").exists()
 
 
-def test_result_appearing_while_waiting_for_the_lane_lock_is_caught_under_the_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_result_appearing_while_waiting_for_the_lane_lock_is_caught_under_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression for SOL finding #5's explicit ask: recheck idempotency
     UNDER the lane lock, not only before acquiring it. Simulate a
     concurrent order for the same session finishing (writing this order's

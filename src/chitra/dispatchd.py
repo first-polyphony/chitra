@@ -8,7 +8,7 @@ Queue layout (default ``queue_dir``, overridable per call/CLI):
     queue_dir/in_flight/*.json   -- an order file a worker has atomically
                                      claimed and is currently delivering
     queue_dir/deferred/*.json    -- an order parked because its session is
-                                     rate-limit-held (see below); no result
+                                     guard-held (see below); no result
                                      file exists for it yet
     queue_dir/results/<id>.json  -- DispatchResult JSON, written after processing
     queue_dir/processed/*.json   -- the order file, moved here after processing
@@ -42,13 +42,12 @@ Crash-safety:
   no second paste; only if the transcript does NOT confirm delivery does it
   proceed to (re)dispatch.
 
-Rate-limit freeze and deferral (opt-in via ``goals_root``): immediately
+Guard freeze and deferral (opt-in via ``goals_root``): immediately
 before any delivery attempt -- **under the lane lock**, not before it (see
 "TOCTOU" below) -- ``process_one_order`` checks whether the order's
-``session_ref`` currently has a ``chitra.goals`` record held for a
-rate-limit reason (``hold_reason`` starting with
-``chitra.goals.RATE_LIMIT_HOLD_REASON_PREFIX``, set by
-``chitra.rate_limit_guard``). If so, the order is atomically parked in
+``session_ref`` currently has a ``chitra.goals`` record held for a rate-limit
+or load-shed reason (using the sibling prefixes declared in ``chitra.goals``
+and set by ``chitra.rate_limit_guard``). If so, the order is atomically parked in
 ``deferred/`` -- no pane I/O, no result file written, so it is neither
 delivered nor discarded. ``chitra.rate_limit_guard.apply_resume`` calls
 ``requeue_deferred_for_session`` once the hold actually clears, which
@@ -59,7 +58,7 @@ each is then delivered exactly once by the same crash-safe idempotency
 check every other order already relies on.
 
 TOCTOU: the freeze check reads and acts under the SAME lane-lock hold used
-for delivery, so a rate-limit hold that lands after the check and before a
+for delivery, so a guard hold that lands after the check and before a
 paste (the classic time-of-check/time-of-use race) cannot slip an ordinary
 order into a newly-frozen lane -- there is no window between "checked" and
 "pasted" for the hold to appear in. See docs/SOL-ADVERSARIAL-REVIEW finding #7.
@@ -110,7 +109,7 @@ from .dispatch import (
     nudge_confirmation_marker,
     transcript_confirms_nudge,
 )
-from .goals import RATE_LIMIT_HOLD_REASON_PREFIX, get_goal
+from .goals import LOAD_SHED_HOLD_REASON_PREFIX, RATE_LIMIT_HOLD_REASON_PREFIX, get_goal
 from .policy_config import PolicyConfig, load_policy_config
 from .routing_config import RoutingConfig, load_routing_config, resolve_route, resolve_routing_hint
 from .state_paths import default_attestation_ledger_path, default_ledger_key_path, default_ledger_path, default_queue_dir
@@ -123,7 +122,16 @@ DEFAULT_POLL_SECONDS = 1.0
 # Sealed allowlist: the only task_types dispatchd itself will honor a
 # caller-set bypass_rate_limit_freeze=True for. Owned here, not by the
 # order -- see this module's docstring.
-_RATE_LIMIT_GUARD_TASK_TYPES = frozenset({"rate-limit-checkpoint", "rate-limit-stop", "rate-limit-resume"})
+_RATE_LIMIT_GUARD_TASK_TYPES = frozenset(
+    {
+        "rate-limit-checkpoint",
+        "rate-limit-stop",
+        "rate-limit-resume",
+        "load-shed-checkpoint",
+        "load-shed-stop",
+        "load-shed-resume",
+    }
+)
 SESSION_ALLOW_PREFIXES_ENV_VAR = "CHITRA_ALLOWED_SESSION_PREFIXES"
 SESSION_DENY_PREFIXES_ENV_VAR = "CHITRA_DENIED_SESSION_PREFIXES"
 
@@ -625,7 +633,9 @@ def _process_claimed_order(
         # effect for dispatchd's own sealed internal task types.
         allowed_bypass = order.bypass_rate_limit_freeze and order.task_type in _RATE_LIMIT_GUARD_TASK_TYPES
         held = None if allowed_bypass else get_goal(goals_root, order.session_ref)
-        if held is not None and held.status == "held" and held.hold_reason.startswith(RATE_LIMIT_HOLD_REASON_PREFIX):
+        if held is not None and held.status == "held" and held.hold_reason.startswith(
+            (RATE_LIMIT_HOLD_REASON_PREFIX, LOAD_SHED_HOLD_REASON_PREFIX)
+        ):
             logger.info(
                 "dispatchd_order_deferred_rate_limit_freeze",
                 order_id=order.order_id,
@@ -640,7 +650,11 @@ def _process_claimed_order(
                 order_id=order.order_id,
                 session_ref=order.session_ref,
                 status=DispatchStatus.DEFERRED,
-                reason=f"rate-limit-deferred: {held.hold_reason} (resume_at={held.resume_at})",
+                reason=(
+                    f"load-shed-deferred: {held.hold_reason}"
+                    if held.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX)
+                    else f"rate-limit-deferred: {held.hold_reason} (resume_at={held.resume_at})"
+                ),
                 routing_hint=order.routing_hint,
                 task_type=order.task_type,
                 routing_hint_source=routing_hint_source,
@@ -882,7 +896,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--goals-root",
         type=Path,
         default=None,
-        help="chitra.goals store root consulted for the rate-limit freeze check (default: CHITRA_STATE_DIR).",
+        help="chitra.goals store root consulted for the guard freeze check (default: CHITRA_STATE_DIR).",
     )
     parser.add_argument(
         "--allow-session-prefix",

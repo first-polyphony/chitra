@@ -11,6 +11,7 @@ import pytest
 
 from chitra.goal_enforcement import ReviewerVerdict
 from chitra.goals import GoalRecord, get_goal, upsert_goal
+from chitra.lane_activity import load_lane_activity
 from chitra.triaged import parse_event_line
 from chitra.watchd import (
     Pane,
@@ -177,7 +178,36 @@ def test_list_panes_uses_live_tmux_enumeration_and_deduplicates_pane_id() -> Non
         return _completed(command, "%1\tfleet:0.0\n%2\tfleet:0.1\n%1\tduplicate:9.9\n")
 
     assert list_panes(runner=runner) == [Pane(pane_id="%1", target="fleet:0.0"), Pane(pane_id="%2", target="fleet:0.1")]
-    assert seen_commands == [["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"]]
+    assert seen_commands == [
+        [
+            "tmux",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_attached}\t#{pane_current_command}",
+        ]
+    ]
+
+
+def test_watchd_persists_backend_neutral_change_recency_and_attachment(tmp_path: Path) -> None:
+    _tracked_goal(tmp_path)
+
+    def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if command[1] == "list-panes":
+            return _completed(command, "%1\tfleet:0.0\t0\tcodex\n")
+        if command[1] == "capture-pane":
+            return _completed(command, "working on the requested change\n")
+        raise AssertionError(f"unexpected command: {command}")
+
+    watcher = Watchd(WatchdConfig(state_dir=tmp_path, events_log=tmp_path / "events.log"), runner=runner)
+    watcher.poll_once()
+
+    activity = load_lane_activity(tmp_path)
+    assert len(activity) == 1
+    assert activity[0].session_ref == "localhost:fleet:0.0"
+    assert activity[0].attached is False
+    assert activity[0].backend == "codex"
+    assert activity[0].last_change_at
 
 
 def test_list_panes_can_isolate_a_session_namespace() -> None:
@@ -187,9 +217,7 @@ def test_list_panes_can_isolate_a_session_namespace() -> None:
             "%1\tmonitor:0.0\n%2\tboomtown:0.0\n%3\tboomtown-design-a:0.0\n%4\tother:0.0\n",
         )
 
-    assert list_panes(runner=runner, session_prefixes=("boomtown-",)) == [
-        Pane(pane_id="%3", target="boomtown-design-a:0.0")
-    ]
+    assert list_panes(runner=runner, session_prefixes=("boomtown-",)) == [Pane(pane_id="%3", target="boomtown-design-a:0.0")]
     assert list_panes(runner=runner, excluded_session_prefixes=("boomtown",)) == [
         Pane(pane_id="%1", target="monitor:0.0"),
         Pane(pane_id="%4", target="other:0.0"),

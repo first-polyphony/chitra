@@ -49,8 +49,8 @@ dispatch:
 #     /opt/polyphony/repo: /srv/onedrive-share/DocsHome/Projects_Dev/decisions.md
 #     default: /srv/onedrive-share/DocsHome/decisions.md
 
-# Usage snapshots are read and evaluated by chitra-usage. Uncomment this
-# template to override the shipped defaults; chitra never pauses or resumes a lane.
+# Usage snapshots are read by chitra-usage and acted on transactionally by
+# chitra-rate-limit-guard. Uncomment this template to override shipped defaults.
 # usage:
 #   # Graceful-pause thresholds for Claude 5-hour/7-day windows (or Codex primary/secondary).
 #   pause_5h_pct: 92.0
@@ -58,7 +58,34 @@ dispatch:
 #   # Approaching thresholds: the monitor should avoid assigning new work.
 #   warn_5h_pct: 80.0
 #   warn_7d_pct: 90.0
-#   # Dynamic running-lane cap; null disables deterministic throttle accounting.
+#   # Operator baseline cap. null uses load.baseline_max_running (8 by default).
 #   max_running: null
 #   # Whether the monitor may automatically re-arm timed holds after reset.
 #   auto_resume: true
+
+# Host-load ladder sampled from local /proc on each host's guard timer. The
+# state and two-sweep anti-flap counters are persisted per host.
+# load:
+#   baseline_max_running: 8
+#   l1_max_running: 6
+#   l2_max_running: 4
+#   l3_max_running: 2
+#   l1_mem_available_pct: 25.0
+#   l2_mem_available_pct: 15.0
+#   l3_mem_available_pct: 8.0
+#   l1_memory_some_avg60: 10.0
+#   l2_memory_some_avg60: 25.0
+#   l3_memory_full_avg60: 10.0
+#   # CPU pressure is capped at L1; memory pressure alone can select L2/L3.
+#   l1_cpu_some_avg60: 60.0
+#   clear_mem_available_pct: 30.0
+#   clear_memory_some_avg60: 5.0
+#   consecutive_sweeps: 2
+#   # L3 remains graceful but uses shorter transaction deadlines.
+#   l3_pause:
+#     checkpoint_deadline_seconds: 60
+#     stop_deadline_seconds: 60
+#     quiescence_quiet_seconds: 15
+#     quiescence_timeout_seconds: 300
+#     resume_deadline_seconds: 60
+#     max_retry_attempts: 3

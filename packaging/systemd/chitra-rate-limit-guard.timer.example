@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the chitra capacity and load-shed sweep every two minutes
+Documentation=https://github.com/first-polyphony/chitra
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=chitra-rate-limit-guard.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

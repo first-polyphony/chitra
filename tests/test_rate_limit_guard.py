@@ -14,7 +14,9 @@ import pytest
 import chitra.dispatchd as dispatchd_mod
 from chitra.account_registry import RegistryEntry, get_entry
 from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
-from chitra.goals import GoalRecord, get_goal, upsert_goal
+from chitra.goals import LOAD_SHED_HOLD_REASON_PREFIX, RATE_LIMIT_HOLD_REASON_PREFIX, GoalRecord, get_goal, hold_goal, upsert_goal
+from chitra.lane_activity import LaneActivity, upsert_lane_activity
+from chitra.load_shed import PressureSample
 from chitra.policy_config import PausePolicy, PolicyConfig, UsagePolicy
 from chitra.rate_limit_guard import (
     CHECKPOINT_NUDGE,
@@ -25,7 +27,7 @@ from chitra.rate_limit_guard import (
     plan_resumes,
     sweep,
 )
-from chitra.rate_limit_state import Transaction, get_transaction, upsert_transaction
+from chitra.rate_limit_state import LoadHostState, Transaction, get_load_state, get_transaction, upsert_load_state, upsert_transaction
 from chitra.usage import AccountedVerdict, UsageSnapshot, UsageWindow
 
 FAST_POLICY = PolicyConfig(
@@ -38,6 +40,7 @@ FAST_POLICY = PolicyConfig(
         max_retry_attempts=3,
     )
 )
+CLEAR_PRESSURE = PressureSample(80, 0, 0, 0)
 
 
 def _snapshot(*, session_id: str, tmux_session: str, account: str = "acct@example.com", five_hour_pct: float, ts: str) -> UsageSnapshot:
@@ -141,6 +144,97 @@ def test_apply_pause_freezes_immediately_and_starts_pause_requested(tmp_path: Pa
     goal = get_goal(tmp_path, "tophand:lane1:0.0")
     assert goal is not None and goal.status == "held"
     assert goal.hold_reason == "rate-limit:5h"
+
+
+def test_progressive_resume_starts_one_stable_lane_per_sweep(tmp_path: Path) -> None:
+    usage_dir = tmp_path / "usage"
+    refs = [f"tophand:lane{i}:0.0" for i in (3, 1, 2)]
+    for ref in refs:
+        upsert_goal(tmp_path, _goal(ref))
+        hold_goal(tmp_path, ref, reason="rate-limit:5h", resume_at=_iso(minutes=-1))
+        upsert_transaction(
+            tmp_path,
+            Transaction(
+                session_ref=ref,
+                phase="held",
+                hold_reason="rate-limit:5h",
+                resume_at=_iso(minutes=-1),
+                created_at=_iso(),
+                updated_at=_iso(),
+            ),
+        )
+        session = ref.split(":")[1]
+        _write_snapshot(usage_dir, _snapshot(session_id=session, tmux_session=session, five_hour_pct=5, ts=_iso()))
+
+    sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=tmp_path / "queue",
+        policy=FAST_POLICY,
+        pressure_sample=CLEAR_PRESSURE,
+        now=_now(),
+    )
+
+    assert get_transaction(tmp_path, "tophand:lane1:0.0").phase == "resume_requested"
+    assert get_transaction(tmp_path, "tophand:lane2:0.0").phase == "held"
+    assert get_transaction(tmp_path, "tophand:lane3:0.0").phase == "held"
+
+    sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=tmp_path / "queue",
+        policy=FAST_POLICY,
+        pressure_sample=CLEAR_PRESSURE,
+        now=_now(minutes=1),
+    )
+
+    assert get_transaction(tmp_path, "tophand:lane1:0.0").phase == "resume_sent"
+    assert get_transaction(tmp_path, "tophand:lane2:0.0").phase == "resume_requested"
+    assert get_transaction(tmp_path, "tophand:lane3:0.0").phase == "held"
+
+
+def test_progressive_resume_does_not_limit_brand_new_rate_limit_pauses(tmp_path: Path) -> None:
+    usage_dir = tmp_path / "usage"
+    for index in range(3):
+        session = f"hot{index}"
+        upsert_goal(tmp_path, _goal(f"tophand:{session}:0.0"))
+        _write_snapshot(usage_dir, _snapshot(session_id=session, tmux_session=session, five_hour_pct=99, ts=_iso()))
+
+    sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=tmp_path / "queue",
+        policy=FAST_POLICY,
+        pressure_sample=CLEAR_PRESSURE,
+        now=_now(),
+    )
+
+    assert all(get_goal(tmp_path, f"tophand:hot{index}:0.0").status == "held" for index in range(3))
+    assert all(get_transaction(tmp_path, f"tophand:hot{index}:0.0").phase == "pause_requested" for index in range(3))
+
+
+def test_superseded_hold_janitor_closes_dead_goal_without_dispatch(tmp_path: Path) -> None:
+    ref = "tophand:old-lane:0.0"
+    upsert_goal(tmp_path, _goal(ref))
+    hold_goal(tmp_path, ref, reason="superseded-by:host:other:0.0")
+
+    report = sweep(
+        usage_dir=tmp_path / "usage",
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=tmp_path / "queue",
+        policy=FAST_POLICY,
+        pressure_sample=CLEAR_PRESSURE,
+        now=_now(),
+    )
+
+    assert report.cleared == [ref]
+    assert get_goal(tmp_path, ref) is None
+    assert get_transaction(tmp_path, ref) is None
+    assert not list((tmp_path / "queue" / "orders").glob("*.json"))
 
 
 # --- full multi-sweep pause sequence ----------------------------------------
@@ -693,3 +787,147 @@ def test_codex_synthetic_verdict_is_skipped_not_silently_fanned_out(tmp_path: Pa
     to_pause, skipped = plan_pauses(verdicts, host="tophand", goals_root=tmp_path)
     assert to_pause == []
     assert any("no tmux_session" in reason for reason in skipped)
+
+
+# --- host-load ladder integration -------------------------------------------
+
+
+def test_load_shed_acts_only_after_second_breach_and_uses_distinct_prefix(tmp_path: Path) -> None:
+    usage_dir = tmp_path / "usage"
+    queue_dir = tmp_path / "queue"
+    for index in range(7):
+        status = "blocked" if index == 0 else "working"
+        upsert_goal(tmp_path, dataclasses.replace(_goal(f"tophand:lane{index}:0.0"), status=status))
+    codex_lane = dataclasses.replace(_snapshot(session_id="lane0", tmux_session="lane0", five_hour_pct=5, ts=_iso()), kind="codex")
+    _write_snapshot(usage_dir, codex_lane)
+    breach = PressureSample(24, 0, 0, 0)
+
+    first = sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=queue_dir,
+        policy=FAST_POLICY,
+        pressure_sample=breach,
+        now=_now(),
+    )
+    assert first.load_level == 0
+    assert all(get_goal(tmp_path, f"tophand:lane{index}:0.0").status != "held" for index in range(7))
+
+    second = sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=queue_dir,
+        policy=FAST_POLICY,
+        pressure_sample=breach,
+        now=_now(minutes=1),
+    )
+
+    shed = get_goal(tmp_path, "tophand:lane0:0.0")
+    txn = get_transaction(tmp_path, "tophand:lane0:0.0")
+    assert second.load_level == 1
+    assert shed is not None and shed.status == "held"
+    assert shed.hold_reason == "load-shed:tophand:1"
+    assert shed.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX)
+    assert not shed.hold_reason.startswith(RATE_LIMIT_HOLD_REASON_PREFIX)
+    assert txn is not None and txn.backend == "codex" and txn.phase == "pause_requested"
+    assert second.shed_lanes == ["tophand:lane0:0.0"]
+
+    upsert_lane_activity(
+        tmp_path,
+        [
+            LaneActivity(
+                session_ref="tophand:lane0:0.0",
+                pane_id="%1",
+                last_change_at=_iso(minutes=1),
+                last_seen_at=_iso(minutes=1),
+                attached=True,
+                backend="codex",
+            )
+        ],
+    )
+    sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=queue_dir,
+        policy=FAST_POLICY,
+        pressure_sample=breach,
+        now=_now(minutes=2),
+    )
+    txn = get_transaction(tmp_path, "tophand:lane0:0.0")
+    assert txn is not None and txn.phase == "checkpoint_sent"
+    checkpoint = json.loads((queue_dir / "orders" / f"{txn.checkpoint_order_id}.json").read_text(encoding="utf-8"))
+    assert checkpoint["task_type"] == "load-shed-checkpoint"
+    assert "Codex lane" in checkpoint["nudge"]
+
+    _deliver(queue_dir, txn.checkpoint_order_id)
+    sweep(
+        usage_dir=usage_dir,
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=queue_dir,
+        policy=FAST_POLICY,
+        pressure_sample=breach,
+        now=_now(minutes=3),
+    )
+    txn = get_transaction(tmp_path, "tophand:lane0:0.0")
+    assert txn is not None and txn.phase == "awaiting_quiescence"
+    assert txn.stop_order_id == ""
+    assert not any(json.loads(path.read_text())["task_type"] == "load-shed-stop" for path in (queue_dir / "orders").glob("*.json"))
+
+
+def test_load_resume_waits_for_two_clear_sweeps_then_uses_last_shed_first(tmp_path: Path) -> None:
+    refs = ("tophand:first:0.0", "tophand:last:0.0")
+    for ref in refs:
+        upsert_goal(tmp_path, _goal(ref))
+        hold_goal(tmp_path, ref, reason="load-shed:tophand:1")
+        upsert_transaction(
+            tmp_path,
+            Transaction(
+                session_ref=ref,
+                phase="held",
+                hold_reason="load-shed:tophand:1",
+                created_at=_iso(),
+                updated_at=_iso(),
+            ),
+        )
+    upsert_load_state(
+        tmp_path,
+        LoadHostState(
+            host="tophand",
+            observed_level=1,
+            load_level=1,
+            shed_lanes=refs,
+            updated_at=_iso(),
+        ),
+    )
+
+    first = sweep(
+        usage_dir=tmp_path / "usage",
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=tmp_path / "queue",
+        policy=FAST_POLICY,
+        pressure_sample=CLEAR_PRESSURE,
+        now=_now(minutes=1),
+    )
+    assert first.load_level == 1
+    assert get_transaction(tmp_path, refs[1]).phase == "held"
+
+    second = sweep(
+        usage_dir=tmp_path / "usage",
+        host="tophand",
+        goals_root=tmp_path,
+        queue_dir=tmp_path / "queue",
+        policy=FAST_POLICY,
+        pressure_sample=CLEAR_PRESSURE,
+        now=_now(minutes=2),
+    )
+
+    state = get_load_state(tmp_path, "tophand")
+    assert second.load_level == 0
+    assert state is not None and state.load_level == 0
+    assert get_transaction(tmp_path, refs[1]).phase == "resume_requested"
+    assert get_transaction(tmp_path, refs[0]).phase == "held"

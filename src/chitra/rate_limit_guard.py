@@ -36,10 +36,10 @@ HOW a pause/resume actually happens, verifiably, with no silent stalls:
   templates, never LLM-authored, handed to the existing queue for the
   already-running ``dispatchd`` daemon to deliver. This module never
   touches a tmux pane directly. Delivery of the checkpoint/stop/resume
-  nudges bypasses dispatchd's rate-limit freeze via
+  nudges bypasses dispatchd's guard freeze via
   ``DispatchOrder.bypass_rate_limit_freeze`` + a sealed ``task_type`` --
   see ``chitra.dispatchd``'s module docstring; dispatchd, not this module,
-  enforces that only its own three internal task types may use the bypass.
+  enforces that only the guard's sealed internal task types may use the bypass.
 - ``chitra.account_registry`` (freshness-bounded identity): tracks which
   account each tracked ``tmux_session`` was last observed under, so a
   session whose usage snapshot goes missing mid-cycle, or whose account
@@ -47,20 +47,16 @@ HOW a pause/resume actually happens, verifiably, with no silent stalls:
   silently ignored or silently merged with an unrelated session (see
   docs/SOL-ADVERSARIAL-REVIEW finding #6).
 
-Verifying the stop, not just labeling it: a checkpoint nudge alone (asking
-the agent, in prose, to wrap up) does not prove anything stopped. After the
-checkpoint is CONFIRMED delivered, this module enqueues a second,
-deterministic order whose literal text is the Claude Code slash command
-``/goal clear`` (not prose asking for one) -- a real stop command, not a
-request. Once THAT is confirmed delivered, the transaction watches the
-target session's own transcript file's mtime across sweeps (no in-process
-sleeping -- this is a one-shot CLI meant to run under an external timer, so
-"waiting" is free: it is simply the time between cron ticks) until it has
-gone quiet for ``PolicyConfig.pause.quiescence_quiet_seconds`` -- only THEN
-is the transaction marked ``held``. If the checkpoint's delivery could only
-be confirmed via the weaker pane-capture fallback (no transcript path
-recorded), quiescence cannot be verified deterministically; the transaction
-escalates rather than falsely claiming a verified stop.
+Verifying the stop, not just labeling it: a checkpoint nudge alone does not
+prove anything stopped. For Claude Code, after the checkpoint is CONFIRMED
+delivered, this module enqueues the deterministic ``/goal clear`` slash
+command and watches the target transcript mtime across sweeps. For Codex,
+there is no invented internal stop API: the fixed checkpoint asks the lane to
+stop cleanly and the transaction watches Watchd's pane-change timestamp.
+Either evidence source must remain unchanged for
+``PolicyConfig.pause.quiescence_quiet_seconds`` before the transaction reaches
+``held``. Missing backend-appropriate evidence escalates rather than falsely
+claiming a verified stop.
 
 Session-ref resolution (a documented assumption, not a verified fact -- see
 this repo's PR description for the operator to confirm or correct): a usage
@@ -87,7 +83,15 @@ an external timer (systemd timer / cron), exactly like ``chitra.draft_
 scanner``'s periodic-scan shape -- re-running it every few minutes is what
 lets the transaction state machine make forward progress and is what makes
 "resume it automatically after reset" work, with no long-lived process of
-its own.
+its own. Example two-minute systemd units ship under ``packaging/systemd``.
+
+The same sweep also samples local MemAvailable and Linux memory/CPU PSI. Its
+per-host two-sweep anti-flap state and last-shed-first stack live beside the
+transaction ledger. Load holds use ``load-shed:<host>:<level>`` and reuse this
+exact machine; L3 only tightens graceful deadlines and never kills a lane.
+Claude lanes retain the checkpoint plus ``/goal clear`` sequence. Codex lanes
+receive a fixed checkpoint-and-stop order, skip that Claude-specific slash
+command, and prove quiescence from Watchd's backend-neutral pane-change state.
 """
 
 from __future__ import annotations
@@ -99,15 +103,47 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 import structlog
 
-from .account_registry import update_registry
+from .account_registry import load_registry, update_registry
 from .dispatch import DispatchOrder, DispatchResult, DispatchStatus, transcript_mtime
 from .dispatchd import requeue_deferred_for_session
-from .goals import RATE_LIMIT_HOLD_REASON_PREFIX, GoalRecord, due_goals, get_goal, hold_goal, list_goals, resume_goal
+from .goals import (
+    LOAD_SHED_HOLD_REASON_PREFIX,
+    RATE_LIMIT_HOLD_REASON_PREFIX,
+    GoalRecord,
+    close_goal,
+    due_goals,
+    get_goal,
+    hold_goal,
+    list_goals,
+    resume_goal,
+)
+from .lane_activity import load_lane_activity
+from .load_shed import (
+    PressureSample,
+    advance_load_state,
+    build_shed_candidates,
+    effective_max_running,
+    load_shed_reason,
+    pause_policy_for_load,
+    rank_shed_candidates,
+    sample_pressure,
+)
 from .policy_config import PausePolicy, PolicyConfig, UsagePolicy, load_policy_config
-from .rate_limit_state import Transaction, get_transaction, load_transactions, remove_transaction, upsert_transaction
+from .rate_limit_state import (
+    LoadHostState,
+    PauseBackend,
+    Transaction,
+    get_load_state,
+    get_transaction,
+    load_transactions,
+    remove_transaction,
+    upsert_load_state,
+    upsert_transaction,
+)
 from .state_paths import default_queue_dir
 from .usage import AccountedVerdict, CodexSnapshotError, codex_snapshot, evaluate_grouped, read_snapshots
 
@@ -137,11 +173,67 @@ STOP_NUDGE = "/goal clear"
 CHECKPOINT_TASK_TYPE = "rate-limit-checkpoint"
 STOP_TASK_TYPE = "rate-limit-stop"
 RESUME_TASK_TYPE = "rate-limit-resume"
+LOAD_SHED_CHECKPOINT_TASK_TYPE = "load-shed-checkpoint"
+LOAD_SHED_STOP_TASK_TYPE = "load-shed-stop"
+LOAD_SHED_RESUME_TASK_TYPE = "load-shed-resume"
+
+LOAD_SHED_CHECKPOINT_NUDGE = (
+    "Host load pressure requires this lane to yield capacity. Checkpoint now: finish or cleanly abandon the current step, "
+    "write a short resume note, and stop producing work until Chitra re-arms the stored goal."
+)
+CODEX_CHECKPOINT_NUDGE = (
+    "Capacity protection requires this Codex lane to checkpoint and stop cleanly. Finish or cleanly abandon the current step, "
+    "record what is done and what should happen next, then become quiescent until the stored goal is re-armed."
+)
+
+
+class LanePauseStrategy(Protocol):
+    """Backend boundary for the fixed orders used by the shared pause machine."""
+
+    def checkpoint(self, txn: Transaction) -> tuple[str, str]: ...
+
+    def stop(self, txn: Transaction) -> tuple[str, str] | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeLanePauseStrategy:
+    """Existing Claude Code checkpoint plus deterministic ``/goal clear``."""
+
+    def checkpoint(self, txn: Transaction) -> tuple[str, str]:
+        if txn.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+            return LOAD_SHED_CHECKPOINT_TASK_TYPE, LOAD_SHED_CHECKPOINT_NUDGE
+        return CHECKPOINT_TASK_TYPE, CHECKPOINT_NUDGE
+
+    def stop(self, txn: Transaction) -> tuple[str, str]:
+        task_type = LOAD_SHED_STOP_TASK_TYPE if txn.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX) else STOP_TASK_TYPE
+        return task_type, STOP_NUDGE
+
+
+@dataclass(frozen=True, slots=True)
+class CodexLanePauseStrategy:
+    """Codex checkpoint boundary; pane quiescence is the only verified stop signal."""
+
+    def checkpoint(self, txn: Transaction) -> tuple[str, str]:
+        task_type = LOAD_SHED_CHECKPOINT_TASK_TYPE if txn.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX) else CHECKPOINT_TASK_TYPE
+        return task_type, CODEX_CHECKPOINT_NUDGE
+
+    def stop(self, txn: Transaction) -> None:
+        return None
+
+
+def _pause_strategy(backend: PauseBackend) -> LanePauseStrategy:
+    return CodexLanePauseStrategy() if backend == "codex" else ClaudeLanePauseStrategy()
 
 
 def _resume_nudge(record: GoalRecord) -> str:
     """Build the re-arm nudge from a lane's OWN stored fields -- no LLM authorship."""
+    if record.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+        return f"Host pressure has cleared -- resuming. Goal: {record.goal} Done when: {record.done_when}"
     return f"Rate-limit window has reset -- resuming. Goal: {record.goal} Done when: {record.done_when}"
+
+
+def _resume_task_type(record: GoalRecord) -> str:
+    return LOAD_SHED_RESUME_TASK_TYPE if record.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX) else RESUME_TASK_TYPE
 
 
 def _hold_reason_for(verdict: AccountedVerdict) -> str:
@@ -221,16 +313,22 @@ class SweepReport:
     paused: list[PauseOutcome] = field(default_factory=list)
     resumed: list[ResumeOutcome] = field(default_factory=list)
     advanced: list[str] = field(default_factory=list)  # interim phase-transition notes, for operator visibility
+    cleared: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     escalations: list[str] = field(default_factory=list)
+    load_level: int = 0
+    shed_lanes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "paused": [item.to_dict() for item in self.paused],
             "resumed": [item.to_dict() for item in self.resumed],
             "advanced": self.advanced,
+            "cleared": self.cleared,
             "skipped": self.skipped,
             "escalations": self.escalations,
+            "load_level": self.load_level,
+            "shed_lanes": self.shed_lanes,
         }
 
 
@@ -318,7 +416,15 @@ def plan_pauses(
     return to_pause, skipped
 
 
-def apply_pause(verdict: AccountedVerdict, *, host: str, goals_root: Path | None, now: datetime) -> Transaction:
+def apply_pause(
+    subject: AccountedVerdict | GoalRecord,
+    *,
+    host: str,
+    goals_root: Path | None,
+    now: datetime,
+    hold_reason: str | None = None,
+    backend: PauseBackend | None = None,
+) -> Transaction:
     """Start a new pause transaction for one session already selected by
     ``plan_pauses``. The hold is applied FIRST, unconditionally -- the
     rate-limit fact driving this is external and real regardless of what
@@ -326,34 +432,59 @@ def apply_pause(verdict: AccountedVerdict, *, host: str, goals_root: Path | None
     Everything after this (checkpoint, stop, quiescence verification) is
     the transaction machine's job, driven by later sweeps.
     """
-    session_ref = _session_ref_for(verdict, host=host)
-    assert session_ref is not None  # plan_pauses already filtered
-    hold_reason = _hold_reason_for(verdict)
-    resume_at_iso = _resume_at_iso(verdict.resume_at_epoch)
-    hold_goal(goals_root, session_ref, reason=hold_reason, resume_at=resume_at_iso)
+    if isinstance(subject, AccountedVerdict):
+        session_ref = _session_ref_for(subject, host=host)
+        assert session_ref is not None  # plan_pauses already filtered
+        resolved_reason = _hold_reason_for(subject)
+        resume_at_iso = _resume_at_iso(subject.resume_at_epoch)
+        resolved_backend: PauseBackend = subject.kind
+    else:
+        session_ref = subject.session_ref
+        if hold_reason is None or not hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+            raise ValueError("load-shed apply_pause requires a load-shed hold reason")
+        resolved_reason = hold_reason
+        resume_at_iso = ""
+        resolved_backend = backend or "claude"
+    hold_goal(goals_root, session_ref, reason=resolved_reason, resume_at=resume_at_iso)
     txn = Transaction(
         session_ref=session_ref,
         phase="pause_requested",
-        hold_reason=hold_reason,
+        backend=resolved_backend,
+        hold_reason=resolved_reason,
         resume_at=resume_at_iso,
         created_at=now.isoformat(),
         updated_at=now.isoformat(),
     )
-    logger.info("rate_limit_guard_pause_started", session_ref=session_ref, hold_reason=hold_reason, resume_at=resume_at_iso)
+    logger.info(
+        "rate_limit_guard_pause_started",
+        session_ref=session_ref,
+        hold_reason=resolved_reason,
+        resume_at=resume_at_iso,
+        backend=resolved_backend,
+    )
     return upsert_transaction(goals_root, txn)
 
 
-def _progress_pause_transaction(txn: Transaction, *, queue_dir: Path, pause_policy: PausePolicy, now: datetime) -> _Advance:
+def _progress_pause_transaction(
+    txn: Transaction,
+    *,
+    queue_dir: Path,
+    pause_policy: PausePolicy,
+    activity_root: Path | None,
+    now: datetime,
+) -> _Advance:
     """Advance a pause-side transaction by at most one phase this sweep."""
+    strategy = _pause_strategy(txn.backend)
     if txn.phase == "pause_requested":
-        order_id = f"{CHECKPOINT_TASK_TYPE}-{uuid.uuid4().hex[:12]}"
+        task_type, nudge = strategy.checkpoint(txn)
+        order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
         _enqueue(
             queue_dir,
             DispatchOrder(
                 order_id=order_id,
                 session_ref=txn.session_ref,
-                nudge=CHECKPOINT_NUDGE,
-                task_type=CHECKPOINT_TASK_TYPE,
+                nudge=nudge,
+                task_type=task_type,
                 bypass_rate_limit_freeze=True,
                 created_at=now.isoformat(),
             ),
@@ -373,23 +504,45 @@ def _progress_pause_transaction(txn: Transaction, *, queue_dir: Path, pause_poli
         result = _read_result(queue_dir, txn.checkpoint_order_id)
         if result is None:
             return _bounded_wait(
-                txn, deadline_seconds=pause_policy.checkpoint_deadline_seconds, max_attempts=pause_policy.max_retry_attempts,
-                now=now, waiting_for="checkpoint delivery",
+                txn,
+                deadline_seconds=pause_policy.checkpoint_deadline_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for="checkpoint delivery",
             )
         if result.status != DispatchStatus.SENT:
             advance = _escalate_or_retry(
-                txn, deadline_seconds=pause_policy.checkpoint_deadline_seconds, max_attempts=pause_policy.max_retry_attempts,
-                now=now, waiting_for=f"checkpoint delivery (last result: {result.status.value})",
+                txn,
+                deadline_seconds=pause_policy.checkpoint_deadline_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for=f"checkpoint delivery (last result: {result.status.value})",
             )
             return _retry_with_fresh_checkpoint(advance, txn, queue_dir=queue_dir, now=now)
-        order_id = f"{STOP_TASK_TYPE}-{uuid.uuid4().hex[:12]}"
+        stop = strategy.stop(txn)
+        if stop is None:
+            advanced = replace(
+                txn,
+                phase="awaiting_quiescence",
+                transcript_path=result.transcript_path or "",
+                last_transcript_mtime=None,
+                last_activity_token="",
+                quiescent_since="",
+                attempts=0,
+                escalated=False,
+                deadline_at=(now + timedelta(seconds=pause_policy.quiescence_timeout_seconds)).isoformat(),
+                updated_at=now.isoformat(),
+            )
+            return _Advance(advanced, note=f"{txn.session_ref}: Codex checkpoint confirmed sent; verifying pane quiescence")
+        stop_task_type, stop_nudge = stop
+        order_id = f"{stop_task_type}-{uuid.uuid4().hex[:12]}"
         _enqueue(
             queue_dir,
             DispatchOrder(
                 order_id=order_id,
                 session_ref=txn.session_ref,
-                nudge=STOP_NUDGE,
-                task_type=STOP_TASK_TYPE,
+                nudge=stop_nudge,
+                task_type=stop_task_type,
                 bypass_rate_limit_freeze=True,
                 created_at=now.isoformat(),
             ),
@@ -410,13 +563,19 @@ def _progress_pause_transaction(txn: Transaction, *, queue_dir: Path, pause_poli
         result = _read_result(queue_dir, txn.stop_order_id)
         if result is None:
             return _bounded_wait(
-                txn, deadline_seconds=pause_policy.stop_deadline_seconds, max_attempts=pause_policy.max_retry_attempts,
-                now=now, waiting_for="stop-clear delivery",
+                txn,
+                deadline_seconds=pause_policy.stop_deadline_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for="stop-clear delivery",
             )
         if result.status != DispatchStatus.SENT:
             advance = _escalate_or_retry(
-                txn, deadline_seconds=pause_policy.stop_deadline_seconds, max_attempts=pause_policy.max_retry_attempts,
-                now=now, waiting_for=f"stop-clear delivery (last result: {result.status.value})",
+                txn,
+                deadline_seconds=pause_policy.stop_deadline_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for=f"stop-clear delivery (last result: {result.status.value})",
             )
             return _retry_with_fresh_stop(advance, txn, queue_dir=queue_dir, now=now)
         transcript_path = result.transcript_path or txn.transcript_path
@@ -425,6 +584,7 @@ def _progress_pause_transaction(txn: Transaction, *, queue_dir: Path, pause_poli
             phase="awaiting_quiescence",
             transcript_path=transcript_path,
             last_transcript_mtime=None,
+            last_activity_token="",
             quiescent_since="",
             attempts=0,
             escalated=False,
@@ -434,7 +594,7 @@ def _progress_pause_transaction(txn: Transaction, *, queue_dir: Path, pause_poli
         return _Advance(advanced, note=f"{txn.session_ref}: stop-clear confirmed sent; verifying the turn actually stopped")
 
     if txn.phase == "awaiting_quiescence":
-        return _advance_quiescence(txn, pause_policy=pause_policy, now=now)
+        return _advance_quiescence(txn, pause_policy=pause_policy, activity_root=activity_root, now=now)
 
     return _Advance(txn)  # "held": nothing left for the pause side to do
 
@@ -447,14 +607,15 @@ def _retry_with_fresh_checkpoint(advance: _Advance, original: Transaction, *, qu
     of a dead one."""
     if advance.txn.escalated or advance.txn.attempts == original.attempts:
         return advance
-    order_id = f"{CHECKPOINT_TASK_TYPE}-{uuid.uuid4().hex[:12]}"
+    task_type, nudge = _pause_strategy(original.backend).checkpoint(original)
+    order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
     _enqueue(
         queue_dir,
         DispatchOrder(
             order_id=order_id,
             session_ref=original.session_ref,
-            nudge=CHECKPOINT_NUDGE,
-            task_type=CHECKPOINT_TASK_TYPE,
+            nudge=nudge,
+            task_type=task_type,
             bypass_rate_limit_freeze=True,
             created_at=now.isoformat(),
         ),
@@ -466,14 +627,18 @@ def _retry_with_fresh_stop(advance: _Advance, original: Transaction, *, queue_di
     """The stop-side counterpart of ``_retry_with_fresh_checkpoint``."""
     if advance.txn.escalated or advance.txn.attempts == original.attempts:
         return advance
-    order_id = f"{STOP_TASK_TYPE}-{uuid.uuid4().hex[:12]}"
+    stop = _pause_strategy(original.backend).stop(original)
+    if stop is None:
+        return advance
+    task_type, nudge = stop
+    order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
     _enqueue(
         queue_dir,
         DispatchOrder(
             order_id=order_id,
             session_ref=original.session_ref,
-            nudge=STOP_NUDGE,
-            task_type=STOP_TASK_TYPE,
+            nudge=nudge,
+            task_type=task_type,
             bypass_rate_limit_freeze=True,
             created_at=now.isoformat(),
         ),
@@ -481,15 +646,45 @@ def _retry_with_fresh_stop(advance: _Advance, original: Transaction, *, queue_di
     return _Advance(replace(advance.txn, stop_order_id=order_id), note=advance.note, escalation=advance.escalation)
 
 
-def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, now: datetime) -> _Advance:
+def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, activity_root: Path | None, now: datetime) -> _Advance:
     """Poll (no sleeping -- see this module's docstring) whether the target
     transcript has gone quiet for ``quiescence_quiet_seconds``. Only a
     confirmed quiet window marks the transaction ``held`` -- a timeout with
     no confirmation escalates; it never assumes the turn stopped just
     because time ran out."""
+    if not txn.transcript_path and txn.backend == "codex":
+        activity = next((item for item in load_lane_activity(activity_root) if item.session_ref == txn.session_ref), None)
+        if activity is None:
+            return _bounded_wait(
+                txn,
+                deadline_seconds=pause_policy.quiescence_timeout_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for="Codex turn-stopped verification (watchd has no pane activity fact for this lane)",
+            )
+        token = activity.last_change_at
+        if not txn.last_activity_token or token != txn.last_activity_token:
+            return _Advance(replace(txn, last_activity_token=token, quiescent_since=now.isoformat(), updated_at=now.isoformat()))
+        quiescent_since = _parse_iso(txn.quiescent_since) if txn.quiescent_since else now
+        if (now - quiescent_since).total_seconds() >= pause_policy.quiescence_quiet_seconds:
+            held = replace(txn, phase="held", updated_at=now.isoformat())
+            return _Advance(held, note=f"{txn.session_ref}: pane confirmed quiet -- hold verified")
+        deadline = _parse_iso(txn.deadline_at) if txn.deadline_at else now
+        if now < deadline:
+            return _Advance(txn)
+        return _escalate_or_retry(
+            txn,
+            deadline_seconds=pause_policy.quiescence_timeout_seconds,
+            max_attempts=pause_policy.max_retry_attempts,
+            now=now,
+            waiting_for="Codex turn-stopped verification (pane quiet, but below the required quiet window)",
+        )
     if not txn.transcript_path:
         return _bounded_wait(
-            txn, deadline_seconds=pause_policy.quiescence_timeout_seconds, max_attempts=1, now=now,
+            txn,
+            deadline_seconds=pause_policy.quiescence_timeout_seconds,
+            max_attempts=1,
+            now=now,
             waiting_for="turn-stopped verification (delivery was only confirmed via the weaker pane-capture "
             "fallback, so no transcript is available to verify quiescence against)",
         )
@@ -498,8 +693,11 @@ def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, now: dat
     mtime = transcript_mtime(txn.transcript_path, host=host)
     if mtime is None:
         return _bounded_wait(
-            txn, deadline_seconds=pause_policy.quiescence_timeout_seconds, max_attempts=pause_policy.max_retry_attempts,
-            now=now, waiting_for="turn-stopped verification (transcript unreadable)",
+            txn,
+            deadline_seconds=pause_policy.quiescence_timeout_seconds,
+            max_attempts=pause_policy.max_retry_attempts,
+            now=now,
+            waiting_for="turn-stopped verification (transcript unreadable)",
         )
     if txn.last_transcript_mtime is None or mtime != txn.last_transcript_mtime:
         # Still active (or this is the first observation) -- keep watching.
@@ -513,8 +711,11 @@ def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, now: dat
     if now < deadline:
         return _Advance(txn)
     return _escalate_or_retry(
-        txn, deadline_seconds=pause_policy.quiescence_timeout_seconds, max_attempts=pause_policy.max_retry_attempts,
-        now=now, waiting_for="turn-stopped verification (transcript quiet, but below the required quiet window)",
+        txn,
+        deadline_seconds=pause_policy.quiescence_timeout_seconds,
+        max_attempts=pause_policy.max_retry_attempts,
+        now=now,
+        waiting_for="turn-stopped verification (transcript quiet, but below the required quiet window)",
     )
 
 
@@ -554,6 +755,20 @@ def plan_resumes(
     return to_resume, escalations
 
 
+def select_next_resume(eligible: list[GoalRecord], *, priority_session_refs: tuple[str, ...] = ()) -> GoalRecord | None:
+    """Select exactly one resume candidate in a documented stable order.
+
+    Rate-limit resumes use ``session_ref`` ascending.  A caller with a
+    durable semantic order (load shedding's last-shed-first stack) supplies
+    that order explicitly; unknown refs remain stable by ``session_ref``.
+    """
+    if not eligible:
+        return None
+    priority = {session_ref: index for index, session_ref in enumerate(priority_session_refs)}
+    fallback = len(priority)
+    return min(eligible, key=lambda record: (priority.get(record.session_ref, fallback), record.session_ref))
+
+
 def apply_resume(record: GoalRecord, *, goals_root: Path | None, now: datetime) -> Transaction:
     """Start (or continue) a resume transaction for one lane already
     selected by ``plan_resumes``. Does NOT clear the hold -- that only
@@ -580,14 +795,15 @@ def _progress_resume_transaction(
 ) -> _Advance:
     """Advance a resume-side transaction by at most one phase this sweep."""
     if txn.phase == "resume_requested":
-        order_id = f"{RESUME_TASK_TYPE}-{uuid.uuid4().hex[:12]}"
+        task_type = _resume_task_type(record)
+        order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
         _enqueue(
             queue_dir,
             DispatchOrder(
                 order_id=order_id,
                 session_ref=txn.session_ref,
                 nudge=_resume_nudge(record),
-                task_type=RESUME_TASK_TYPE,
+                task_type=task_type,
                 bypass_rate_limit_freeze=True,
                 created_at=now.isoformat(),
             ),
@@ -607,23 +823,30 @@ def _progress_resume_transaction(
         result = _read_result(queue_dir, txn.resume_order_id)
         if result is None:
             return _bounded_wait(
-                txn, deadline_seconds=pause_policy.resume_deadline_seconds, max_attempts=pause_policy.max_retry_attempts,
-                now=now, waiting_for="resume delivery",
+                txn,
+                deadline_seconds=pause_policy.resume_deadline_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for="resume delivery",
             )
         if result.status != DispatchStatus.SENT:
             advance = _escalate_or_retry(
-                txn, deadline_seconds=pause_policy.resume_deadline_seconds, max_attempts=pause_policy.max_retry_attempts,
-                now=now, waiting_for=f"resume delivery (last result: {result.status.value})",
+                txn,
+                deadline_seconds=pause_policy.resume_deadline_seconds,
+                max_attempts=pause_policy.max_retry_attempts,
+                now=now,
+                waiting_for=f"resume delivery (last result: {result.status.value})",
             )
             if not advance.txn.escalated and advance.txn.attempts != txn.attempts:
-                order_id = f"{RESUME_TASK_TYPE}-{uuid.uuid4().hex[:12]}"
+                task_type = _resume_task_type(record)
+                order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
                 _enqueue(
                     queue_dir,
                     DispatchOrder(
                         order_id=order_id,
                         session_ref=txn.session_ref,
                         nudge=_resume_nudge(record),
-                        task_type=RESUME_TASK_TYPE,
+                        task_type=task_type,
                         bypass_rate_limit_freeze=True,
                         created_at=now.isoformat(),
                     ),
@@ -633,6 +856,61 @@ def _progress_resume_transaction(
         return _Advance(txn, finished=True)
 
     return _Advance(txn)
+
+
+def clear_superseded_holds(*, goals_root: Path | None) -> list[str]:
+    """Close dead superseded goals so no resume path can ever re-arm them."""
+    cleared: list[str] = []
+    for record in list_goals(goals_root):
+        if record.status != "held" or not record.hold_reason.startswith("superseded-by:"):
+            continue
+        close_goal(goals_root, record.session_ref)
+        remove_transaction(goals_root, record.session_ref)
+        cleared.append(record.session_ref)
+        logger.info("rate_limit_guard_superseded_hold_cleared", session_ref=record.session_ref)
+    return sorted(cleared)
+
+
+def _load_level_from_reason(hold_reason: str) -> int:
+    if not hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+        return 0
+    try:
+        level = int(hold_reason.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+    return level if level in (1, 2, 3) else 0
+
+
+def _pause_policy_for_transaction(txn: Transaction, policy: PolicyConfig) -> PausePolicy:
+    level = _load_level_from_reason(txn.hold_reason)
+    return pause_policy_for_load(policy.pause, policy.load, level) if level else policy.pause
+
+
+def _plan_load_resumes(
+    *,
+    goals_root: Path | None,
+    verdicts: list[AccountedVerdict],
+    load_state: LoadHostState,
+) -> list[GoalRecord]:
+    """Return cleared-pressure load holds, preserving the durable shed stack."""
+    if load_state.load_level != 0:
+        return []
+    verdict_by_session = {verdict.tmux_session: verdict for verdict in verdicts if verdict.tmux_session}
+    eligible: list[GoalRecord] = []
+    for session_ref in reversed(load_state.shed_lanes):
+        record = get_goal(goals_root, session_ref)
+        if record is None or record.status != "held" or not record.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+            continue
+        txn = get_transaction(goals_root, session_ref)
+        if txn is not None and txn.phase != "held":
+            continue
+        parts = session_ref.split(":")
+        tmux_session = parts[1] if len(parts) == 3 else session_ref
+        usage = verdict_by_session.get(tmux_session)
+        if usage is not None and usage.level != "ok":
+            continue
+        eligible.append(record)
+    return eligible
 
 
 def sweep(
@@ -645,6 +923,7 @@ def sweep(
     goals_root: Path | None = None,
     queue_dir: Path | None = None,
     policy: PolicyConfig | None = None,
+    pressure_sample: PressureSample | None = None,
     now: datetime | None = None,
 ) -> SweepReport:
     """Run one sweep pass: fold fresh usage into the account registry,
@@ -658,7 +937,6 @@ def sweep(
     ``chitra.account_registry`` alike (all "this host's chitra state").
     """
     resolved_policy = policy or PolicyConfig()
-    pause_policy = resolved_policy.pause
     current = datetime.now(UTC) if now is None else now
     resolved_queue_dir = queue_dir or default_queue_dir()
 
@@ -668,6 +946,18 @@ def sweep(
     verdicts = evaluate_grouped(snapshots, policy=resolved_policy.usage)
 
     report = SweepReport()
+
+    sampled_pressure = pressure_sample or sample_pressure()
+    load_state = advance_load_state(
+        get_load_state(goals_root, host),
+        host=host,
+        sample=sampled_pressure,
+        policy=resolved_policy.load,
+        now=current,
+    )
+    load_state = upsert_load_state(goals_root, load_state)
+    report.load_level = load_state.load_level
+    report.shed_lanes = list(load_state.shed_lanes)
 
     registry_update = update_registry(goals_root, verdicts, now=current)
     for entry in registry_update.disappeared:
@@ -681,7 +971,21 @@ def sweep(
             "not carrying prior hold/pause state forward under the new identity"
         )
 
+    report.cleared.extend(clear_superseded_holds(goals_root=goals_root))
     goal_by_ref = {record.session_ref: record for record in list_goals(goals_root)}
+    current_shed_lanes = tuple(
+        session_ref
+        for session_ref in load_state.shed_lanes
+        if (record := goal_by_ref.get(session_ref)) is not None
+        and record.status == "held"
+        and record.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX)
+    )
+    if current_shed_lanes != load_state.shed_lanes:
+        load_state = upsert_load_state(
+            goals_root,
+            replace(load_state, shed_lanes=current_shed_lanes, updated_at=current.isoformat()),
+        )
+        report.shed_lanes = list(load_state.shed_lanes)
 
     # Reconcile any hold with no transaction record (e.g. an operator-applied
     # rate-limit: hold, or a crash between hold_goal and the transaction's
@@ -689,7 +993,7 @@ def sweep(
     # it up, instead of being silently invisible forever. See
     # docs/SOL-ADVERSARIAL-REVIEW finding #2, item 1.
     for record in goal_by_ref.values():
-        if record.status != "held" or not record.hold_reason.startswith(RATE_LIMIT_HOLD_REASON_PREFIX):
+        if record.status != "held" or not record.hold_reason.startswith((RATE_LIMIT_HOLD_REASON_PREFIX, LOAD_SHED_HOLD_REASON_PREFIX)):
             continue
         if get_transaction(goals_root, record.session_ref) is not None:
             continue
@@ -714,7 +1018,13 @@ def sweep(
         if txn.session_ref not in goal_by_ref:
             remove_transaction(goals_root, txn.session_ref)  # goal was closed out from under the guard
             continue
-        advance = _progress_pause_transaction(txn, queue_dir=resolved_queue_dir, pause_policy=pause_policy, now=current)
+        advance = _progress_pause_transaction(
+            txn,
+            queue_dir=resolved_queue_dir,
+            pause_policy=_pause_policy_for_transaction(txn, resolved_policy),
+            activity_root=goals_root,
+            now=current,
+        )
         if advance.txn != txn:
             upsert_transaction(goals_root, advance.txn)
         if advance.note:
@@ -733,6 +1043,40 @@ def sweep(
         new_txn = apply_pause(verdict, host=host, goals_root=goals_root, now=current)
         report.advanced.append(f"{new_txn.session_ref}: rate-limit hold applied, pause sequence started")
 
+    # --- shed enough newly selected lanes to reach the active load cap -----
+    if load_state.load_level > 0:
+        current_goals = list_goals(goals_root)
+        candidates = build_shed_candidates(
+            current_goals,
+            activities=load_lane_activity(goals_root),
+            registry=load_registry(goals_root),
+            host=host,
+        )
+        cap = effective_max_running(resolved_policy.usage, resolved_policy.load, load_state.load_level)
+        excess = max(0, len(candidates) - cap)
+        for candidate in rank_shed_candidates(candidates)[:excess]:
+            if candidate.goal is None:
+                report.skipped.append(f"{candidate.session_ref}: no goal record -- cannot create a durable load-shed hold")
+                continue
+            reason = load_shed_reason(host, load_state.load_level)
+            new_txn = apply_pause(
+                candidate.goal,
+                host=host,
+                goals_root=goals_root,
+                now=current,
+                hold_reason=reason,
+                backend=candidate.backend,
+            )
+            if new_txn.session_ref not in load_state.shed_lanes:
+                load_state = replace(
+                    load_state,
+                    shed_lanes=(*load_state.shed_lanes, new_txn.session_ref),
+                    updated_at=current.isoformat(),
+                )
+            report.advanced.append(f"{new_txn.session_ref}: {reason} hold applied, shared pause sequence started")
+        load_state = upsert_load_state(goals_root, load_state)
+        report.shed_lanes = list(load_state.shed_lanes)
+
     # --- progress every resume-side transaction already in flight ---------
     for txn in load_transactions(goals_root):
         if txn.phase not in ("resume_requested", "resume_sent"):
@@ -741,11 +1085,25 @@ def sweep(
         if resume_record is None:
             remove_transaction(goals_root, txn.session_ref)
             continue
-        advance = _progress_resume_transaction(txn, resume_record, queue_dir=resolved_queue_dir, pause_policy=pause_policy, now=current)
+        advance = _progress_resume_transaction(
+            txn,
+            resume_record,
+            queue_dir=resolved_queue_dir,
+            pause_policy=_pause_policy_for_transaction(txn, resolved_policy),
+            now=current,
+        )
         if advance.finished:
             resume_goal(goals_root, txn.session_ref)
             requeued = requeue_deferred_for_session(resolved_queue_dir, txn.session_ref)
             remove_transaction(goals_root, txn.session_ref)
+            if txn.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+                load_state = replace(
+                    load_state,
+                    shed_lanes=tuple(session_ref for session_ref in load_state.shed_lanes if session_ref != txn.session_ref),
+                    updated_at=current.isoformat(),
+                )
+                upsert_load_state(goals_root, load_state)
+                report.shed_lanes = list(load_state.shed_lanes)
             report.resumed.append(ResumeOutcome(session_ref=txn.session_ref, resume_order_id=advance.txn.resume_order_id))
             report.advanced.append(
                 f"{txn.session_ref}: resume confirmed sent; hold cleared; {len(requeued)} deferred order(s) requeued"
@@ -761,8 +1119,11 @@ def sweep(
     # --- detect brand-new resumes ------------------------------------------
     to_resume, resume_escalations = plan_resumes(goals_root=goals_root, verdicts=verdicts, policy=resolved_policy.usage, now=current)
     report.escalations.extend(resume_escalations)
-    for record in to_resume:
-        new_txn = apply_resume(record, goals_root=goals_root, now=current)
+    load_resumes = _plan_load_resumes(goals_root=goals_root, verdicts=verdicts, load_state=load_state)
+    priority = tuple(reversed(load_state.shed_lanes))
+    next_resume = select_next_resume([*load_resumes, *to_resume], priority_session_refs=priority)
+    if next_resume is not None:
+        new_txn = apply_resume(next_resume, goals_root=goals_root, now=current)
         report.advanced.append(f"{new_txn.session_ref}: resume sequence started")
 
     return report

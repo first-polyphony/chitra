@@ -1,0 +1,15 @@
+[Unit]
+Description=chitra rate-limit and host-load guard sweep
+Documentation=https://github.com/first-polyphony/chitra
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Replace with the user/group this service should run as. Do not run as root.
+User=chitra
+Group=chitra
+# systemd creates and owns this directory (mode 0750) for the unit's lifetime.
+StateDirectory=chitra
+# Fill in the venv, per-host usage snapshot, hostname, and policy paths.
+ExecStart=/path/to/venv/bin/chitra-rate-limit-guard --usage-dir /path/to/usage-snapshots --host HOSTNAME --goals-root /var/lib/chitra --queue-dir /var/lib/chitra/queue --policy-config /path/to/chitra-policy.yaml
+

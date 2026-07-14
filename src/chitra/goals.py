@@ -55,6 +55,7 @@ SCHEMA = "chitra.goals.v1"
 # sets it, and chitra.dispatchd, which reads it to freeze a held session's
 # queue) need to agree on.
 RATE_LIMIT_HOLD_REASON_PREFIX = "rate-limit:"
+LOAD_SHED_HOLD_REASON_PREFIX = "load-shed:"
 
 
 class GoalValidationError(ValueError):
