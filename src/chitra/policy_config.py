@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 import structlog
 import yaml
@@ -25,6 +25,7 @@ class GatePolicy(BaseModel):
     deferral_phrases: list[str] = Field(default_factory=lambda: list(_DEFERRAL_PHRASES))
     complete_todo_statuses: list[str] = Field(default_factory=lambda: ["done"])
     required_evidence: list[str] = Field(default_factory=lambda: ["deploy", "live_verify"])
+    brief_gate_mode: Literal["warn", "enforce"] = "warn"
     taxonomy_path: str | None = None
 
     @model_validator(mode="after")

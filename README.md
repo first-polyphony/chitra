@@ -29,8 +29,8 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.goal_enforcement`** — freezes the watched session's current goal, launches each adversarial reviewer in a separate process, requires unanimous acceptance, rejects stale or tampered bindings, and automatically restarts a redirected review with one reviewer while recording the restart in goal history. Spend, credentials, irreversible actions, and strategy redirects remain operator-gated even after unanimous acceptance.
 - **`chitra.reasoning`** — goal-first decision triangulation whose public dispatch record is the immutable `DecisionAttestation`. The attestation binds exact approved text, frozen-goal and corpus lineage, the watched-session review signal, and the operator-gate outcome. `dispatchd` logs it to Chitra's private `attestations.jsonl`; only the approved text is pasted.
 - **`chitra.close_gate`** — pure close-time inventory parsing and diffing over the operator-stated `done_when`, explicit delivered-item/evidence bindings, close notes, recorded goal revisions, and explicit operator acknowledgements. It never infers delivery from close prose.
-- **`chitra.completion_gate`** — citation-bearing completion review. Deploy and live-verification claims must retain concrete SHA, path, or probe citations; completed todo items need per-item proof; and delivery briefs must answer what was built, what it does, and whether it actually works.
-- **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs the deterministic completion audit, while only a completion claim launches isolated watched-session reviewers. A turn without a completion claim becomes `turn-finished-unverified`, while a disputed claim becomes `completion-disputed`, so neither can render idle-green.
+- **`chitra.completion_gate`** — citation-bearing completion review. Deploy and live-verification claims must retain concrete SHA, path, or probe citations, and completed todo items need per-item proof. Labeled delivery-brief issues are recorded in the default `warn` mode and become disputing when `brief_gate_mode` is set to `enforce`.
+- **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs the deterministic completion audit, while only a completion claim launches isolated watched-session reviewers on a bounded worker pool. In-flight review is `turn-finished-unverified` (yellow), a turn without a completion claim stays unverified, and a disputed claim becomes `completion-disputed`, so none can render idle-green.
 - **`chitra.account_registry`** — a freshness-bounded fact table of which account each tracked lane was last observed under. Used by `chitra.rate_limit_guard` to surface a missing usage snapshot or a mid-session account change as an operator escalation, instead of silently ignoring it or silently merging it with an unrelated lane.
 - **`chitra.rate_limit_state`** — the durable transaction outbox behind `chitra.rate_limit_guard`'s pause/resume state machine (see below). A crash between sweeps, or between any two phases, is never a data-loss event: the next sweep re-reads the transaction and continues from wherever it stopped.
 - **`chitra.rate_limit_guard`** (`chitra-rate-limit-guard`, `default_enabled: true`) — advances the shared durable pause/resume transaction for provider limits and host load through `pause_requested → checkpoint_sent → stop_sent → awaiting_quiescence → held → resume_requested → resume_sent`. Claude lanes retain the checkpoint plus deterministic `/goal clear` sequence. Codex lanes receive a fixed checkpoint-and-stop order and prove the stop through Watchd's backend-neutral pane-quiescence signal; no unverifiable Codex-internal stop API is assumed. Provider-limit resumes are selected by `session_ref` ascending, at most one new resume per sweep, and each later sweep rechecks fresh usage. Load pressure is sampled from `MemAvailable` and Linux memory/CPU PSI, activated or cleared only after two consecutive sweeps, and narrows the running-lane cap from 8 to 6/4/2 at L1/L2/L3. Load holds use the distinct `load-shed:<host>:<level>` prefix and resume last-shed-first, one lane per sweep, after the clear hysteresis. Every waiting phase remains bounded and graceful; L3 shortens deadlines but never kills a lane. When a lane reaches `held`, an append-preserving recovery ledger records why it stopped, its transcript pointer, its goal-derived resume note, and its reset time; see [`docs/pause-recovery.md`](docs/pause-recovery.md).
@@ -48,12 +48,13 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 
 ### Watchd reviewer configuration
 
-The normal completion-claim review round uses two isolated reviewers and pins
-the subprocess model to `claude-haiku-4-5`. Operators can tune the round down
-to one reviewer or point it at a credential wrapper without changing code:
+The normal completion-claim review round uses two isolated reviewers running
+the ambient monitor model (ruling 3A: same model as the monitor, different
+context). Operators can pin a cheaper model, tune the round down to one
+reviewer, or point it at a credential wrapper without changing code:
 
 - `CHITRA_WATCHD_REVIEWER_MODEL` / `--reviewer-model` — reviewer model
-  (default `claude-haiku-4-5`).
+  (default: the ambient monitor model).
 - `CHITRA_WATCHD_REVIEWER_COUNT` / `--reviewer-count` — normal-round reviewer
   count, which must be at least 1 (default 2). A goal redirect still restarts
   with exactly one reviewer.
@@ -62,6 +63,23 @@ to one reviewer or point it at a credential wrapper without changing code:
 
 The subprocess inherits the watchd service environment, including `HOME` and
 `CLAUDE_CONFIG_DIR`; provisioning that credential path belongs to deployment.
+`watchd` runs at most two lane reviews concurrently. It never waits for those
+reviews in `poll_once`; later polls collect completed verdicts and apply final
+lane status. Daemon shutdown waits for running reviews and collects their
+results so reviewer threads and subprocesses are not abandoned.
+
+Delivery-brief validation starts in activation-safe warning mode. Missing or
+invalid labeled `What was built`, `What it does`, and `Does it actually work`
+sections remain visible as `brief (warn)` audit issues but do not dispute an
+otherwise clean completion. To enforce briefs, set this in the policy file:
+
+```yaml
+completion_gate:
+  brief_gate_mode: enforce
+```
+
+Todo residue, deferral language, evidence gaps, invalid or missing per-item
+evidence, and posture mismatches remain enforcing in both modes.
 
 ## Operator brief conversation log
 
