@@ -9,11 +9,14 @@ from pathlib import Path
 import pytest
 
 from chitra.rate_limit_state import (
+    LoadHostState,
     Transaction,
+    get_load_state,
     get_transaction,
     load_transactions,
     remove_transaction,
     transactions_path,
+    upsert_load_state,
     upsert_transaction,
 )
 
@@ -55,6 +58,7 @@ def test_from_dict_round_trips_every_field() -> None:
     full = Transaction(
         session_ref="tophand:lane1:0.0",
         phase="awaiting_quiescence",
+        backend="codex",
         hold_reason="rate-limit:5h",
         resume_at=ISO,
         checkpoint_order_id="ord-1",
@@ -62,6 +66,7 @@ def test_from_dict_round_trips_every_field() -> None:
         resume_order_id="ord-3",
         transcript_path="/tmp/t.jsonl",
         last_transcript_mtime=1234.5,
+        last_activity_token="2026-07-12T00:00:00+00:00",
         quiescent_since=ISO,
         attempts=2,
         escalated=True,
@@ -70,6 +75,23 @@ def test_from_dict_round_trips_every_field() -> None:
         updated_at=ISO,
     )
     assert Transaction.from_dict(full.to_dict()) == full
+
+
+def test_load_state_and_transactions_share_one_atomic_document_without_data_loss(tmp_path: Path) -> None:
+    load_state = LoadHostState(
+        host="tophand",
+        observed_level=2,
+        breach_sweeps=1,
+        load_level=1,
+        shed_lanes=("tophand:lane2:0.0",),
+        updated_at=ISO,
+    )
+    upsert_load_state(tmp_path, load_state)
+    upsert_transaction(tmp_path, _txn())
+
+    assert get_load_state(tmp_path, "tophand") == load_state
+    remove_transaction(tmp_path, "tophand:lane1:0.0")
+    assert get_load_state(tmp_path, "tophand") == load_state
 
 
 def test_from_dict_rejects_an_unknown_phase() -> None:

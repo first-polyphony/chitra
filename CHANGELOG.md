@@ -18,6 +18,12 @@ All notable changes to this project are documented here, in the [Keep a Changelo
   strategy redirects always require operator confirmation.
 - Required delivery briefs for `chitra-artifacts record`, covering what was
   built, what it does, and whether it actually works with concrete evidence.
+- Example systemd service/timer units for the two-minute capacity sweep, plus
+  a read-only `chitra-ownership` query for Watchtower to check resolved session
+  references against currently tracked working lanes.
+- A persisted per-host load-pressure ladder using MemAvailable and Linux PSI,
+  two-sweep anti-flap/hysteresis, 8/6/4/2 running-lane caps, deterministic shed
+  priority, last-shed-first recovery, and backend-neutral Watchd activity facts.
 
 ### Changed
 - Pinned `watchd`'s isolated reviewer to the cheap `claude-haiku-4-5` model,
@@ -36,6 +42,12 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 - Raised the default graceful-pause thresholds to 92% for the five-hour
   window and 95% for the seven-day window, with approaching warnings at
   80% and 90%, respectively.
+- Enabled the rate-limit guard capability by default, limited new resumes to
+  one deterministic lane per sweep, and added a janitor that closes dead
+  `superseded-by:` holds instead of re-arming them.
+- Generalized the existing checkpoint/stop/quiescence transaction boundary so
+  load shedding reuses it. Claude lanes retain `/goal clear`; Codex lanes use a
+  fixed checkpoint-and-stop order followed by pane-quiescence verification.
 
 ## [0.8.1] - 2026-07-12
 

@@ -23,8 +23,17 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from chitra.account_registry import RegistryEntry, load_registry
-from chitra.goals import GoalRecord, GoalStatus, check_specification, due_goals, list_goals, session_name
-from chitra.rate_limit_state import Transaction, TransactionPhase, load_transactions
+from chitra.goals import (
+    LOAD_SHED_HOLD_REASON_PREFIX,
+    GoalRecord,
+    GoalStatus,
+    check_specification,
+    due_goals,
+    list_goals,
+    session_host,
+    session_name,
+)
+from chitra.rate_limit_state import Transaction, TransactionPhase, load_load_states, load_transactions
 from chitra.state_paths import state_dir as default_state_dir
 
 logger = structlog.get_logger(__name__)
@@ -66,6 +75,8 @@ class LaneState(BaseModel):
     rate_limit_phase: TransactionPhase | None
     rate_limit_escalated: bool
     rate_limit_attempts: int
+    load_level: int
+    load_shed: bool
     account: str
     account_updated_at: str
     pending_decisions: tuple[str, ...]
@@ -81,6 +92,8 @@ class SweepSnapshot(BaseModel):
     schema_version: Literal["chitra.sweep-snapshot.v1"] = Field(default="chitra.sweep-snapshot.v1", alias="schema")
     lanes: dict[str, LaneState] = Field(default_factory=dict)
     flags: dict[str, FlagRecord] = Field(default_factory=dict)
+    load_level: dict[str, int] = Field(default_factory=dict)
+    shed_lanes: tuple[str, ...] = ()
 
 
 class LaneChange(BaseModel):
@@ -126,6 +139,8 @@ class SweepDigest(BaseModel):
     due_goal_count: int
     pending_decision_count: int
     specification_failure_count: int
+    load_level: dict[str, int]
+    shed_lanes: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +301,7 @@ def _lane_state(
     transaction: Transaction | None,
     registry_entry: RegistryEntry | None,
     due: bool,
+    load_level: int,
 ) -> LaneState:
     """Combine canonical state records for a tracked lane without inference."""
     return LaneState(
@@ -297,6 +313,8 @@ def _lane_state(
         rate_limit_phase=None if transaction is None else transaction.phase,
         rate_limit_escalated=False if transaction is None else transaction.escalated,
         rate_limit_attempts=0 if transaction is None else transaction.attempts,
+        load_level=load_level,
+        load_shed=(goal is not None and goal.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX)),
         account="" if registry_entry is None else registry_entry.account,
         account_updated_at="" if registry_entry is None else registry_entry.updated_at,
         pending_decisions=() if goal is None else goal.open_asks,
@@ -318,6 +336,9 @@ def build_snapshot(
     goals = _index_goals(list_goals(state_dir))
     transactions = _index_transactions(load_transactions(state_dir))
     registry = _index_registry(load_registry(state_dir))
+    load_states = {state.host: state for state in load_load_states(state_dir)}
+    load_levels = {host: state.load_level for host, state in sorted(load_states.items())}
+    shed_lanes = tuple(session_ref for host in sorted(load_states) for session_ref in load_states[host].shed_lanes)
     due_refs = {record.session_ref for record in due_goals(state_dir, now=current)}
     lanes: dict[str, LaneState] = {}
     for session_ref in sorted(set(goals) | set(transactions)):
@@ -327,8 +348,14 @@ def build_snapshot(
             transaction=transactions.get(session_ref),
             registry_entry=registry.get(session_name(session_ref)),
             due=session_ref in due_refs,
+            load_level=load_levels.get(session_host(session_ref), 0),
         )
-    return SweepSnapshot(lanes=lanes, flags=load_latest_flags(flags_path or state_dir / FLAGS_FILENAME))
+    return SweepSnapshot(
+        lanes=lanes,
+        flags=load_latest_flags(flags_path or state_dir / FLAGS_FILENAME),
+        load_level=load_levels,
+        shed_lanes=shed_lanes,
+    )
 
 
 def load_snapshot(path: Path) -> SweepSnapshot:
@@ -405,6 +432,8 @@ def compute_delta(previous: SweepSnapshot, current: SweepSnapshot, *, now: datet
         due_goal_count=sum(lane.due for lane in current.lanes.values()),
         pending_decision_count=sum(len(lane.pending_decisions) for lane in current.lanes.values()),
         specification_failure_count=sum(len(lane.specification_failures) for lane in current.lanes.values()),
+        load_level=current.load_level,
+        shed_lanes=current.shed_lanes,
     )
 
 

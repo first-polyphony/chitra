@@ -8,7 +8,15 @@ import pytest
 import yaml
 
 from chitra.completion_gate import _DEFERRAL_PHRASES
-from chitra.policy_config import POLICY_CONFIG_ENV_VAR, GuidancePolicy, PolicyConfig, UsagePolicy, load_policy_config, resolve_guidance
+from chitra.policy_config import (
+    POLICY_CONFIG_ENV_VAR,
+    GuidancePolicy,
+    LoadPolicy,
+    PolicyConfig,
+    UsagePolicy,
+    load_policy_config,
+    resolve_guidance,
+)
 from chitra.state_paths import default_ledger_key_path, default_ledger_path, default_queue_dir
 
 
@@ -33,6 +41,7 @@ def test_unconfigured_policy_is_the_current_shipped_behavior(monkeypatch: pytest
         "max_running": None,
         "auto_resume": True,
     }
+    assert policy.load == LoadPolicy()
 
 
 def test_usage_policy_loads_overrides_and_rejects_invalid_values(tmp_path: Path) -> None:
@@ -71,6 +80,36 @@ def test_usage_policy_loads_overrides_and_rejects_invalid_values(tmp_path: Path)
         {"max_running": 0},
     ):
         path.write_text(yaml.safe_dump({"usage": usage}), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_policy_config(path)
+
+
+def test_load_policy_block_loads_overrides_and_rejects_inverted_ladders(tmp_path: Path) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "load": {
+                    "baseline_max_running": 10,
+                    "l1_max_running": 7,
+                    "l2_max_running": 5,
+                    "l3_max_running": 2,
+                    "consecutive_sweeps": 3,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_policy_config(path).load.baseline_max_running == 10
+    assert load_policy_config(path).load.consecutive_sweeps == 3
+
+    for invalid in (
+        {"l3_mem_available_pct": 16},
+        {"clear_memory_some_avg60": 11},
+        {"l3_max_running": 7},
+        {"consecutive_sweeps": 0},
+    ):
+        path.write_text(yaml.safe_dump({"load": invalid}), encoding="utf-8")
         with pytest.raises(ValueError):
             load_policy_config(path)
 

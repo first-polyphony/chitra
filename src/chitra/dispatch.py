@@ -159,7 +159,7 @@ class DispatchStatus(enum.StrEnum):
     # order was never delivered -- a disputed completion claim must never
     # silently pass through as "sent". See dispatchd.process_one_order.
     COMPLETION_DISPUTE = "completion_dispute"
-    # The order's session is rate-limit-held: parked in the durable
+    # The order's session is rate-limit- or load-shed-held: parked in the durable
     # deferred/ subqueue (no pane I/O, no result file persisted) rather than
     # discarded. dispatchd.run_once/requeue_deferred_for_session return it
     # to orders/ FIFO once the hold clears, so it is delivered exactly once,
@@ -222,7 +222,7 @@ class DispatchOrder(BaseModel):
     completion_blockers: list[str] = Field(default_factory=list)
     completion_brief: str | None = None
 
-    # Opt-in exemption from dispatchd's rate-limit freeze check (see
+    # Opt-in exemption from dispatchd's guard freeze check (see
     # dispatchd.process_one_order). False for every ordinary order -- the
     # freeze applies and the order is durably deferred, never discarded.
     # Setting this boolean alone is NOT sufficient to bypass the freeze:

@@ -51,6 +51,7 @@ TransactionPhase = Literal[
     "resume_requested",
     "resume_sent",
 ]
+PauseBackend = Literal["claude", "codex"]
 TRANSACTION_PHASES: tuple[TransactionPhase, ...] = (
     "pause_requested",
     "checkpoint_sent",
@@ -68,6 +69,7 @@ class Transaction:
 
     session_ref: str
     phase: TransactionPhase
+    backend: PauseBackend = "claude"
     hold_reason: str = ""
     resume_at: str = ""
     checkpoint_order_id: str = ""
@@ -75,6 +77,7 @@ class Transaction:
     resume_order_id: str = ""
     transcript_path: str = ""
     last_transcript_mtime: float | None = None
+    last_activity_token: str = ""
     quiescent_since: str = ""
     attempts: int = 0
     escalated: bool = False
@@ -86,6 +89,7 @@ class Transaction:
         return {
             "session_ref": self.session_ref,
             "phase": self.phase,
+            "backend": self.backend,
             "hold_reason": self.hold_reason,
             "resume_at": self.resume_at,
             "checkpoint_order_id": self.checkpoint_order_id,
@@ -93,6 +97,7 @@ class Transaction:
             "resume_order_id": self.resume_order_id,
             "transcript_path": self.transcript_path,
             "last_transcript_mtime": self.last_transcript_mtime,
+            "last_activity_token": self.last_activity_token,
             "quiescent_since": self.quiescent_since,
             "attempts": self.attempts,
             "escalated": self.escalated,
@@ -108,6 +113,9 @@ class Transaction:
         phase = payload.get("phase")
         if phase not in TRANSACTION_PHASES:
             raise ValueError(f"rate-limit transaction phase must be one of {TRANSACTION_PHASES}")
+        backend = payload.get("backend", "claude")
+        if backend not in ("claude", "codex"):
+            raise ValueError("rate-limit transaction backend must be claude or codex")
         str_fields = (
             "session_ref",
             "hold_reason",
@@ -116,6 +124,7 @@ class Transaction:
             "stop_order_id",
             "resume_order_id",
             "transcript_path",
+            "last_activity_token",
             "quiescent_since",
             "deadline_at",
             "created_at",
@@ -139,6 +148,7 @@ class Transaction:
         return cls(
             session_ref=values["session_ref"],
             phase=cast(TransactionPhase, phase),
+            backend=cast(PauseBackend, backend),
             hold_reason=values["hold_reason"],
             resume_at=values["resume_at"],
             checkpoint_order_id=values["checkpoint_order_id"],
@@ -146,12 +156,93 @@ class Transaction:
             resume_order_id=values["resume_order_id"],
             transcript_path=values["transcript_path"],
             last_transcript_mtime=float(raw_mtime) if raw_mtime is not None else None,
+            last_activity_token=values["last_activity_token"],
             quiescent_since=values["quiescent_since"],
             attempts=attempts,
             escalated=escalated,
             deadline_at=values["deadline_at"],
             created_at=values["created_at"],
             updated_at=values["updated_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LoadHostState:
+    """Durable anti-flap and shed-stack state for one sampled host."""
+
+    host: str
+    observed_level: int = 0
+    breach_sweeps: int = 0
+    clear_sweeps: int = 0
+    load_level: int = 0
+    mem_available_pct: float = 100.0
+    memory_some_avg60: float = 0.0
+    memory_full_avg60: float = 0.0
+    cpu_some_avg60: float = 0.0
+    shed_lanes: tuple[str, ...] = ()
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "host": self.host,
+            "observed_level": self.observed_level,
+            "breach_sweeps": self.breach_sweeps,
+            "clear_sweeps": self.clear_sweeps,
+            "load_level": self.load_level,
+            "mem_available_pct": self.mem_available_pct,
+            "memory_some_avg60": self.memory_some_avg60,
+            "memory_full_avg60": self.memory_full_avg60,
+            "cpu_some_avg60": self.cpu_some_avg60,
+            "shed_lanes": list(self.shed_lanes),
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> LoadHostState:
+        if not isinstance(payload, dict):
+            raise ValueError("load host state must be an object")
+        host = payload.get("host")
+        updated_at = payload.get("updated_at", "")
+        if not isinstance(host, str) or not host:
+            raise ValueError("load host state host must be a non-empty string")
+        if not isinstance(updated_at, str):
+            raise ValueError("load host state updated_at must be a string")
+        integers: dict[str, int] = {}
+        for name in ("observed_level", "breach_sweeps", "clear_sweeps", "load_level"):
+            value = payload.get(name, 0)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"load host state {name} must be an integer")
+            integers[name] = value
+        if integers["observed_level"] not in (0, 1, 2, 3) or integers["load_level"] not in (0, 1, 2, 3):
+            raise ValueError("load host state levels must be from 0 through 3")
+        if integers["breach_sweeps"] < 0 or integers["clear_sweeps"] < 0:
+            raise ValueError("load host state counters must not be negative")
+        floats: dict[str, float] = {}
+        for name, default in (
+            ("mem_available_pct", 100.0),
+            ("memory_some_avg60", 0.0),
+            ("memory_full_avg60", 0.0),
+            ("cpu_some_avg60", 0.0),
+        ):
+            value = payload.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"load host state {name} must be a number")
+            floats[name] = float(value)
+        raw_shed_lanes = payload.get("shed_lanes", [])
+        if not isinstance(raw_shed_lanes, list) or not all(isinstance(item, str) for item in raw_shed_lanes):
+            raise ValueError("load host state shed_lanes must be a list of strings")
+        return cls(
+            host=host,
+            observed_level=integers["observed_level"],
+            breach_sweeps=integers["breach_sweeps"],
+            clear_sweeps=integers["clear_sweeps"],
+            load_level=integers["load_level"],
+            mem_available_pct=floats["mem_available_pct"],
+            memory_some_avg60=floats["memory_some_avg60"],
+            memory_full_avg60=floats["memory_full_avg60"],
+            cpu_some_avg60=floats["cpu_some_avg60"],
+            shed_lanes=tuple(raw_shed_lanes),
+            updated_at=updated_at,
         )
 
 
@@ -193,10 +284,29 @@ def load_transactions(root: Path | None = None) -> list[Transaction]:
     return [Transaction.from_dict(item) for item in raw]
 
 
-def _write_transactions(root: Path | None, transactions: list[Transaction]) -> None:
+def load_load_states(root: Path | None = None) -> list[LoadHostState]:
+    """Load durable per-host pressure state from the shared guard document."""
+    path = transactions_path(root)
+    try:
+        payload: Any = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
+        raise ValueError("rate_limit_state.json is not a chitra.rate_limit_state.v1 document")
+    raw = payload.get("load_hosts", [])
+    if not isinstance(raw, list):
+        raise ValueError("rate_limit_state.json load_hosts must be a list")
+    return [LoadHostState.from_dict(item) for item in raw]
+
+
+def _write_state(root: Path | None, transactions: list[Transaction], load_states: list[LoadHostState]) -> None:
     path = transactions_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"schema": SCHEMA, "transactions": [txn.to_dict() for txn in transactions]}
+    payload = {
+        "schema": SCHEMA,
+        "transactions": [txn.to_dict() for txn in transactions],
+        "load_hosts": [state.to_dict() for state in load_states],
+    }
     tmp_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -223,7 +333,7 @@ def upsert_transaction(root: Path | None, txn: Transaction) -> Transaction:
     with _transaction_lock(root):
         records = [t for t in load_transactions(root) if t.session_ref != txn.session_ref]
         records.append(txn)
-        _write_transactions(root, records)
+        _write_state(root, records, load_load_states(root))
     logger.info(
         "rate_limit_transaction_upserted", session_ref=txn.session_ref, phase=txn.phase, attempts=txn.attempts, escalated=txn.escalated
     )
@@ -234,5 +344,26 @@ def remove_transaction(root: Path | None, session_ref: str) -> None:
     """Remove a completed (or abandoned) transaction. A no-op if absent."""
     with _transaction_lock(root):
         records = [t for t in load_transactions(root) if t.session_ref != session_ref]
-        _write_transactions(root, records)
+        _write_state(root, records, load_load_states(root))
     logger.info("rate_limit_transaction_removed", session_ref=session_ref)
+
+
+def get_load_state(root: Path | None, host: str) -> LoadHostState | None:
+    """Return the persisted pressure state for ``host``, if sampled before."""
+    return next((state for state in load_load_states(root) if state.host == host), None)
+
+
+def upsert_load_state(root: Path | None, state: LoadHostState) -> LoadHostState:
+    """Atomically insert or replace one host's load state without losing transactions."""
+    with _transaction_lock(root):
+        states = [item for item in load_load_states(root) if item.host != state.host]
+        states.append(state)
+        _write_state(root, load_transactions(root), sorted(states, key=lambda item: item.host))
+    logger.info(
+        "load_host_state_upserted",
+        host=state.host,
+        load_level=state.load_level,
+        breach_sweeps=state.breach_sweeps,
+        clear_sweeps=state.clear_sweeps,
+    )
+    return state
