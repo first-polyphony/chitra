@@ -12,7 +12,17 @@ import pytest
 from chitra.goal_enforcement import ReviewerVerdict
 from chitra.goals import GoalRecord, get_goal, upsert_goal
 from chitra.triaged import parse_event_line
-from chitra.watchd import Pane, Watchd, WatchdConfig, append_event, event_line, list_panes, normalize, resolve_config
+from chitra.watchd import (
+    Pane,
+    Watchd,
+    WatchdConfig,
+    append_event,
+    build_arg_parser,
+    event_line,
+    list_panes,
+    normalize,
+    resolve_config,
+)
 
 
 def _completed(command: Sequence[str], stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -133,6 +143,7 @@ Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-
 
 def test_turn_end_without_claim_is_finished_unverified_not_idle_green(tmp_path: Path) -> None:
     goal = _tracked_goal(tmp_path)
+    reviewer = _AcceptingReviewer()
 
     def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         if command[1] == "list-panes":
@@ -144,7 +155,7 @@ def test_turn_end_without_claim_is_finished_unverified_not_idle_green(tmp_path: 
     watcher = Watchd(
         WatchdConfig(state_dir=tmp_path, events_log=tmp_path / "events.log"),
         runner=runner,
-        reviewer=_AcceptingReviewer(),
+        reviewer=reviewer,
     )
     watcher.poll_once()
 
@@ -152,6 +163,10 @@ def test_turn_end_without_claim_is_finished_unverified_not_idle_green(tmp_path: 
     assert stored is not None
     assert stored.status == "turn-finished-unverified"
     assert "without a completion claim" in stored.now
+    assert reviewer.calls == []
+    review = json.loads((tmp_path / "completion_reviews.jsonl").read_text(encoding="utf-8"))
+    assert review["review_verdict"] == "unavailable"
+    assert "isolated review was not run" in review["summary"]
 
 
 def test_list_panes_uses_live_tmux_enumeration_and_deduplicates_pane_id() -> None:
@@ -209,6 +224,9 @@ def test_resolve_config_uses_chitra_state_and_watchd_environment(monkeypatch: py
     monkeypatch.setenv("CHITRA_WATCHD_PANES", "%1, %2")
     monkeypatch.setenv("CHITRA_WATCHD_SESSION_PREFIXES", "boomtown-, boomtown-review-")
     monkeypatch.setenv("CHITRA_WATCHD_EXCLUDE_SESSION_PREFIXES", "boomtown-control")
+    monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COUNT", "1")
+    monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COMMAND", "/opt/chitra/bin/review-with-monitor-credentials")
+    monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_MODEL", "operator-cheap-model")
 
     config = resolve_config()
 
@@ -217,3 +235,42 @@ def test_resolve_config_uses_chitra_state_and_watchd_environment(monkeypatch: py
     assert config.panes_override == ("%1", "%2")
     assert config.session_prefixes == ("boomtown-", "boomtown-review-")
     assert config.excluded_session_prefixes == ("boomtown-control",)
+    assert config.reviewer_count == 1
+    assert config.reviewer_command == "/opt/chitra/bin/review-with-monitor-credentials"
+    assert config.reviewer_model == "operator-cheap-model"
+
+
+def test_reviewer_config_precedence_is_cli_then_env_then_pinned_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    defaults = resolve_config(state_dir=tmp_path / "defaults")
+    assert defaults.reviewer_count == 2
+    assert defaults.reviewer_command == "claude"
+    assert defaults.reviewer_model == "claude-haiku-4-5"
+
+    monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COUNT", "1")
+    monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COMMAND", "env-claude")
+    monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_MODEL", "env-model")
+    environment = resolve_config(state_dir=tmp_path / "environment")
+    assert environment.reviewer_count == 1
+    assert environment.reviewer_command == "env-claude"
+    assert environment.reviewer_model == "env-model"
+
+    args = build_arg_parser().parse_args(
+        ["--reviewer-count", "3", "--reviewer-command", "cli-claude", "--reviewer-model", "cli-model"]
+    )
+    cli = resolve_config(
+        state_dir=tmp_path / "cli",
+        reviewer_count=args.reviewer_count,
+        reviewer_command=args.reviewer_command,
+        reviewer_model=args.reviewer_model,
+    )
+    assert cli.reviewer_count == 3
+    assert cli.reviewer_command == "cli-claude"
+    assert cli.reviewer_model == "cli-model"
+
+
+@pytest.mark.parametrize("reviewer_count", [0, -1])
+def test_resolve_config_rejects_non_positive_reviewer_count(tmp_path: Path, reviewer_count: int) -> None:
+    with pytest.raises(ValueError, match="reviewer_count must be a positive integer"):
+        resolve_config(state_dir=tmp_path, reviewer_count=reviewer_count)

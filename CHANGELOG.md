@@ -20,6 +20,10 @@ All notable changes to this project are documented here, in the [Keep a Changelo
   built, what it does, and whether it actually works with concrete evidence.
 
 ### Changed
+- Pinned `watchd`'s isolated reviewer to the cheap `claude-haiku-4-5` model,
+  exposed its model, normal-round count, and command through environment and
+  CLI configuration, and scoped subprocess reviews to completion-claim
+  turn-ends while retaining deterministic auditing for every finished turn.
 - Consolidated `DecisionProvenance` and `ReasonedDecision` into the immutable
   `DecisionAttestation` API. Every reasoned answer or nudge is bound to the
   exact approved text and logged to Chitra's own attestation ledger before

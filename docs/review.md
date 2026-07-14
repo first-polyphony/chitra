@@ -3,11 +3,15 @@
 ## 2026-07-14 — forced completion and goal-enforcement gate (v0.8.2)
 
 `watchd` now treats a finished pane turn as a mandatory event boundary. It
-runs isolated watched-session reviewers against the frozen goal and then
-classifies the turn as a completion claim or a distinct non-completion turn.
+first classifies the turn deterministically. Only a completion claim runs
+isolated watched-session reviewers against the frozen goal; a non-claim is
+recorded as `turn-finished-unverified` without launching a subprocess.
 Completion claims require citation-bearing deploy/live proof and a valid
 delivery brief; outgoing completion claims are also recognized in `dispatchd`
-without caller opt-in. `DecisionAttestation` replaces the former
+without caller opt-in. The reviewer command, pinned model, and normal-round
+count are configurable through `CHITRA_WATCHD_REVIEWER_COMMAND`,
+`CHITRA_WATCHD_REVIEWER_MODEL`, and `CHITRA_WATCHD_REVIEWER_COUNT` (or their
+matching CLI flags). `DecisionAttestation` replaces the former
 `DecisionProvenance`/`ReasonedDecision` pair and binds only the exact approved
 text that may be pasted. Review and attestation metadata stays in Chitra's own
 logs.

@@ -1,6 +1,6 @@
 # chitra next-version plan
 
-chitra is deliberately small. General orchestration and response generation belong in separate consumers. The bounded exception is the v0.8.2 goal-enforcement boundary: isolated reviewers inspect a watched lane's completed turn against its frozen goal and produce a typed input signal; they never draft Chitra's response.
+chitra is deliberately small. General orchestration and response generation belong in separate consumers. The bounded exception is the v0.8.2 goal-enforcement boundary: isolated reviewers inspect completion-claim turns against the watched lane's frozen goal and produce a typed input signal; they never draft Chitra's response. Non-completion turns remain on the deterministic audit path and do not spawn reviewers.
 
 This document was previously titled "v1.1" and framed as a wishlist. It's retitled here because most of what's below isn't a loose set of ideas — it's a consolidation of decisions and research already made across this program (PyPI publishing mechanics, a security audit, a routing-preferences design study) plus the pre-existing pull-only beads plan and the self-improvement observer plan, carried over largely unchanged. There is no committed version number attached to this plan; treat it as "what's next," not a numbered release promise.
 

@@ -70,6 +70,18 @@ def test_initial_round_requires_unanimous_isolated_acceptance(tmp_path: Path) ->
     assert (tmp_path / "goal_reviews.jsonl").exists()
 
 
+def test_initial_round_can_be_configured_to_one_reviewer(tmp_path: Path) -> None:
+    goal = _goal(tmp_path)
+    behavior = WatchedSessionBehavior.from_turn(goal.session_ref, "Done with cited completion evidence.")
+    reviewer = AcceptingReviewer()
+
+    signal = review_watched_session(tmp_path, goal.session_ref, behavior, reviewer=reviewer, reviewer_count=1)
+
+    assert signal.verdict == "accept"
+    assert reviewer.calls == ["reviewer-1-1"]
+    assert signal.reviewer_ids == ("reviewer-1-1",)
+
+
 def test_any_rejection_blocks_unanimous_release(tmp_path: Path) -> None:
     goal = _goal(tmp_path)
     behavior = WatchedSessionBehavior.from_turn(goal.session_ref, "Done, but the requested live probe was not run.")

@@ -28,7 +28,8 @@ from chitra.goals import (
     validate_goal,
 )
 
-MIN_REVIEWERS = 2
+MIN_REVIEWERS = 1
+DEFAULT_REVIEWERS = 2
 REVIEW_LOG_NAME = "goal_reviews.jsonl"
 
 
@@ -319,15 +320,16 @@ def review_watched_session(
     behavior: WatchedSessionBehavior,
     *,
     reviewer: BehaviorReviewer,
-    reviewer_count: int = MIN_REVIEWERS,
+    reviewer_count: int = DEFAULT_REVIEWERS,
     max_redirect_restarts: int = 3,
     log_path: Path | None = None,
 ) -> SessionReviewSignal:
     """Run a unanimous isolated round, restarting on a frozen-goal redirect.
 
-    The initial round requires at least two processes. After any detected
-    redirect, the discarded round is logged and the fresh round uses exactly
-    one process, per the 4B-mod policy.
+    The initial round uses two processes by default and permits an operator-
+    configured single-reviewer round. After any detected redirect, the
+    discarded round is logged and the fresh round uses exactly one process,
+    per the 4B-mod policy.
     """
     if reviewer_count < MIN_REVIEWERS:
         raise ValueError(f"reviewer_count must be at least {MIN_REVIEWERS}")

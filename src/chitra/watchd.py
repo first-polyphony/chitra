@@ -1,9 +1,10 @@
 """watchd — deterministic tmux-pane change emitter for ``chitra.triaged``.
 
 The events log remains a small wire contract consumed by ``chitra.triaged``.
-At a detected turn-end, this watcher also forces the completion boundary and
-launches isolated watched-session reviewers against the lane's frozen goal.
-Review metadata is written only to Chitra-owned ledgers and never to pane text.
+At a detected turn-end, this watcher also forces the deterministic completion
+boundary. Completion claims launch isolated watched-session reviewers against
+the lane's frozen goal; ordinary turns do not. Review metadata is written only
+to Chitra-owned ledgers and never to pane text.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from chitra.completion_gate import (
     append_completion_review,
     evaluate_turn_end,
     extract_completion_evidence,
+    is_completion_claim,
 )
 from chitra.goal_enforcement import (
     BehaviorReviewer,
@@ -50,8 +52,14 @@ PANES_ENV_VAR = "CHITRA_WATCHD_PANES"
 SESSION_PREFIXES_ENV_VAR = "CHITRA_WATCHD_SESSION_PREFIXES"
 EXCLUDED_SESSION_PREFIXES_ENV_VAR = "CHITRA_WATCHD_EXCLUDE_SESSION_PREFIXES"
 MAX_LOG_BYTES_ENV_VAR = "CHITRA_WATCHD_MAX_LOG_BYTES"
+REVIEWER_COUNT_ENV_VAR = "CHITRA_WATCHD_REVIEWER_COUNT"
+REVIEWER_COMMAND_ENV_VAR = "CHITRA_WATCHD_REVIEWER_COMMAND"
+REVIEWER_MODEL_ENV_VAR = "CHITRA_WATCHD_REVIEWER_MODEL"
 DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_LOG_BYTES = 5 * 1024 * 1024
+DEFAULT_REVIEWER_COUNT = 2
+DEFAULT_REVIEWER_COMMAND = "claude"
+DEFAULT_REVIEWER_MODEL = "claude-haiku-4-5"
 CAPTURE_LINES = 60
 NORMALIZED_TAIL_LINES = 25
 
@@ -83,9 +91,13 @@ class WatchdConfig:
     max_log_bytes: int = DEFAULT_MAX_LOG_BYTES
     goals_root: Path | None = None
     completion_review_log: Path | None = None
-    reviewer_count: int = 2
-    reviewer_command: str = "claude"
-    reviewer_model: str | None = None
+    reviewer_count: int = DEFAULT_REVIEWER_COUNT
+    reviewer_command: str = DEFAULT_REVIEWER_COMMAND
+    reviewer_model: str | None = DEFAULT_REVIEWER_MODEL
+
+    def __post_init__(self) -> None:
+        if self.reviewer_count < 1:
+            raise ValueError("reviewer_count must be a positive integer")
 
 
 def normalize(content: str) -> list[str]:
@@ -264,24 +276,6 @@ class Watchd:
             return
 
         goal = next(record for record in list_goals(root) if record.session_ref == session_ref)
-        behavior = WatchedSessionBehavior.from_turn(session_ref, text)
-        reviewer = self.reviewer or ClaudeProcessReviewer(
-            command=self.config.reviewer_command,
-            model=self.config.reviewer_model,
-        )
-        review_signal = None
-        review_error = ""
-        try:
-            review_signal = review_watched_session(
-                root,
-                session_ref,
-                behavior,
-                reviewer=reviewer,
-                reviewer_count=self.config.reviewer_count,
-            )
-        except (GoalReviewError, OSError, ValueError) as exc:
-            review_error = str(exc)
-
         policy = load_policy_config().completion_gate
         turn_audit = evaluate_turn_end(
             text,
@@ -292,22 +286,41 @@ class Watchd:
             open_asks=goal.open_asks,
             blockers=(goal.needs,) if goal.needs else (),
         )
+        review_signal = None
+        review_error = ""
+        if is_completion_claim(text):
+            behavior = WatchedSessionBehavior.from_turn(session_ref, text)
+            reviewer = self.reviewer or ClaudeProcessReviewer(
+                command=self.config.reviewer_command,
+                model=self.config.reviewer_model,
+            )
+            try:
+                review_signal = review_watched_session(
+                    root,
+                    session_ref,
+                    behavior,
+                    reviewer=reviewer,
+                    reviewer_count=self.config.reviewer_count,
+                )
+            except (GoalReviewError, OSError, ValueError) as exc:
+                review_error = str(exc)
+
         completion_verdict = turn_audit.completion.verdict if turn_audit.completion is not None else None
         ask = ""
-        if review_signal is None:
-            status: GoalStatus = "blocked"
+        if turn_audit.condition == "turn_end_without_completion_claim":
+            status: GoalStatus = "turn-finished-unverified"
+            summary = f"{turn_audit.summary}; no completion claim, so isolated review was not run"
+            review_verdict: Literal["accept", "reject", "unavailable"] = "unavailable"
+        elif review_signal is None:
+            status = "blocked"
             summary = f"turn-end review unavailable: {review_error}"
             ask = "Review the lane manually because isolated watched-session review could not complete."
-            review_verdict: Literal["accept", "reject", "unavailable"] = "unavailable"
+            review_verdict = "unavailable"
         elif review_signal.verdict == "reject":
             status = "blocked"
             summary = "watched-session direction or completion posture was rejected against the frozen goal"
             ask = "Review the lane's rejected direction or completion posture against its frozen goal."
             review_verdict = "reject"
-        elif turn_audit.condition == "turn_end_without_completion_claim":
-            status = "turn-finished-unverified"
-            summary = turn_audit.summary
-            review_verdict = "accept"
         elif completion_verdict == "CLEAN":
             status = "done-pending-close"
             summary = turn_audit.summary
@@ -411,6 +424,9 @@ def resolve_config(
     session_prefixes: Sequence[str] | None = None,
     excluded_session_prefixes: Sequence[str] | None = None,
     max_log_bytes: int | None = None,
+    reviewer_count: int | None = None,
+    reviewer_command: str | None = None,
+    reviewer_model: str | None = None,
 ) -> WatchdConfig:
     """Resolve CLI values, then ``CHITRA_*`` overrides, then generic defaults."""
     configured_state_dir = state_dir or default_state_dir()
@@ -443,6 +459,28 @@ def resolve_config(
         if excluded_session_prefixes is not None
         else _split_prefixes(_env_value(EXCLUDED_SESSION_PREFIXES_ENV_VAR))
     )
+    configured_reviewer_count = reviewer_count
+    if configured_reviewer_count is None:
+        raw_reviewer_count = _env_value(REVIEWER_COUNT_ENV_VAR)
+        configured_reviewer_count = (
+            _positive_int(raw_reviewer_count, name=REVIEWER_COUNT_ENV_VAR)
+            if raw_reviewer_count
+            else DEFAULT_REVIEWER_COUNT
+        )
+    if configured_reviewer_count < 1:
+        raise ValueError("reviewer_count must be a positive integer")
+    configured_reviewer_command = (
+        _env_value(REVIEWER_COMMAND_ENV_VAR) or DEFAULT_REVIEWER_COMMAND
+        if reviewer_command is None
+        else reviewer_command.strip()
+    )
+    if not configured_reviewer_command:
+        raise ValueError("reviewer_command must be non-empty")
+    configured_reviewer_model = (
+        _env_value(REVIEWER_MODEL_ENV_VAR) or DEFAULT_REVIEWER_MODEL if reviewer_model is None else reviewer_model.strip()
+    )
+    if not configured_reviewer_model:
+        raise ValueError("reviewer_model must be non-empty")
     return WatchdConfig(
         state_dir=configured_state_dir,
         events_log=configured_events_log,
@@ -451,6 +489,9 @@ def resolve_config(
         session_prefixes=configured_session_prefixes or None,
         excluded_session_prefixes=configured_excluded_session_prefixes,
         max_log_bytes=configured_max_log_bytes,
+        reviewer_count=configured_reviewer_count,
+        reviewer_command=configured_reviewer_command,
+        reviewer_model=configured_reviewer_model,
     )
 
 
@@ -488,6 +529,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-log-bytes", type=int, default=None, help="Rotate at this size (default: CHITRA_WATCHD_MAX_LOG_BYTES or 5 MiB)."
     )
+    parser.add_argument(
+        "--reviewer-count",
+        type=int,
+        default=None,
+        help="Reviewers in the normal completion-claim round (default: CHITRA_WATCHD_REVIEWER_COUNT or 2).",
+    )
+    parser.add_argument(
+        "--reviewer-command",
+        default=None,
+        help="Isolated reviewer command (default: CHITRA_WATCHD_REVIEWER_COMMAND or claude).",
+    )
+    parser.add_argument(
+        "--reviewer-model",
+        default=None,
+        help="Pinned isolated reviewer model (default: CHITRA_WATCHD_REVIEWER_MODEL or claude-haiku-4-5).",
+    )
     parser.add_argument("--once", action="store_true", help="Capture and compare once, then exit.")
     return parser
 
@@ -503,6 +560,9 @@ def main(argv: list[str] | None = None) -> int:
         session_prefixes=args.session_prefix,
         excluded_session_prefixes=args.exclude_session_prefix,
         max_log_bytes=args.max_log_bytes,
+        reviewer_count=args.reviewer_count,
+        reviewer_command=args.reviewer_command,
+        reviewer_model=args.reviewer_model,
     )
     watcher = Watchd(config)
     if args.once:
