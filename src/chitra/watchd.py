@@ -30,6 +30,8 @@ logger = structlog.get_logger(__name__)
 EVENT_LOG_ENV_VAR = "CHITRA_WATCHD_EVENT_LOG"
 INTERVAL_ENV_VAR = "CHITRA_WATCHD_INTERVAL"
 PANES_ENV_VAR = "CHITRA_WATCHD_PANES"
+SESSION_PREFIXES_ENV_VAR = "CHITRA_WATCHD_SESSION_PREFIXES"
+EXCLUDED_SESSION_PREFIXES_ENV_VAR = "CHITRA_WATCHD_EXCLUDE_SESSION_PREFIXES"
 MAX_LOG_BYTES_ENV_VAR = "CHITRA_WATCHD_MAX_LOG_BYTES"
 DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -58,6 +60,8 @@ class WatchdConfig:
     events_log: Path
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS
     panes_override: tuple[str, ...] | None = None
+    session_prefixes: tuple[str, ...] | None = None
+    excluded_session_prefixes: tuple[str, ...] = ()
     max_log_bytes: int = DEFAULT_MAX_LOG_BYTES
 
 
@@ -94,15 +98,28 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
 
-def list_panes(*, runner: CommandRunner = _run_command, panes_override: Sequence[str] | None = None) -> list[Pane]:
+def list_panes(
+    *,
+    runner: CommandRunner = _run_command,
+    panes_override: Sequence[str] | None = None,
+    session_prefixes: Sequence[str] | None = None,
+    excluded_session_prefixes: Sequence[str] = (),
+) -> list[Pane]:
     """Enumerate live tmux panes, deduplicated by server-assigned pane ID.
 
     ``panes_override`` is only for controlled tests or deployments that need
     to restrict observation temporarily; normal operation always uses
-    ``tmux list-panes -a``.
+    ``tmux list-panes -a``. ``session_prefixes`` narrows live discovery to
+    names beginning with one of the supplied prefixes; an empty value keeps
+    the historical all-session behavior. ``excluded_session_prefixes`` wins
+    over inclusion, so a broad legacy observer can explicitly leave an
+    isolated instance's namespace alone.
     """
     if panes_override is not None:
         return [Pane(pane_id=target, target=target) for target in dict.fromkeys(panes_override) if target]
+
+    included = tuple(prefix.strip() for prefix in (session_prefixes or ()) if prefix.strip())
+    excluded = tuple(prefix.strip() for prefix in excluded_session_prefixes if prefix.strip())
 
     result = runner(["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"])
     if result.returncode != 0:
@@ -114,6 +131,11 @@ def list_panes(*, runner: CommandRunner = _run_command, panes_override: Sequence
     for line in result.stdout.splitlines():
         pane_id, separator, target = line.partition("\t")
         if not separator or not pane_id or not target or pane_id in seen:
+            continue
+        session_name, _separator, _pane = target.partition(":")
+        if included and not any(session_name.startswith(prefix) for prefix in included):
+            continue
+        if any(session_name.startswith(prefix) for prefix in excluded):
             continue
         seen.add(pane_id)
         panes.append(Pane(pane_id=pane_id, target=target))
@@ -175,7 +197,12 @@ class Watchd:
     def poll_once(self) -> int:
         """Capture all current panes and emit an event for each real change."""
         emitted = 0
-        for pane in list_panes(runner=self.runner, panes_override=self.config.panes_override):
+        for pane in list_panes(
+            runner=self.runner,
+            panes_override=self.config.panes_override,
+            session_prefixes=self.config.session_prefixes,
+            excluded_session_prefixes=self.config.excluded_session_prefixes,
+        ):
             content = capture_pane(pane, runner=self.runner)
             if content is None:
                 continue
@@ -218,12 +245,21 @@ def _positive_int(value: str, *, name: str) -> int:
     return parsed
 
 
+def _split_prefixes(value: str | None) -> tuple[str, ...]:
+    """Normalize a comma-separated namespace filter without inventing values."""
+    if not value:
+        return ()
+    return tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+
+
 def resolve_config(
     *,
     state_dir: Path | None = None,
     events_log: Path | None = None,
     interval_seconds: float | None = None,
     panes_override: Sequence[str] | None = None,
+    session_prefixes: Sequence[str] | None = None,
+    excluded_session_prefixes: Sequence[str] | None = None,
     max_log_bytes: int | None = None,
 ) -> WatchdConfig:
     """Resolve CLI values, then ``CHITRA_*`` overrides, then generic defaults."""
@@ -247,11 +283,23 @@ def resolve_config(
     if configured_panes is None:
         raw_panes = _env_value(PANES_ENV_VAR)
         configured_panes = tuple(item.strip() for item in raw_panes.split(",") if item.strip()) if raw_panes else None
+    configured_session_prefixes = (
+        tuple(prefix.strip() for prefix in session_prefixes if prefix.strip())
+        if session_prefixes is not None
+        else _split_prefixes(_env_value(SESSION_PREFIXES_ENV_VAR))
+    )
+    configured_excluded_session_prefixes = (
+        tuple(prefix.strip() for prefix in excluded_session_prefixes if prefix.strip())
+        if excluded_session_prefixes is not None
+        else _split_prefixes(_env_value(EXCLUDED_SESSION_PREFIXES_ENV_VAR))
+    )
     return WatchdConfig(
         state_dir=configured_state_dir,
         events_log=configured_events_log,
         interval_seconds=configured_interval,
         panes_override=tuple(configured_panes) if configured_panes is not None else None,
+        session_prefixes=configured_session_prefixes or None,
+        excluded_session_prefixes=configured_excluded_session_prefixes,
         max_log_bytes=configured_max_log_bytes,
     )
 
@@ -276,6 +324,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--panes", default=None, help="Comma-separated tmux targets for a controlled override (default: live tmux enumeration)."
     )
     parser.add_argument(
+        "--session-prefix",
+        action="append",
+        default=None,
+        help="Observe only tmux sessions with this prefix (repeatable; default: CHITRA_WATCHD_SESSION_PREFIXES).",
+    )
+    parser.add_argument(
+        "--exclude-session-prefix",
+        action="append",
+        default=None,
+        help="Never observe tmux sessions with this prefix (repeatable; default: CHITRA_WATCHD_EXCLUDE_SESSION_PREFIXES).",
+    )
+    parser.add_argument(
         "--max-log-bytes", type=int, default=None, help="Rotate at this size (default: CHITRA_WATCHD_MAX_LOG_BYTES or 5 MiB)."
     )
     parser.add_argument("--once", action="store_true", help="Capture and compare once, then exit.")
@@ -290,6 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         events_log=args.events_log,
         interval_seconds=args.interval_seconds,
         panes_override=panes_override,
+        session_prefixes=args.session_prefix,
+        excluded_session_prefixes=args.exclude_session_prefix,
         max_log_bytes=args.max_log_bytes,
     )
     watcher = Watchd(config)

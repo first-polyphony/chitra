@@ -15,7 +15,7 @@ import yaml
 import chitra.dispatchd as dispatchd_mod
 import chitra.ledger as ledger_mod
 from chitra.dispatch import DISPATCH_VERIFY_WAIT_SECONDS, DispatchOrder, DispatchResult, DispatchStatus
-from chitra.dispatchd import build_arg_parser, main, process_one_order, requeue_deferred_for_session, run_once
+from chitra.dispatchd import build_arg_parser, main, process_one_order, requeue_deferred_for_session, resolve_session_prefixes, run_once
 from chitra.goals import GoalRecord, hold_goal, upsert_goal
 from chitra.routing_config import ROUTING_CONFIG_ENV_VAR
 
@@ -167,6 +167,62 @@ def test_blocked_result_does_not_write_a_ledger_entry(tmp_path: Path, monkeypatc
     assert results[0].status == DispatchStatus.BLOCKED
     # Only a real send is signed/logged — a blocked attempt is not a delivery.
     assert not (tmp_path / "ledger.jsonl").exists()
+
+
+def test_dispatchd_blocks_orders_outside_its_owned_session_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        calls.append(order.session_ref)
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    queue_dir = tmp_path / "queue"
+    _write_order(queue_dir / "orders", DispatchOrder(order_id="wrong-lane", session_ref="localhost:monitor:0.0", nudge="hi"))
+    _write_order(
+        queue_dir / "orders",
+        DispatchOrder(order_id="owned-lane", session_ref="localhost:boomtown-design-a:0.0", nudge="hi"),
+    )
+
+    results = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        allowed_session_prefixes=("boomtown-",),
+    )
+
+    assert [result.status for result in results] == [DispatchStatus.BLOCKED, DispatchStatus.SENT]
+    assert "not owned by this dispatcher" in results[0].reason
+    assert calls == ["localhost:boomtown-design-a:0.0"]
+    assert (queue_dir / "processed" / "wrong-lane.json").exists()
+    assert (queue_dir / "results" / "wrong-lane.json").exists()
+
+
+def test_dispatchd_deny_namespace_overrides_an_allow_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        dispatchd_mod,
+        "dispatch_to_tmux",
+        lambda order, **kwargs: DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT),
+    )
+    queue_dir = tmp_path / "queue"
+    _write_order(queue_dir / "orders", DispatchOrder(order_id="reserved", session_ref="localhost:boomtown:0.0", nudge="hi"))
+
+    result = run_once(
+        queue_dir,
+        lock_dir=tmp_path / "locks",
+        ledger_path=tmp_path / "ledger.jsonl",
+        allowed_session_prefixes=("boomtown",),
+        denied_session_prefixes=("boomtown",),
+    )[0]
+
+    assert result.status == DispatchStatus.BLOCKED
+    assert "denied by prefix" in result.reason
+
+
+def test_dispatchd_session_namespace_environment_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_ALLOWED_SESSION_PREFIXES", " boomtown-, boomtown-, design-")
+
+    assert resolve_session_prefixes(None, env_var="CHITRA_ALLOWED_SESSION_PREFIXES") == ("boomtown-", "design-")
 
 
 def test_ledger_write_failure_does_not_prevent_completion_or_cause_redelivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -671,6 +727,54 @@ def test_live_owner_claim_is_never_stolen(tmp_path: Path) -> None:
 
     assert claimed_path.exists()  # still claimed -- not reclaimed to orders/
     assert not (queue_dir / "orders" / "ord-live.json").exists()
+
+
+def test_live_preclaim_reservation_keeps_pending_order_from_a_peer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The owner marker is created before rename, so another run_once pass
+    cannot reclaim an order during that tiny pre-rename claim window."""
+    calls = {"n": 0}
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        calls["n"] += 1
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-reserved", session_ref="localhost:s:0.0", nudge="hi")
+    _write_order(queue_dir / "orders", order)
+    dispatchd_mod._ensure_queue_dirs(queue_dir)
+    owner_path = queue_dir / "in_flight" / ".ord-reserved.owner"
+    owner_path.write_text(str(os.getpid()), encoding="utf-8")
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl")
+
+    assert results == []
+    assert calls["n"] == 0
+    assert (queue_dir / "orders" / "ord-reserved.json").exists()
+    assert owner_path.exists()
+
+
+def test_dead_preclaim_reservation_is_reclaimed_before_processing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crash before rename leaves only a dead marker; it must not strand
+    the still-pending order forever."""
+
+    def fake_dispatch(order: DispatchOrder, **kwargs: Any) -> DispatchResult:
+        return DispatchResult(order_id=order.order_id, session_ref=order.session_ref, status=DispatchStatus.SENT)
+
+    monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
+    queue_dir = tmp_path / "queue"
+    order = DispatchOrder(order_id="ord-stale-reservation", session_ref="localhost:s:0.0", nudge="hi")
+    _write_order(queue_dir / "orders", order)
+    dispatchd_mod._ensure_queue_dirs(queue_dir)
+    owner_path = queue_dir / "in_flight" / ".ord-stale-reservation.owner"
+    owner_path.write_text("999999999", encoding="utf-8")
+
+    results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl")
+
+    assert len(results) == 1
+    assert results[0].status == DispatchStatus.SENT
+    assert not owner_path.exists()
+    assert (queue_dir / "processed" / "ord-stale-reservation.json").exists()
 
 
 def test_result_appearing_while_waiting_for_the_lane_lock_is_caught_under_the_lock(
@@ -1184,6 +1288,10 @@ def test_dispatchd_parser_exposes_policy_invalid_order_and_tuning_flags() -> Non
             "120",
             "--lane-lock-timeout-seconds",
             "9",
+            "--allow-session-prefix",
+            "boomtown-",
+            "--deny-session-prefix",
+            "monitor",
         ]
     )
     assert args.policy_config_path == Path("policy.yaml")
@@ -1194,6 +1302,8 @@ def test_dispatchd_parser_exposes_policy_invalid_order_and_tuning_flags() -> Non
         120.0,
         9.0,
     )
+    assert args.allow_session_prefix == ["boomtown-"]
+    assert args.deny_session_prefix == ["monitor"]
 
 
 def test_dispatchd_parser_uses_the_transcript_write_allowance_by_default() -> None:

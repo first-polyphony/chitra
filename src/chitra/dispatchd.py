@@ -20,12 +20,13 @@ Crash-safety:
   existing result file (both before and again immediately after acquiring
   the lane lock -- see "Lane-lock recheck" below) and, if found, moves the
   order aside without re-dispatching.
-- **Atomic claim.** Before anything else, an order file is atomically
-  renamed from ``orders/`` into ``in_flight/``. Two dispatchd workers (or
-  two overlapping ``run_once`` passes) racing the same ``orders/`` glob can
-  each only rename it once; the loser sees ``FileNotFoundError`` and simply
-  skips it -- this is a real filesystem-level mutual-exclusion primitive,
-  not a check-then-act race. See docs/SOL-ADVERSARIAL-REVIEW finding #5.
+- **Atomic reservation and claim.** Before moving an order file from
+  ``orders/`` into ``in_flight/``, dispatchd creates its owner marker with
+  exclusive-create semantics. Two workers racing the same order can each
+  reserve it only once; the loser sees the marker and skips it. The reserver
+  then renames the order into ``in_flight/``. This closes the otherwise real
+  race between rename and owner-marker creation. See docs/SOL-ADVERSARIAL-
+  REVIEW finding #5.
 - **Send-nonce crash reconciliation.** The one gap atomic claim + lane lock
   cannot close on their own: a worker that dies *after* the pane paste
   actually lands but *before* ``_write_result_atomic`` runs leaves an order
@@ -89,6 +90,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 import structlog
@@ -122,6 +124,8 @@ DEFAULT_POLL_SECONDS = 1.0
 # caller-set bypass_rate_limit_freeze=True for. Owned here, not by the
 # order -- see this module's docstring.
 _RATE_LIMIT_GUARD_TASK_TYPES = frozenset({"rate-limit-checkpoint", "rate-limit-stop", "rate-limit-resume"})
+SESSION_ALLOW_PREFIXES_ENV_VAR = "CHITRA_ALLOWED_SESSION_PREFIXES"
+SESSION_DENY_PREFIXES_ENV_VAR = "CHITRA_DENIED_SESSION_PREFIXES"
 
 
 def _ensure_queue_dirs(queue_dir: Path) -> tuple[Path, Path, Path]:
@@ -131,6 +135,40 @@ def _ensure_queue_dirs(queue_dir: Path) -> tuple[Path, Path, Path]:
     for d in (orders, results, processed, queue_dir / "in_flight", queue_dir / "deferred"):
         d.mkdir(parents=True, exist_ok=True)
     return orders, results, processed
+
+
+def resolve_session_prefixes(prefixes: Sequence[str] | None, *, env_var: str) -> tuple[str, ...]:
+    """Resolve an optional CLI namespace policy or its comma-separated environment fallback."""
+    values = prefixes if prefixes is not None else os.environ.get(env_var, "").split(",")
+    resolved: list[str] = []
+    for raw_prefix in values:
+        prefix = raw_prefix.strip()
+        if prefix and prefix not in resolved:
+            resolved.append(prefix)
+    return tuple(resolved)
+
+
+def session_scope_violation(
+    session_ref: str,
+    *,
+    allowed_session_prefixes: tuple[str, ...] = (),
+    denied_session_prefixes: tuple[str, ...] = (),
+) -> str | None:
+    """Return a deterministic namespace-policy rejection, if one applies.
+
+    Invalid ``session_ref`` values deliberately return ``None`` here so the
+    established dispatch parser reports its normal malformed-reference error.
+    """
+    parts = session_ref.split(":")
+    if len(parts) != 3:
+        return None
+    session_name = parts[1]
+    denied = next((prefix for prefix in denied_session_prefixes if session_name.startswith(prefix)), None)
+    if denied is not None:
+        return f"session namespace denied by prefix {denied!r}"
+    if allowed_session_prefixes and not any(session_name.startswith(prefix) for prefix in allowed_session_prefixes):
+        return "session namespace is not owned by this dispatcher"
+    return None
 
 
 def _write_result_atomic(results_dir: Path, result: DispatchResult) -> Path:
@@ -150,6 +188,23 @@ def _pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _reserve_owner_marker(in_flight_dir: Path, order_id: str) -> Path | None:
+    """Atomically reserve an order before moving it into ``in_flight``.
+
+    The marker is intentionally created *before* the order rename. A peer
+    worker that sees the order still under ``orders/`` then sees the live
+    reservation and skips it, rather than racing the tiny former window
+    between the rename and owner-marker write.
+    """
+    owner_path = in_flight_dir / f".{order_id}.owner"
+    try:
+        with owner_path.open("x", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    except FileExistsError:
+        return None
+    return owner_path
 
 
 def _reclaim_stale_in_flight(queue_dir: Path) -> None:
@@ -181,6 +236,24 @@ def _reclaim_stale_in_flight(queue_dir: Path) -> None:
         logger.warning("dispatchd_reclaiming_stale_in_flight_order", path=str(claimed), owner_pid=pid)
         with contextlib.suppress(OSError):
             claimed.replace(orders_dir / claimed.name)
+        with contextlib.suppress(OSError):
+            owner_path.unlink()
+
+    # A worker can die after creating its reservation but before moving the
+    # order file into in_flight/. Such an orphan marker must not permanently
+    # block the still-pending order, but a live owner's short pre-rename window
+    # must remain protected.
+    for owner_path in in_flight_dir.glob(".*.owner"):
+        order_id = owner_path.name[1 : -len(".owner")]
+        if not order_id or (in_flight_dir / f"{order_id}.json").exists():
+            continue
+        try:
+            pid = int(owner_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = 0
+        if pid and _pid_alive(pid):
+            continue
+        logger.warning("dispatchd_reclaiming_stale_reservation", path=str(owner_path), owner_pid=pid)
         with contextlib.suppress(OSError):
             owner_path.unlink()
 
@@ -241,6 +314,8 @@ def process_one_order(
     dispatch_runner: TmuxRunner | None = None,
     projects_root: Path | None = None,
     local_extra: set[str] | None = None,
+    allowed_session_prefixes: tuple[str, ...] = (),
+    denied_session_prefixes: tuple[str, ...] = (),
 ) -> DispatchResult | None:
     """Process a single order file. Returns the result, or None if skipped
     (already processed, claimed elsewhere, or deferred by the rate-limit freeze).
@@ -280,25 +355,31 @@ def process_one_order(
     in_flight_dir = orders_dir.parent / "in_flight"
     in_flight_dir.mkdir(parents=True, exist_ok=True)
 
-    # Atomic claim: only one worker/pass can ever rename this exact file out
-    # of orders/. The loser sees FileNotFoundError and simply skips it — see
-    # this module's docstring.
+    # Atomically reserve the order before moving it out of orders/. The
+    # reservation closes the former rename->owner-marker window that could
+    # otherwise let another worker reclaim a live order as stale.
     claimed_path = in_flight_dir / order_path.name
+    owner_path = _reserve_owner_marker(in_flight_dir, order_path.stem)
+    if owner_path is None:
+        logger.info("dispatchd_order_reserved_elsewhere", path=str(order_path))
+        return None
     try:
         order_path.rename(claimed_path)
     except FileNotFoundError:
         logger.info("dispatchd_order_claimed_elsewhere", path=str(order_path))
+        with contextlib.suppress(OSError):
+            owner_path.unlink()
         return None
     except OSError as exc:
         logger.error("dispatchd_order_claim_failed", path=str(order_path), error=str(exc))
+        with contextlib.suppress(OSError):
+            owner_path.unlink()
         return None
 
-    # Owner marker: records which live process holds this claim, so a
-    # crashed worker's abandoned claim can be told apart from one still
-    # legitimately in progress (see _reclaim_stale_in_flight). Removed
+    # The reservation marker now records which live process holds this claim,
+    # so a crashed worker's abandoned claim can be told apart from one still
+    # legitimately in progress (see _reclaim_stale_in_flight). It is removed
     # unconditionally once this claim is fully resolved, however it resolves.
-    owner_path = in_flight_dir / f".{claimed_path.stem}.owner"
-    owner_path.write_text(str(os.getpid()), encoding="utf-8")
     try:
         return _process_claimed_order(
             claimed_path,
@@ -317,6 +398,8 @@ def process_one_order(
             dispatch_runner=dispatch_runner,
             projects_root=projects_root,
             local_extra=local_extra,
+            allowed_session_prefixes=allowed_session_prefixes,
+            denied_session_prefixes=denied_session_prefixes,
         )
     finally:
         with contextlib.suppress(OSError):
@@ -341,6 +424,8 @@ def _process_claimed_order(
     dispatch_runner: TmuxRunner | None,
     projects_root: Path | None,
     local_extra: set[str] | None,
+    allowed_session_prefixes: tuple[str, ...],
+    denied_session_prefixes: tuple[str, ...],
 ) -> DispatchResult | None:
     """The rest of order processing, once an order file is safely claimed
     (renamed into ``in_flight/`` with a live owner marker). Split out of
@@ -393,6 +478,36 @@ def _process_claimed_order(
         with contextlib.suppress(OSError):
             claimed_path.replace(processed_dir / claimed_path.name)
         return None
+
+    scope_violation = session_scope_violation(
+        order.session_ref,
+        allowed_session_prefixes=allowed_session_prefixes,
+        denied_session_prefixes=denied_session_prefixes,
+    )
+    if scope_violation is not None:
+        logger.warning(
+            "dispatchd_order_blocked_session_scope",
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            reason=scope_violation,
+        )
+        result = DispatchResult(
+            order_id=order.order_id,
+            session_ref=order.session_ref,
+            status=DispatchStatus.BLOCKED,
+            reason=scope_violation,
+            routing_hint=order.routing_hint,
+            task_type=order.task_type,
+            routing_hint_source=routing_hint_source,
+            resolved_model=resolved_model,
+            resolved_harness=resolved_harness,
+            resolved_zdr=resolved_zdr,
+            decision_provenance=order.reasoning.provenance if order.reasoning is not None else None,
+        )
+        _write_result_atomic(results_dir, result)
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        claimed_path.replace(processed_dir / claimed_path.name)
+        return result
 
     # Completion-claim audit: opt-in via completion_todo_items being set (see
     # DispatchOrder's docstring). A disputed claim is never delivered as an
@@ -610,6 +725,8 @@ def run_once(
     dispatch_runner: TmuxRunner | None = None,
     projects_root: Path | None = None,
     local_extra: set[str] | None = None,
+    allowed_session_prefixes: tuple[str, ...] = (),
+    denied_session_prefixes: tuple[str, ...] = (),
 ) -> list[DispatchResult]:
     """Process every pending order in ``queue_dir/orders`` once, FIFO by mtime.
 
@@ -653,6 +770,8 @@ def run_once(
             dispatch_runner=dispatch_runner,
             projects_root=projects_root,
             local_extra=local_extra,
+            allowed_session_prefixes=allowed_session_prefixes,
+            denied_session_prefixes=denied_session_prefixes,
         )
         if result is not None:
             out.append(result)
@@ -671,6 +790,8 @@ def run_forever(
     invalid_dir: Path | None = None,
     tuning: DispatchTuning | None = None,
     goals_root: Path | None = None,
+    allowed_session_prefixes: tuple[str, ...] = (),
+    denied_session_prefixes: tuple[str, ...] = (),
 ) -> None:
     """Run the daemon loop: drain the queue, sleep, repeat. Runs until killed."""
     queue_dir = queue_dir or default_queue_dir()
@@ -686,6 +807,8 @@ def run_forever(
             invalid_dir=invalid_dir,
             tuning=tuning,
             goals_root=goals_root,
+            allowed_session_prefixes=allowed_session_prefixes,
+            denied_session_prefixes=denied_session_prefixes,
         )
         time.sleep(poll_seconds)
 
@@ -720,6 +843,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="chitra.goals store root consulted for the rate-limit freeze check (default: CHITRA_STATE_DIR).",
     )
+    parser.add_argument(
+        "--allow-session-prefix",
+        action="append",
+        default=None,
+        help="Only dispatch to tmux session names with this prefix (repeatable; default: CHITRA_ALLOWED_SESSION_PREFIXES).",
+    )
+    parser.add_argument(
+        "--deny-session-prefix",
+        action="append",
+        default=None,
+        help="Never dispatch to tmux session names with this prefix (repeatable; default: CHITRA_DENIED_SESSION_PREFIXES).",
+    )
     parser.add_argument("--capture-lines", type=int, default=12)
     parser.add_argument("--post-paste-wait-seconds", type=float, default=DISPATCH_VERIFY_WAIT_SECONDS)
     parser.add_argument("--transcript-recency-seconds", type=float, default=300.0)
@@ -732,6 +867,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     queue_dir = args.queue_dir or default_queue_dir()
+    allowed_session_prefixes = resolve_session_prefixes(args.allow_session_prefix, env_var=SESSION_ALLOW_PREFIXES_ENV_VAR)
+    denied_session_prefixes = resolve_session_prefixes(args.deny_session_prefix, env_var=SESSION_DENY_PREFIXES_ENV_VAR)
     tuning = DispatchTuning(
         capture_lines=args.capture_lines,
         post_paste_wait_seconds=args.post_paste_wait_seconds,
@@ -749,6 +886,8 @@ def main(argv: list[str] | None = None) -> int:
             invalid_dir=args.invalid_orders_dir,
             tuning=tuning,
             goals_root=args.goals_root,
+            allowed_session_prefixes=allowed_session_prefixes,
+            denied_session_prefixes=denied_session_prefixes,
         )
         print(json.dumps([r.model_dump(mode="json") for r in results], indent=2))
         return 0
@@ -763,6 +902,8 @@ def main(argv: list[str] | None = None) -> int:
         invalid_dir=args.invalid_orders_dir,
         tuning=tuning,
         goals_root=args.goals_root,
+        allowed_session_prefixes=allowed_session_prefixes,
+        denied_session_prefixes=denied_session_prefixes,
     )
     return 0
 
