@@ -30,7 +30,7 @@ from typing import Any, Literal, Protocol
 import structlog
 
 from chitra.board_updater import validate_board_facts
-from chitra.goals import GoalStatus, session_host, session_name
+from chitra.goals import GoalRecord, GoalStatus, done_when_with_delta, session_host, session_name
 from chitra.state_paths import state_dir as default_state_dir
 
 logger = structlog.get_logger(__name__)
@@ -39,8 +39,18 @@ DEFAULT_REMOTE_USER = "ubuntu"
 MAX_SUBHUB_AGE_SECONDS = 600
 TOKEN_RE = re.compile(r"\{\{[a-zA-Z0-9_]+}}")
 FALLBACK_ACCENTS = (
-    "#e9a23b", "#5e9ed6", "#b48ee0", "#53b583", "#d98ca0", "#52b3c4",
-    "#d9825f", "#bcae57", "#8a93e8", "#6fbf9a", "#c98bd6", "#7d8aa5",
+    "#e9a23b",
+    "#5e9ed6",
+    "#b48ee0",
+    "#53b583",
+    "#d98ca0",
+    "#52b3c4",
+    "#d9825f",
+    "#bcae57",
+    "#8a93e8",
+    "#6fbf9a",
+    "#c98bd6",
+    "#7d8aa5",
 )
 STATE_KEYS = {"st-done": "done", "st-stuck": "stuck"}
 PROVIDER_LABELS = {
@@ -252,6 +262,13 @@ def _roster_goal(record: RosterRecord) -> str:
     return f"{record.goal}{version_marker}"
 
 
+def _roster_done_when(record: RosterRecord) -> str:
+    """Surface enrolled-to-current narrowing for canonical goal records."""
+    if isinstance(record, GoalRecord):
+        return done_when_with_delta(record)
+    return record.done_when
+
+
 def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, str, str]]:
     """Build FULL (untruncated) cell rows in stable host/session/ref order.
 
@@ -265,7 +282,7 @@ def _roster_rows(records: Sequence[RosterRecord]) -> list[tuple[str, str, str, s
             (
                 marker,
                 session_name(record.session_ref),
-                f"{_roster_goal(record)} — done: {record.done_when}",
+                f"{_roster_goal(record)} — done: {_roster_done_when(record)}",
                 record.now,
                 _roster_needs(record, marker),
             )
@@ -295,9 +312,7 @@ def _awaiting_ruling_lines(records: Sequence[RosterRecord], *, fmt: Literal["box
     return ["AWAITING RULING — surfaced every report until you rule:", *(f"  • {session}: {ask}" for session, ask in asks)]
 
 
-def _unreviewed_artifact_block(
-    artifacts: Sequence[ArtifactRosterRecord], *, fmt: Literal["cards", "box", "markdown"]
-) -> str:
+def _unreviewed_artifact_block(artifacts: Sequence[ArtifactRosterRecord], *, fmt: Literal["cards", "box", "markdown"]) -> str:
     """Render each injected unreviewed artifact on one unwrapped, copyable line."""
     unreviewed = sorted(
         (artifact for artifact in artifacts if artifact.review_status == "unreviewed"),
@@ -306,9 +321,7 @@ def _unreviewed_artifact_block(
     if not unreviewed:
         return ""
     prefix = "- " if fmt == "markdown" else "  • "
-    return "\n".join(
-        ("UNREVIEWED ARTIFACTS:", *(f"{prefix}{artifact.title} — {artifact.url}" for artifact in unreviewed))
-    )
+    return "\n".join(("UNREVIEWED ARTIFACTS:", *(f"{prefix}{artifact.title} — {artifact.url}" for artifact in unreviewed)))
 
 
 ROSTER_CARD_LABEL_WIDTH = 6
@@ -336,7 +349,7 @@ def _render_cards(records: Sequence[RosterRecord]) -> str:
     for record in _ordered_roster_records(records):
         marker = compute_marker(record)
         block = [f"{marker} {session_name(record.session_ref)}"]
-        block += field("Goal", f"{_roster_goal(record)}  ·  done: {record.done_when}")
+        block += field("Goal", f"{_roster_goal(record)}  ·  done: {_roster_done_when(record)}")
         block += field("Now", record.now)
         if marker == "🔴":
             block += field("Needs", _roster_needs(record, marker))
@@ -369,6 +382,7 @@ def render_roster(
     headers = ("", "Session", "Goal", "Now", "Needs")
     rows = _roster_rows(records)
     if fmt == "markdown":
+
         def markdown_cell(value: str) -> str:
             return value.replace("|", "\\|")
 
@@ -387,17 +401,11 @@ def render_roster(
         # Marker is a single glyph in a fixed slot (never wrapped); the text
         # columns wrap to as many lines as they need. Pad every segment by
         # DISPLAY width so emoji/CJK never shift a column.
-        wrapped = [
-            [row[0]] if index == 0 else _wrap_cell(row[index], widths[index])
-            for index in range(len(row))
-        ]
+        wrapped = [[row[0]] if index == 0 else _wrap_cell(row[index], widths[index]) for index in range(len(row))]
         height = max(len(cell) for cell in wrapped)
         out: list[str] = []
         for r in range(height):
-            segments = [
-                " " + _pad(cell[r] if r < len(cell) else "", widths[index]) + " "
-                for index, cell in enumerate(wrapped)
-            ]
+            segments = [" " + _pad(cell[r] if r < len(cell) else "", widths[index]) + " " for index, cell in enumerate(wrapped)]
             out.append("│" + "│".join(segments) + "│")
         return out
 
@@ -507,9 +515,7 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def capture_tail(
-    session: dict[str, Any], *, local_host: str, remote_hosts: set[str], remote_user: str
-) -> str:
+def capture_tail(session: dict[str, Any], *, local_host: str, remote_hosts: set[str], remote_user: str) -> str:
     """Return a compact pane tail, or an honest availability message.
 
     Remote capture is opt-in through ``CHITRA_BOARD_REMOTE_HOSTS``.  This
@@ -560,9 +566,7 @@ def sort_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(sessions, key=lambda session: 0 if needs_operator(session) else 1)
 
 
-def render_rows(
-    sessions: list[dict[str, Any]], *, local_host: str, remote_hosts: set[str], remote_user: str
-) -> str:
+def render_rows(sessions: list[dict[str, Any]], *, local_host: str, remote_hosts: set[str], remote_user: str) -> str:
     rows: list[str] = []
     for session in sessions:
         state = session["state"]
@@ -578,17 +582,17 @@ def render_rows(
         tail = capture_tail(session, local_host=local_host, remote_hosts=remote_hosts, remote_user=remote_user)
         rows.append(
             f'''\
-    <details class="row {'needs' if needs else 'plain'}" id="{html.escape(session['id'])}"
-      style="--session: {accent_for(session['id'])}" data-session="{html.escape(session['id'])}" data-state="{row_state_key(session)}">
+    <details class="row {"needs" if needs else "plain"}" id="{html.escape(session["id"])}"
+      style="--session: {accent_for(session["id"])}" data-session="{html.escape(session["id"])}" data-state="{row_state_key(session)}">
       <summary class="rowline">{needline}
-        <div class="cell-name"><div class="sname">{html.escape(session['name'])}</div>
-          <div class="sid">{html.escape(session['sid'])}</div></div>
-        <div class="state {html.escape(state['cls'])}">{html.escape(state['word'])}{extra}</div>
-        <div class="doing"><span class="goal">GOAL · {html.escape(session['goal'])}</span>{html.escape(session['doing'])}</div>
+        <div class="cell-name"><div class="sname">{html.escape(session["name"])}</div>
+          <div class="sid">{html.escape(session["sid"])}</div></div>
+        <div class="state {html.escape(state["cls"])}">{html.escape(state["word"])}{extra}</div>
+        <div class="doing"><span class="goal">GOAL · {html.escape(session["goal"])}</span>{html.escape(session["doing"])}</div>
         <span class="btn">▸ detail</span>
       </summary>
       <div class="detailwrap">
-{render_detail(session['detail'], tail)}
+{render_detail(session["detail"], tail)}
       </div>
     </details>'''
         )
@@ -690,7 +694,7 @@ def _subhub_usage(account: dict[str, Any]) -> str:
         verified = _iso_stamp(freshness.get("captured_at"))
         tag = f"probe stale — last verified {verified}" if verified else "probe stale"
         parts.append(f'<span class="stale-tag">{html.escape(tag)}</span>')
-    elif (wait := _human_duration(usage.get("limiting_reset_in_seconds"))):
+    elif wait := _human_duration(usage.get("limiting_reset_in_seconds")):
         parts.append(html.escape(f"resets in {wait}"))
     return " · ".join(parts)
 
@@ -746,7 +750,7 @@ def render_subhub(capacity_file: Path | None, epoch: int) -> str:
         dot_class = "ok" if state == "available" else "warn"
         rendered.append(
             f'<span class="apichip"><span class="dot {dot_class}">●</span> '
-            f'{html.escape(PROVIDER_LABELS.get(provider, provider))} · {html.escape(state_label)} · {capacity}</span>'
+            f"{html.escape(PROVIDER_LABELS.get(provider, provider))} · {html.escape(state_label)} · {capacity}</span>"
         )
     rendered.append("</div>")
     return "\n".join(rendered)
@@ -762,9 +766,16 @@ def bundled_template() -> str:
 
 
 def render(
-    facts: dict[str, Any], *, template: str | None = None, epoch: int | None = None, local_host: str | None = None,
-    remote_hosts: set[str] | None = None, remote_user: str = DEFAULT_REMOTE_USER, capacity_file: Path | None = None,
-    expected_owner: str | None = None, valid_hosts: set[str] | None = None,
+    facts: dict[str, Any],
+    *,
+    template: str | None = None,
+    epoch: int | None = None,
+    local_host: str | None = None,
+    remote_hosts: set[str] | None = None,
+    remote_user: str = DEFAULT_REMOTE_USER,
+    capacity_file: Path | None = None,
+    expected_owner: str | None = None,
+    valid_hosts: set[str] | None = None,
 ) -> str:
     """Render a fully validated fact document to operator HTML."""
     validation = validate_board_facts(facts, expected_owner=expected_owner, valid_hosts=valid_hosts)
@@ -795,17 +806,21 @@ def render(
         unrendered_tokens = sorted(set(tokens).difference(replacements))
         if unrendered_tokens:
             raise ValueError(f"unrendered template tokens: {unrendered_tokens}")
-    replacement_pattern = re.compile(
-        "|".join(re.escape(token) for token in sorted(replacements, key=len, reverse=True))
-    )
+    replacement_pattern = re.compile("|".join(re.escape(token) for token in sorted(replacements, key=len, reverse=True)))
     document = replacement_pattern.sub(lambda match: replacements[match.group(0)], document)
     return document
 
 
 def render_board(
-    board_dir: Path, *, template_path: Path | None = None, capacity_file: Path | None = None,
-    local_host: str | None = None, remote_hosts: set[str] | None = None, remote_user: str = DEFAULT_REMOTE_USER,
-    expected_owner: str | None = None, valid_hosts: set[str] | None = None,
+    board_dir: Path,
+    *,
+    template_path: Path | None = None,
+    capacity_file: Path | None = None,
+    local_host: str | None = None,
+    remote_hosts: set[str] | None = None,
+    remote_user: str = DEFAULT_REMOTE_USER,
+    expected_owner: str | None = None,
+    valid_hosts: set[str] | None = None,
 ) -> Path:
     """Load ``facts.json`` and atomically replace ``index.html`` on success."""
     try:

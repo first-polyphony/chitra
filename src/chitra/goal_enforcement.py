@@ -75,7 +75,7 @@ def freeze_goal(record: GoalRecord) -> FrozenGoal:
         "session_ref": record.session_ref,
         "intent": record.intent,
         "goal": record.goal,
-        "done_when": record.done_when,
+        "done_when": record.enrolled_done_when or record.done_when,
         "scope": record.scope,
         "source": record.source,
         "goal_version": record.goal_version,

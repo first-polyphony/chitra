@@ -1,7 +1,8 @@
 """Deterministic close-time inventory checks for operator-stated goals.
 
-This module only reads a lane's existing ``done_when`` and caller-supplied
-delivery facts.  It never generates, expands, or rewrites done conditions.
+This module reads a lane's immutable enrollment condition, its current
+``done_when``, and caller-supplied delivery facts.  It never generates,
+expands, or rewrites done conditions.
 """
 
 from __future__ import annotations
@@ -154,9 +155,7 @@ def lint_done_when(done_when: str) -> DoneWhenFlag | None:
     lowered = done_when.casefold()
     has_any_explicit_count = _EXPLICIT_COUNT_RE.search(lowered) is not None
     matches = [
-        token
-        for token in AGGREGATE_DONE_WHEN_TOKENS
-        if not has_any_explicit_count and re.search(rf"\b{re.escape(token)}\b", lowered)
+        token for token in AGGREGATE_DONE_WHEN_TOKENS if not has_any_explicit_count and re.search(rf"\b{re.escape(token)}\b", lowered)
     ]
     for noun in sorted(BARE_DELIVERABLE_PLURALS):
         if not re.search(rf"\b{re.escape(noun)}\b", lowered):
@@ -199,26 +198,33 @@ def delivered_items_from_evidence(evidence: Sequence[CompletionEvidence]) -> tup
 
 
 def evaluate_close_inventory(
-    done_when: str,
+    enrolled_done_when: str,
     delivered_items: Sequence[str],
     *,
+    current_done_when: str | None = None,
     evidence: Sequence[CompletionEvidence] = (),
     close_notes: Sequence[str] = (),
     operator_acknowledged_items: Sequence[str] = (),
     goal_version: int = 1,
     goal_history: Sequence[Mapping[str, str]] = (),
 ) -> CloseGateVerdict:
-    """Diff caller-stated delivery facts against operator-stated conditions."""
-    required = parse_required_items(done_when)
+    """Diff delivery facts against the immutable enrollment conditions."""
+    current_done_when = enrolled_done_when if current_done_when is None else current_done_when
+    required = parse_required_items(enrolled_done_when)
     delivered = _deduplicate((*delivered_items, *delivered_items_from_evidence(evidence)))
     acknowledgements = _deduplicate(operator_acknowledged_items)
     acknowledged = tuple(item for item in required if any(_item_matches(item, ack) for ack in acknowledgements))
-    recorded_descopes = _recorded_descopes(required, goal_version=goal_version, goal_history=goal_history)
+    recorded_descopes = _recorded_descopes(
+        enrolled_done_when,
+        current_done_when,
+        goal_version=goal_version,
+        goal_history=goal_history,
+    )
 
     unused_deliveries = set(range(len(delivered)))
     missing: list[InventoryGap] = []
     for item in required:
-        if item in acknowledged:
+        if item in acknowledged or item in recorded_descopes:
             continue
         matches = [index for index in sorted(unused_deliveries) if _item_matches(item, delivered[index])]
         used = matches[: item.quantity]
@@ -229,7 +235,9 @@ def evaluate_close_inventory(
     reclassified = tuple(
         item
         for item in required
-        if item not in acknowledged and any(_clause_reclassifies(item, clause) for clause in _close_clauses(close_notes))
+        if item not in acknowledged
+        and item not in recorded_descopes
+        and any(_clause_reclassifies(item, clause) for clause in _close_clauses(close_notes))
     )
     if not required:
         summary = "FAIL: close-time inventory diff cannot verify a lane with missing done conditions."
@@ -253,8 +261,7 @@ def evaluate_close_inventory(
         if reclassified:
             details.append(
                 "F8 close tell: stated-required item reclassified as follow-on/out of scope/deferred/future work without "
-                "an operator-recorded descope or explicit acknowledgement: "
-                + ", ".join(repr(item.text) for item in reclassified)
+                "an operator-recorded descope or explicit acknowledgement: " + ", ".join(repr(item.text) for item in reclassified)
             )
         return CloseGateVerdict(
             verdict="FAIL",
@@ -274,14 +281,15 @@ def evaluate_close_inventory(
         reclassified=(),
         acknowledged=acknowledged,
         recorded_descopes=recorded_descopes,
-        summary="PASS: every currently stated required item is delivered, explicitly acknowledged, or operator-descoped.",
+        summary="PASS: every enrolled required item is delivered, explicitly acknowledged, or operator-descoped.",
     )
 
 
 def require_close_inventory(
-    done_when: str,
+    enrolled_done_when: str,
     delivered_items: Sequence[str],
     *,
+    current_done_when: str | None = None,
     evidence: Sequence[CompletionEvidence] = (),
     close_notes: Sequence[str] = (),
     operator_acknowledged_items: Sequence[str] = (),
@@ -290,8 +298,9 @@ def require_close_inventory(
 ) -> CloseGateVerdict:
     """Return a passing verdict or raise a typed blocking error."""
     verdict = evaluate_close_inventory(
-        done_when,
+        enrolled_done_when,
         delivered_items,
+        current_done_when=current_done_when,
         evidence=evidence,
         close_notes=close_notes,
         operator_acknowledged_items=operator_acknowledged_items,
@@ -362,21 +371,20 @@ def _clause_reclassifies(required: RequiredItem, clause: str) -> bool:
 
 
 def _recorded_descopes(
-    current: Sequence[RequiredItem],
+    enrolled_done_when: str,
+    current_done_when: str,
     *,
-    goal_version: int,
+    goal_version: int = 1,
     goal_history: Sequence[Mapping[str, str]],
 ) -> tuple[RequiredItem, ...]:
-    if goal_version <= 1:
-        return ()
+    """Return enrolled/history items absent now, regardless of version."""
+    current = parse_required_items(current_done_when)
     descoped: list[RequiredItem] = []
-    for entry in goal_history:
-        previous_done_when = entry.get("done_when")
-        if previous_done_when is None:
-            continue
-        for previous_item in parse_required_items(previous_done_when):
-            if any(_item_matches(item, previous_item.text) for item in current):
+    prior_conditions = (enrolled_done_when, *(entry["done_when"] for entry in goal_history if "done_when" in entry))
+    for prior_done_when in prior_conditions:
+        for prior_item in parse_required_items(prior_done_when):
+            if any(_item_matches(item, prior_item.text) for item in current):
                 continue
-            if previous_item not in descoped:
-                descoped.append(previous_item)
+            if not any(_item_matches(item, prior_item.text) for item in descoped):
+                descoped.append(prior_item)
     return tuple(descoped)

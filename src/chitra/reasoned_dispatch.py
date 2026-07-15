@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 
 from chitra.dispatch import DispatchOrder
 from chitra.goal_enforcement import FindingCode, SessionReviewSignal
-from chitra.goals import GoalRecord
+from chitra.goals import GoalRecord, done_when_with_delta
 from chitra.reasoning import (
     DecisionQuestion,
     DecisionReasoner,
@@ -73,7 +73,7 @@ def _question_and_judgment(
         answer = (
             "The completion claim did not pass review. "
             f"Continue against the frozen goal: {goal.goal}. "
-            f"Satisfy the completion condition before claiming completion: {goal.done_when}. "
+            f"Satisfy the completion condition before claiming completion: {done_when_with_delta(goal)}. "
             f"Stay within scope: {goal.scope}."
         )
         return (

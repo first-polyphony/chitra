@@ -15,6 +15,7 @@ from chitra import board
 from chitra.artifacts import ARTIFACT_URL_PREFIX, ArtifactRecord, upsert_artifact
 from chitra.close_gate import DONE_WHEN_OPERATOR_FLAG, CloseGateError
 from chitra.goals import (
+    EnrolledScopeImmutableError,
     GoalNotFoundError,
     GoalRecord,
     GoalRedirectRequiredError,
@@ -23,12 +24,14 @@ from chitra.goals import (
     add_ask,
     check_specification,
     close_goal,
+    descope_delta,
     due_goals,
     get_goal,
     hold_goal,
     list_goals,
     load_goals,
     main,
+    mark_completion_gate_passed,
     redirect_goal,
     resolve_ask,
     resume_goal,
@@ -100,6 +103,11 @@ def test_store_round_trip_and_atomic_write(tmp_path: Path) -> None:
     assert payload["goals"][0]["needs"] == "you: run the interview"
     assert payload["goals"][0]["goal_version"] == 1
     assert payload["goals"][0]["goal_history"] == []
+    assert stored.lane_id == "f2-77"
+    assert stored.enrolled_done_when == stored.done_when
+    assert stored.enrolled_at == stored.created_at
+    assert payload["goals"][0]["enrolled_done_when"] == stored.done_when
+    assert payload["goals"][0]["enrolled_at"] == stored.enrolled_at
 
 
 def test_upsert_preserves_created_timestamp_and_recomputes_updated(tmp_path: Path) -> None:
@@ -178,9 +186,15 @@ def test_load_old_record_without_optional_fields_is_backward_compatible(tmp_path
     assert record.scope == ""
     assert record.goal_version == 1
     assert record.goal_history == ()
+    assert record.lane_id == "lane"
+    assert record.enrolled_done_when == record.done_when
+    assert record.enrolled_at == payload["updated_at"]
     stored = upsert_goal(tmp_path, record)
     assert load_goals(tmp_path) == [stored]
     assert stored.to_dict()["goal_history"] == []
+    persisted = json.loads((tmp_path / "goals.json").read_text(encoding="utf-8"))["goals"][0]
+    assert persisted["enrolled_done_when"] == record.done_when
+    assert persisted["enrolled_at"] == payload["updated_at"]
 
 
 @pytest.mark.parametrize(
@@ -190,6 +204,9 @@ def test_load_old_record_without_optional_fields_is_backward_compatible(tmp_path
         ("scope", 1, "scope must be a string"),
         ("goal_version", True, "goal_version must be an integer"),
         ("goal_history", "not-a-list", "goal_history must be a list"),
+        ("lane_id", 1, "lane_id must be a string"),
+        ("enrolled_done_when", 1, "enrolled_done_when must be a string"),
+        ("enrolled_at", 1, "enrolled_at must be a string"),
         (
             "goal_history",
             [{"goal": "g", "done_when": "d", "intent": "i", "scope": "s", "revised_at": "t"}],
@@ -224,6 +241,39 @@ def test_plain_upsert_preserves_strategic_version_and_history(tmp_path: Path) ->
     assert revised.now == "running checks"
     assert revised.goal_version == 2
     assert revised.goal_history == redirected.goal_history
+
+
+def test_enrolled_scope_is_write_once_and_carried_through_later_writes(tmp_path: Path) -> None:
+    enrolled = upsert_goal(tmp_path, _record())
+
+    with pytest.raises(EnrolledScopeImmutableError, match="enrolled_done_when"):
+        upsert_goal(tmp_path, replace(enrolled, enrolled_done_when="A smaller condition replaces the original."))
+    with pytest.raises(EnrolledScopeImmutableError, match="enrolled_at"):
+        upsert_goal(tmp_path, replace(enrolled, enrolled_at="2026-07-14T00:00:00+00:00"))
+
+    revised = upsert_goal(tmp_path, replace(enrolled, now="running the complete suite"))
+    assert (revised.enrolled_done_when, revised.enrolled_at) == (
+        enrolled.enrolled_done_when,
+        enrolled.enrolled_at,
+    )
+
+
+def test_redirect_now_hold_resume_and_close_preserve_enrollment_anchor(tmp_path: Path) -> None:
+    enrolled = upsert_goal(tmp_path, _record(done_when="both the X client and the Y client pass live validation"))
+    redirected = redirect_goal(
+        tmp_path,
+        enrolled.session_ref,
+        reason="operator explicitly descoped Y",
+        done_when="The X client passes live validation",
+    )
+    updated = update_now(tmp_path, redirected.session_ref, now="validating X")
+    held = hold_goal(tmp_path, updated.session_ref, reason="operator")
+    resumed = resume_goal(tmp_path, held.session_ref)
+    closed = close_goal(tmp_path, resumed.session_ref, delivered_items=("X client",))
+
+    for record in (redirected, updated, held, resumed, closed):
+        assert record.enrolled_done_when == enrolled.done_when
+        assert record.enrolled_at == enrolled.enrolled_at
 
 
 @pytest.mark.parametrize(
@@ -299,6 +349,69 @@ def test_update_now_is_tactical_only_and_requires_an_existing_record(tmp_path: P
     )
     with pytest.raises(GoalNotFoundError):
         update_now(tmp_path, "missing:lane", now="nothing")
+
+
+@pytest.mark.parametrize("status", ["done-pending-verification", "done-pending-close"])
+def test_done_status_requires_completion_gate(tmp_path: Path, status: GoalStatus) -> None:
+    stored = upsert_goal(tmp_path, _record())
+
+    with pytest.raises(GoalValidationError, match=r"update_now cannot set a done-\*"):
+        update_now(tmp_path, stored.session_ref, status=status)
+    with pytest.raises(GoalValidationError, match="completion gate"):
+        upsert_goal(tmp_path, replace(stored, status=status))
+
+
+def test_fresh_session_ref_for_open_lane_requires_redirect(tmp_path: Path) -> None:
+    stored = upsert_goal(tmp_path, _record(session_ref="tophand:folio:0.0"))
+    assert stored.lane_id == "folio"
+
+    with pytest.raises(GoalRedirectRequiredError, match="already has an open goal"):
+        upsert_goal(tmp_path, _record(session_ref="other-host:folio:9.1"))
+    with pytest.raises(GoalValidationError, match="derived"):
+        upsert_goal(tmp_path, replace(_record(session_ref="host:other:0.0"), lane_id="spoofed"))
+
+
+def test_redirect_invalidates_prior_done_state(tmp_path: Path) -> None:
+    stored = upsert_goal(tmp_path, _record())
+    completed = mark_completion_gate_passed(
+        tmp_path,
+        stored.session_ref,
+        now="completion gate passed",
+        last_verified="2026-07-14T00:00:00+00:00",
+    )
+    redirected = redirect_goal(
+        tmp_path,
+        completed.session_ref,
+        reason="operator revised the completion contract",
+        done_when="The expanded full suite and static checks pass.",
+    )
+
+    assert redirected.status == "working"
+    assert redirected.last_verified == ""
+
+
+def test_folio_scope_laundering_paths_are_structurally_blocked_and_visible(tmp_path: Path) -> None:
+    full = "both the Folio import lane and the Folio export lane pass live validation"
+    stored = upsert_goal(tmp_path, _record(session_ref="tophand:folio:0.0", done_when=full))
+    narrowed = redirect_goal(
+        tmp_path,
+        stored.session_ref,
+        reason="operator is considering a reduced delivery",
+        done_when="The Folio import lane passes live validation",
+    )
+
+    with pytest.raises(GoalRedirectRequiredError, match="redirect"):
+        upsert_goal(
+            tmp_path,
+            _record(
+                session_ref="tophand:folio:1.0",
+                done_when="The Folio import lane passes live validation",
+            ),
+        )
+    with pytest.raises(GoalValidationError, match=r"update_now cannot set a done-\*"):
+        update_now(tmp_path, narrowed.session_ref, status="done-pending-close")
+
+    assert [item.text for item in descope_delta(narrowed)] == ["the Folio export lane pass live validation"]
 
 
 @pytest.mark.parametrize(

@@ -42,7 +42,7 @@ from chitra.goal_enforcement import (
     WatchedSessionBehavior,
     review_watched_session,
 )
-from chitra.goals import GoalStatus, add_ask, get_goal, list_goals, update_now
+from chitra.goals import GoalStatus, add_ask, get_goal, list_goals, mark_completion_gate_passed, update_now
 from chitra.lane_activity import LaneActivity, LaneBackend, load_lane_activity, upsert_lane_activity
 from chitra.policy_config import load_policy_config
 from chitra.reasoned_dispatch import abstaining_oracle, build_reasoned_dispatch
@@ -348,13 +348,21 @@ class Watchd:
             ask = "Resolve the cited completion-gate gaps before treating this lane as complete."
             review_verdict = "accept"
 
-        update_now(
-            root,
-            pending.session_ref,
-            now=summary,
-            status=status,
-            last_verified=datetime.now(UTC).isoformat() if status == "done-pending-close" else pending.last_verified,
-        )
+        if status == "done-pending-close":
+            mark_completion_gate_passed(
+                root,
+                pending.session_ref,
+                now=summary,
+                last_verified=datetime.now(UTC).isoformat(),
+            )
+        else:
+            update_now(
+                root,
+                pending.session_ref,
+                now=summary,
+                status=status,
+                last_verified=pending.last_verified,
+            )
         if ask:
             add_ask(root, pending.session_ref, ask)
         append_completion_review(

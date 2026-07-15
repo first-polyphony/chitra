@@ -70,6 +70,20 @@ def test_initial_round_requires_unanimous_isolated_acceptance(tmp_path: Path) ->
     assert (tmp_path / "goal_reviews.jsonl").exists()
 
 
+def test_frozen_goal_uses_immutable_enrollment_condition_after_redirect(tmp_path: Path) -> None:
+    enrolled = _goal(tmp_path)
+    redirected = redirect_goal(
+        tmp_path,
+        enrolled.session_ref,
+        reason="operator proposed a smaller validation target",
+        done_when="The focused local validation passes with cited output.",
+    )
+
+    frozen = freeze_goal(redirected)
+
+    assert frozen.done_when == enrolled.done_when
+
+
 def test_initial_round_can_be_configured_to_one_reviewer(tmp_path: Path) -> None:
     goal = _goal(tmp_path)
     behavior = WatchedSessionBehavior.from_turn(goal.session_ref, "Done with cited completion evidence.")

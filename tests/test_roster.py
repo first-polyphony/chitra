@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Literal, cast
 
 import pytest
@@ -227,6 +228,21 @@ def test_box_lines_stay_width_aligned_in_a_narrow_terminal_with_emoji(monkeypatc
 
 def test_render_roster_empty_store_is_a_small_no_crash_line() -> None:
     assert render_roster([]) == "no lanes recorded"
+
+
+@pytest.mark.parametrize("fmt", ["cards", "box", "markdown"])
+def test_roster_surfaces_done_when_narrowing_as_delta(fmt: Literal["cards", "box", "markdown"]) -> None:
+    record = _record("host:folio:0.0", "working")
+    record = replace(
+        record,
+        done_when="The Folio import lane passes live validation",
+        enrolled_done_when="both the Folio import lane and the Folio export lane pass live validation",
+    )
+
+    rendered = render_roster([record], fmt=fmt)
+
+    assert "dropping:" in rendered
+    assert all(word in rendered for word in ("Folio", "export", "lane"))
 
 
 def test_roster_surfaces_every_open_ask_below_the_table_in_every_format() -> None:

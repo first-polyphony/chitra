@@ -8,6 +8,7 @@ from chitra.close_gate import (
     AGGREGATE_DONE_WHEN_TOKENS,
     BARE_DELIVERABLE_PLURALS,
     CloseGateError,
+    _recorded_descopes,
     delivered_items_from_evidence,
     evaluate_close_inventory,
     lint_done_when,
@@ -108,6 +109,30 @@ def test_f8_shape_close_passes_after_recorded_goal_revision_descopes_y() -> None
 
     assert verdict.verdict == "PASS"
     assert [item.text for item in verdict.recorded_descopes] == ["the Y client pass live validation"]
+
+
+def test_enrolled_scope_delta_is_visible_even_on_version_one_record() -> None:
+    descopes = _recorded_descopes(
+        F8_DONE_WHEN,
+        "The X client passes live validation",
+        goal_version=1,
+        goal_history=(),
+    )
+    verdict = evaluate_close_inventory(
+        F8_DONE_WHEN,
+        ["X client"],
+        current_done_when="The X client passes live validation",
+        goal_version=1,
+        goal_history=(),
+    )
+
+    assert verdict.verdict == "PASS"
+    assert [item.text for item in verdict.required_items] == [
+        "the X client",
+        "the Y client pass live validation",
+    ]
+    assert [item.text for item in descopes] == ["the Y client pass live validation"]
+    assert verdict.recorded_descopes == descopes
 
 
 def test_counted_requirement_needs_that_many_explicit_delivered_items() -> None:

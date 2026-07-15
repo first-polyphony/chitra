@@ -15,7 +15,7 @@ from typing import Any
 
 import structlog
 
-from .goals import LOAD_SHED_HOLD_REASON_PREFIX, GoalRecord, get_goal
+from .goals import LOAD_SHED_HOLD_REASON_PREFIX, GoalRecord, done_when_with_delta, get_goal
 from .rate_limit_state import Transaction
 from .state_paths import state_dir
 
@@ -123,7 +123,7 @@ def _write_recovery_records(root: Path | None, records: list[RecoveryRecord]) ->
 
 def _resume_note(goal: GoalRecord) -> str:
     current_work = goal.now.strip() or goal.intent.strip() or goal.goal.strip()
-    return f"Goal at pause: {goal.goal.strip()} Current work: {current_work} Done when: {goal.done_when.strip()}"
+    return f"Goal at pause: {goal.goal.strip()} Current work: {current_work} Done when: {done_when_with_delta(goal).strip()}"
 
 
 def record_pause_recovery(root: Path | None, txn: Transaction, *, paused_at: str) -> RecoveryRecord:
