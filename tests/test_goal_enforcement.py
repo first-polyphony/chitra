@@ -168,3 +168,8 @@ def test_claude_reviewer_uses_a_fresh_process_and_only_watched_behavior_context(
     assert commands[0] is not commands[1]
     assert all("watched_session_behavior" in command[2] for command in commands)
     assert all("Chitra draft response" in command[2] and "approved_text" not in command[2] for command in commands)
+    # The prompt must enumerate the exact FindingCode literals so the reviewer
+    # model does not invent an out-of-enum code (e.g. "COMPLETION_WITHOUT_PROOF")
+    # that fails ReviewerVerdict validation and forces a fail-closed verdict.
+    for code in ("goal_drift", "smuggled_redirect", "hedged_completion", "unsupported_completion", "other"):
+        assert all(code in command[2] for command in commands)
