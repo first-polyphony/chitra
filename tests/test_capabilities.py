@@ -23,10 +23,10 @@ from chitra.capabilities import (
 )
 
 
-def _default_off_board_manifest() -> CapabilityManifest:
+def _default_off_usage_manifest() -> CapabilityManifest:
     raw = load_manifest().model_dump(mode="json", by_alias=True)
-    board = next(capability for capability in raw["capabilities"] if capability["name"] == "board")
-    board["default_enabled"] = False
+    usage = next(capability for capability in raw["capabilities"] if capability["name"] == "usage")
+    usage["default_enabled"] = False
     return CapabilityManifest.model_validate(raw)
 
 
@@ -34,7 +34,7 @@ def test_packaged_manifest_loads_and_rejects_bad_authority(tmp_path: Path) -> No
     manifest = load_manifest()
 
     assert manifest.schema_version == "chitra.capabilities.v1"
-    assert {capability.name for capability in manifest.capabilities} >= {"board", "capability-management"}
+    assert {capability.name for capability in manifest.capabilities} >= {"usage", "capability-management"}
 
     malformed = manifest.model_dump(mode="json", by_alias=True)
     malformed["capabilities"][0]["authority"]["level"] = "unbounded"
@@ -46,42 +46,42 @@ def test_packaged_manifest_loads_and_rejects_bad_authority(tmp_path: Path) -> No
 
 
 def test_toggle_precedence_covers_absent_true_false_and_expired(tmp_path: Path) -> None:
-    manifest = _default_off_board_manifest()
+    manifest = _default_off_usage_manifest()
     now = datetime(2026, 7, 11, 16, tzinfo=UTC)
 
-    assert not is_enabled("board", tmp_path, manifest=manifest, now=now)
+    assert not is_enabled("usage", tmp_path, manifest=manifest, now=now)
 
-    enable_capability("board", reason="approved intervention", root=tmp_path, manifest=manifest, now=now)
-    assert is_enabled("board", tmp_path, manifest=manifest, now=now)
+    enable_capability("usage", reason="approved intervention", root=tmp_path, manifest=manifest, now=now)
+    assert is_enabled("usage", tmp_path, manifest=manifest, now=now)
 
-    disable_capability("board", reason="intervention complete", root=tmp_path, manifest=manifest, now=now)
-    assert not is_enabled("board", tmp_path, manifest=manifest, now=now)
+    disable_capability("usage", reason="intervention complete", root=tmp_path, manifest=manifest, now=now)
+    assert not is_enabled("usage", tmp_path, manifest=manifest, now=now)
 
     enable_capability(
-        "board",
+        "usage",
         reason="expired approval",
         until=(now - timedelta(seconds=1)).isoformat(),
         root=tmp_path,
         manifest=manifest,
         now=now,
     )
-    assert not is_enabled("board", tmp_path, manifest=manifest, now=now)
+    assert not is_enabled("usage", tmp_path, manifest=manifest, now=now)
 
     overlay = json.loads((tmp_path / "capabilities.json").read_text(encoding="utf-8"))
-    assert set(overlay["board"]) == {"enabled", "actor", "reason", "toggled_at", "expires_at"}
+    assert set(overlay["usage"]) == {"enabled", "actor", "reason", "toggled_at", "expires_at"}
     assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_daemons_cannot_be_toggled_and_require_enabled_is_a_real_gate(tmp_path: Path) -> None:
-    manifest = _default_off_board_manifest()
+    manifest = _default_off_usage_manifest()
 
     with pytest.raises(NotToggleableError, match="daemon"):
         enable_capability("dispatchd", reason="no", root=tmp_path, manifest=manifest)
-    with pytest.raises(CapabilityDisabledError, match="board"):
-        require_enabled("board", tmp_path, manifest=manifest)
+    with pytest.raises(CapabilityDisabledError, match="usage"):
+        require_enabled("usage", tmp_path, manifest=manifest)
 
-    enable_capability("board", reason="operator approval", root=tmp_path, manifest=manifest)
-    require_enabled("board", tmp_path, manifest=manifest)
+    enable_capability("usage", reason="operator approval", root=tmp_path, manifest=manifest)
+    require_enabled("usage", tmp_path, manifest=manifest)
 
 
 def test_manifest_commands_and_project_scripts_are_bidirectionally_in_sync() -> None:
