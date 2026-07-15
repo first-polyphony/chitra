@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field, TypeAdapter
 from .completion_gate import CompletionEvidence, TodoItem, evaluate_completion_claim
 from .dispatch import directive_voice_violation
 from .policy_config import PolicyConfig, load_policy_config
-from .taxonomy import load_taxonomy
 
 
 class CompletionFixtureCase(BaseModel):
@@ -57,7 +56,6 @@ def load_fixture_cases(fixtures_dir: Path) -> list[FixtureCase]:
 
 def evaluate_fixtures(cases: list[FixtureCase], policy: PolicyConfig) -> dict[str, float]:
     """Score fixtures under ``policy`` using only deterministic chitra checks."""
-    taxonomy = load_taxonomy(policy.completion_gate.taxonomy_path)
     voice_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in policy.dispatch.banned_attribution_patterns]
     correct = 0
     completion_total = completion_correct = 0
@@ -71,7 +69,6 @@ def evaluate_fixtures(cases: list[FixtureCase], policy: PolicyConfig) -> dict[st
                 case.todo_items,
                 case.transcript_text,
                 case.evidence,
-                taxonomy,
                 policy=policy.completion_gate,
                 open_asks=case.open_asks,
                 blockers=case.blockers,

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,7 +13,7 @@ import pytest
 
 import chitra.dispatchd as dispatchd_mod
 from chitra.account_registry import RegistryEntry, get_entry
-from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus, liveness_check
+from chitra.dispatch import DispatchOrder, DispatchResult, DispatchStatus
 from chitra.goals import LOAD_SHED_HOLD_REASON_PREFIX, RATE_LIMIT_HOLD_REASON_PREFIX, GoalRecord, get_goal, hold_goal, upsert_goal
 from chitra.lane_activity import LaneActivity, upsert_lane_activity
 from chitra.load_shed import PressureSample
@@ -127,14 +126,8 @@ def test_plan_pauses_skips_untracked_sessions_and_foreign_holds(tmp_path: Path) 
     assert any("untracked" in reason and "no chitra goal record" in reason for reason in skipped)
 
 
-def test_plan_pauses_selects_an_attached_non_chitra_session(tmp_path: Path) -> None:
-    def attached_runner(command: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-        assert command[:3] == ["tmux", "list-clients", "-t"]
-        assert timeout == 5
-        return subprocess.CompletedProcess(command, 0, stdout="operator-client\n", stderr="")
-
+def test_plan_pauses_selects_a_non_chitra_session(tmp_path: Path) -> None:
     session_ref = "trailhead:operator-work:0.0"
-    assert liveness_check(session_ref, runner=attached_runner, local_extra={"trailhead"}) is True
     upsert_goal(tmp_path, _goal(session_ref))
     verdict = AccountedVerdict(
         session_id="attached-operator-session",

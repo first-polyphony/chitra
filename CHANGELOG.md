@@ -4,6 +4,8 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.8.2.3] - 2026-07-15
+
 ### Added
 - A durable per-pause recovery ledger records the held session, reason,
   existing transcript pointer, goal-derived resume note, and reset time.
@@ -68,6 +70,18 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 - Generalized the existing checkpoint/stop/quiescence transaction boundary so
   load shedding reuses it. Claude lanes retain `/goal clear`; Codex lanes use a
   fixed checkpoint-and-stop order followed by pane-quiescence verification.
+- Consolidated filesystem and JSON persistence primitives, shared validation
+  lexicons, and dispatch/persisted contract models, and replaced fleet-specific
+  hostnames and paths in documentation with generic examples.
+
+### Removed
+- Removed the merge-queue engine, the `chitra-queue` entrypoint, and the
+  queue-management capability surface.
+- Removed unused routing provenance fields (`resolved_model`,
+  `resolved_harness`, and `routing_hint_source`).
+- Removed dead board-updater validators, MCP mapping code, and dispatch stubs.
+- Trimmed non-operationalized codes from the executable taxonomy while
+  retaining their design context in documentation.
 
 ## [0.8.1] - 2026-07-12
 

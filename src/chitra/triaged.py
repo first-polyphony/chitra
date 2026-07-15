@@ -29,13 +29,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
+
+from chitra._fsio import env_path, write_json_atomic
 
 logger = structlog.get_logger(__name__)
 
@@ -72,18 +73,14 @@ class ReceivingOutputs:
     alert_state_file: Path
 
 
-def _env_path(name: str, default: Path) -> Path:
-    return Path(os.environ.get(name, str(default))).expanduser()
-
-
 def default_receiving_outputs(state_file: Path) -> ReceivingOutputs:
     """Resolve output locations from the ``CHITRA_TRIAGE_*`` environment."""
     base = state_file.parent
     return ReceivingOutputs(
-        queue_file=_env_path("CHITRA_TRIAGE_QUEUE_FILE", base / "queue.tsv"),
-        flags_file=_env_path("CHITRA_TRIAGE_FLAGS_FILE", base / "flags.log"),
-        stats_file=_env_path("CHITRA_TRIAGE_STATS_FILE", base / "stats.json"),
-        alert_state_file=_env_path("CHITRA_TRIAGE_ALERT_STATE_FILE", base / "triaged-alert-state.json"),
+        queue_file=env_path("CHITRA_TRIAGE_QUEUE_FILE", base / "queue.tsv"),
+        flags_file=env_path("CHITRA_TRIAGE_FLAGS_FILE", base / "flags.log"),
+        stats_file=env_path("CHITRA_TRIAGE_STATS_FILE", base / "stats.json"),
+        alert_state_file=env_path("CHITRA_TRIAGE_ALERT_STATE_FILE", base / "triaged-alert-state.json"),
     )
 
 
@@ -123,10 +120,13 @@ def load_state(state_file: Path) -> dict[str, str]:
 
 def save_state(state_file: Path, state: dict[str, str]) -> None:
     """Save the state map atomically (write to temp, rename)."""
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_file.with_suffix(state_file.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(state_file)
+    write_json_atomic(
+        state_file,
+        state,
+        temporary_path=state_file.with_suffix(state_file.suffix + ".tmp"),
+        trailing_newline=False,
+        cleanup_on_error=False,
+    )
 
 
 def append_triage_event(triage_log: Path, lane_id: str, ts: str, text: str) -> None:
@@ -160,13 +160,6 @@ def _load_json_object(path: Path) -> dict[str, object]:
     except (FileNotFoundError, OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _save_json_atomic(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
 
 
 def _counter(value: object) -> int:
@@ -315,11 +308,26 @@ def run_once(
     if receiving_outputs is not None:
         stats["changes"] = _counter(stats["changes"]) + emitted
         stats["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        _save_json_atomic(receiving_outputs.stats_file, stats)
-        _save_json_atomic(receiving_outputs.alert_state_file, alert_state)
+        write_json_atomic(
+            receiving_outputs.stats_file,
+            stats,
+            temporary_path=receiving_outputs.stats_file.with_name(receiving_outputs.stats_file.name + ".tmp"),
+            cleanup_on_error=False,
+        )
+        write_json_atomic(
+            receiving_outputs.alert_state_file,
+            alert_state,
+            temporary_path=receiving_outputs.alert_state_file.with_name(receiving_outputs.alert_state_file.name + ".tmp"),
+            cleanup_on_error=False,
+        )
     save_state(state_file, state)
     offset_path.parent.mkdir(parents=True, exist_ok=True)
-    _save_json_atomic(offset_path, {"offset": new_offset, "inode": event_stat.st_ino})
+    write_json_atomic(
+        offset_path,
+        {"offset": new_offset, "inode": event_stat.st_ino},
+        temporary_path=offset_path.with_name(offset_path.name + ".tmp"),
+        cleanup_on_error=False,
+    )
     return emitted
 
 
@@ -339,9 +347,9 @@ def run_forever(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="triaged", description="State-transition dedup daemon (chitra phase 0).")
-    parser.add_argument("--events-log", type=Path, default=_env_path("CHITRA_TRIAGE_EVENTS_LOG", DEFAULT_EVENTS_LOG))
-    parser.add_argument("--state-file", type=Path, default=_env_path("CHITRA_TRIAGE_STATE_FILE", DEFAULT_STATE_FILE))
-    parser.add_argument("--triage-log", type=Path, default=_env_path("CHITRA_TRIAGE_LOG", DEFAULT_TRIAGE_LOG))
+    parser.add_argument("--events-log", type=Path, default=env_path("CHITRA_TRIAGE_EVENTS_LOG", DEFAULT_EVENTS_LOG))
+    parser.add_argument("--state-file", type=Path, default=env_path("CHITRA_TRIAGE_STATE_FILE", DEFAULT_STATE_FILE))
+    parser.add_argument("--triage-log", type=Path, default=env_path("CHITRA_TRIAGE_LOG", DEFAULT_TRIAGE_LOG))
     parser.add_argument("--queue-file", type=Path, default=None)
     parser.add_argument("--flags-file", type=Path, default=None)
     parser.add_argument("--stats-file", type=Path, default=None)

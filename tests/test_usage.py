@@ -309,7 +309,7 @@ def test_evaluate_grouped_propagates_approaching_verdict() -> None:
     assert [(item.level, item.account_attributed) for item in grouped] == [("approaching", False), ("approaching", True)]
 
 
-def test_usage_cli_evaluate_policy_and_flag_precedence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_usage_cli_evaluate_policy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     current = datetime.now(UTC)
     fresh = _snapshot(five_hour=UsageWindow(75, 1_700_000_100), ts=current.isoformat(), session_id="fresh", account="shared@example.com")
     stale = _snapshot(
@@ -339,7 +339,5 @@ def test_usage_cli_evaluate_policy_and_flag_precedence(tmp_path: Path, capsys: p
         "account_attributed": True,
     }
 
-    assert main(["evaluate", "--dir", str(tmp_path), "--policy-config", str(policy), "--pause-5h", "70"]) == 0
-    assert json.loads(capsys.readouterr().out.splitlines()[0])["level"] == "pause"
     assert main(["policy", "--policy-config", str(policy)]) == 0
     assert json.loads(capsys.readouterr().out)["max_running"] is None

@@ -30,9 +30,6 @@ completion_gate:
   complete_todo_statuses: [done]
   # Allowed values are deploy and live_verify. An empty list disables this check.
   required_evidence: [deploy, live_verify]
-  # Optional path to a replacement taxonomy.json; null uses chitra's packaged taxonomy.
-  taxonomy_path: null
-
 dispatch:
   # Case-insensitive regexes blocked before a nudge is pasted.
   banned_attribution_patterns:
@@ -46,8 +43,8 @@ dispatch:
 # matching prefix wins; default is used when no configured prefix matches.
 # guidance:
 #   canonical_decisions:
-#     /opt/polyphony/repo: /srv/onedrive-share/DocsHome/Projects_Dev/decisions.md
-#     default: /srv/onedrive-share/DocsHome/decisions.md
+#     /opt/example-repo: /srv/shared-docs/project-decisions.md
+#     default: /srv/shared-docs/decisions.md
 
 # Usage snapshots are read by chitra-usage and acted on transactionally by
 # chitra-rate-limit-guard. Uncomment this template to override shipped defaults.

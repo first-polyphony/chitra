@@ -1229,17 +1229,12 @@ def test_routing_provenance_is_stamped_on_result_and_signed_ledger(tmp_path: Pat
     )[0]
 
     assert result.task_type == "code-review"
-    assert result.routing_hint_source == "config"
     entry = ledger_mod.LedgerEntry.model_validate_json(ledger_path.read_text(encoding="utf-8"))
     assert entry.task_type == "code-review"
-    assert entry.routing_hint_source == "config"
-    assert entry.sig_v == 3
+    assert entry.sig_v == 4
 
 
-def test_routes_entry_resolves_model_and_harness_into_result_and_signed_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A structured ``routes`` entry is actively RESOLVED at dispatch: the
-    concrete model+harness (+zdr) and ``"route"`` provenance land on the
-    result and in the HMAC-signed ledger entry (closes ROADMAP line 97)."""
+def test_routes_entry_resolves_hint_and_zdr_into_result_and_signed_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
     config_path = tmp_path / "routing.yaml"
     config_path.write_text(
@@ -1262,14 +1257,12 @@ def test_routes_entry_resolves_model_and_harness_into_result_and_signed_ledger(t
     )[0]
 
     assert result.routing_hint == "opus-4.8@claude-code+zdr"
-    assert result.routing_hint_source == "route"
-    assert (result.resolved_model, result.resolved_harness, result.resolved_zdr) == ("opus-4.8", "claude-code", True)
+    assert result.resolved_zdr is True
 
     key = ledger_mod.load_or_create_signing_key(tmp_path / "ledger.key")
     entry = ledger_mod.LedgerEntry.model_validate_json(ledger_path.read_text(encoding="utf-8"))
-    assert (entry.resolved_model, entry.resolved_harness, entry.resolved_zdr) == ("opus-4.8", "claude-code", True)
-    assert entry.routing_hint_source == "route"
-    assert entry.sig_v == 3
+    assert entry.resolved_zdr is True
+    assert entry.sig_v == 4
     assert ledger_mod.verify_entry(entry, key=key) is True
 
 
@@ -1302,14 +1295,10 @@ def test_routes_entry_wins_over_a_defaults_entry_for_same_task_type(tmp_path: Pa
     )[0]
 
     assert result.routing_hint == "gpt-5.6-sol@codex-cli"
-    assert result.routing_hint_source == "route"
-    assert result.resolved_model == "gpt-5.6-sol"
+    assert result.resolved_zdr is False
 
 
-def test_defaults_only_config_leaves_resolved_fields_empty_backcompat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Back-compat: a defaults-only config behaves exactly as before — the
-    opaque routing_hint is filled with ``"config"`` provenance and no
-    resolved model/harness selection is recorded."""
+def test_defaults_only_config_leaves_resolved_zdr_false_backcompat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", _fake_dispatch_passthrough)
     config_path = tmp_path / "routing.yaml"
     config_path.write_text(yaml.safe_dump({"defaults": {"code-review": "sonnet"}}), encoding="utf-8")
@@ -1328,8 +1317,7 @@ def test_defaults_only_config_leaves_resolved_fields_empty_backcompat(tmp_path: 
     )[0]
 
     assert result.routing_hint == "sonnet"
-    assert result.routing_hint_source == "config"
-    assert (result.resolved_model, result.resolved_harness, result.resolved_zdr) == (None, None, False)
+    assert result.resolved_zdr is False
 
 
 def test_policy_file_is_wired_to_completion_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

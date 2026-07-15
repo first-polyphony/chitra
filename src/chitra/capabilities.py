@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
-import tempfile
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
@@ -23,6 +21,7 @@ import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, ValidationError, field_validator, model_validator
 
+from chitra._fsio import parse_iso8601, write_json_atomic
 from chitra.state_paths import state_dir
 
 logger = structlog.get_logger(__name__)
@@ -201,7 +200,12 @@ class ToggleRecord(_StrictModel):
     @classmethod
     def validate_toggled_at(cls, value: str) -> str:
         """Require an aware timestamp for auditability."""
-        _parse_iso8601(value, field="toggled_at")
+        parse_iso8601(
+            value,
+            invalid_message="toggled_at must be an ISO8601 datetime",
+            timezone_message="toggled_at must be an ISO8601 datetime with timezone",
+            require_timezone=True,
+        )
         return value
 
     @field_validator("expires_at")
@@ -209,19 +213,13 @@ class ToggleRecord(_StrictModel):
     def validate_expires_at(cls, value: str) -> str:
         """Allow an empty expiry or require an aware ISO8601 deadline."""
         if value:
-            _parse_iso8601(value, field="expires_at")
+            parse_iso8601(
+                value,
+                invalid_message="expires_at must be an ISO8601 datetime",
+                timezone_message="expires_at must be an ISO8601 datetime with timezone",
+                require_timezone=True,
+            )
         return value
-
-
-def _parse_iso8601(value: str, *, field: str) -> datetime:
-    """Parse an ISO8601 timestamp and require an explicit timezone."""
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"{field} must be an ISO8601 datetime") from exc
-    if parsed.tzinfo is None:
-        raise ValueError(f"{field} must be an ISO8601 datetime with timezone")
-    return parsed
 
 
 def _utc_now() -> str:
@@ -318,20 +316,8 @@ def load_toggles(
 def _write_toggles(root: Path | None, toggles: dict[str, ToggleRecord]) -> None:
     """Atomically replace the overlay, following the goals-store write pattern."""
     path = capabilities_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {name: toggles[name].model_dump(mode="json") for name in sorted(toggles)}
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as tmp:
-            tmp_name = tmp.name
-            json.dump(payload, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-        os.replace(tmp_name, path)
-    finally:
-        if tmp_name is not None and os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    write_json_atomic(path, payload)
 
 
 def _now(now: datetime | None) -> datetime:
@@ -344,7 +330,12 @@ def _now(now: datetime | None) -> datetime:
 
 def _is_active(record: ToggleRecord, *, now: datetime) -> bool:
     """Return whether a record has not reached its optional expiry deadline."""
-    return not record.expires_at or _parse_iso8601(record.expires_at, field="expires_at") > now
+    return not record.expires_at or parse_iso8601(
+        record.expires_at,
+        invalid_message="expires_at must be an ISO8601 datetime",
+        timezone_message="expires_at must be an ISO8601 datetime with timezone",
+        require_timezone=True,
+    ) > now
 
 
 def is_enabled(
@@ -400,7 +391,12 @@ def _toggle(
     if not reason.strip():
         raise CapabilityOverlayError("toggle reason must be non-empty")
     if expires_at:
-        _parse_iso8601(expires_at, field="expires_at")
+        parse_iso8601(
+            expires_at,
+            invalid_message="expires_at must be an ISO8601 datetime",
+            timezone_message="expires_at must be an ISO8601 datetime with timezone",
+            require_timezone=True,
+        )
     resolved_manifest = _manifest_for(manifest=manifest, manifest_path=manifest_path)
     capability = get_capability(name, manifest=resolved_manifest)
     _require_toggleable(capability)
@@ -485,48 +481,6 @@ def reset_capability(
     del toggles[name]
     _write_toggles(root, toggles)
     logger.info("capability_reset", capability=name)
-
-
-def _input_schema(command: CapabilityCommand) -> dict[str, object]:
-    """Render a command's parameter list as a small JSON Schema object."""
-    properties: dict[str, object] = {
-        param.name: {"type": param.type, "description": param.description} for param in command.params
-    }
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": [param.name for param in command.params if param.required],
-        "additionalProperties": False,
-    }
-
-
-def to_mcp_tools(
-    root: Path | None = None,
-    *,
-    manifest: CapabilityManifest | None = None,
-    manifest_path: Path | str | None = None,
-    now: datetime | None = None,
-) -> list[dict[str, object]]:
-    """Map enabled tool commands to MCP-shaped tool definitions.
-
-    This is intentionally only a data mapping.  A future MCP server can use
-    it without making the current manifest loader an executor.
-    """
-    resolved_manifest = _manifest_for(manifest=manifest, manifest_path=manifest_path)
-    tools: list[dict[str, object]] = []
-    for capability in resolved_manifest.capabilities:
-        if capability.kind == "daemon" or not is_enabled(capability.name, root, manifest=resolved_manifest, now=now):
-            continue
-        for command in capability.commands:
-            tools.append(
-                {
-                    "name": command.name,
-                    "description": f"{capability.purpose}\n\nWhen to use: {capability.when_to_use}\n\n{command.description}",
-                    "inputSchema": _input_schema(command),
-                    "annotations": {"readOnlyHint": not command.mutates},
-                }
-            )
-    return tools
 
 
 def _capability_output(

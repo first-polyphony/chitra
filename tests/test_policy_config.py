@@ -174,19 +174,19 @@ def test_resolve_guidance_uses_longest_component_boundary_prefix_and_default(tmp
         guidance=GuidancePolicy(
             canonical_decisions={
                 "/opt": "/docs/opt.md",
-                "/opt/polyphony": "/docs/polyphony.md",
+                "/opt/acme": "/docs/acme.md",
                 "default": "/docs/default.md",
             }
         )
     )
 
-    assert resolve_guidance(config, Path("/opt/polyphony/chitra")) == Path("/docs/polyphony.md")
+    assert resolve_guidance(config, Path("/opt/acme/chitra")) == Path("/docs/acme.md")
     assert resolve_guidance(config, Path("/opt/other")) == Path("/docs/opt.md")
-    assert resolve_guidance(config, Path("/opt/polyphony-other/work")) == Path("/docs/opt.md")
+    assert resolve_guidance(config, Path("/opt/acme-other/work")) == Path("/docs/opt.md")
     boundary_config = PolicyConfig(
-        guidance=GuidancePolicy(canonical_decisions={"/opt/poly": "/docs/poly.md", "default": "/docs/default.md"})
+        guidance=GuidancePolicy(canonical_decisions={"/opt/ac": "/docs/ac.md", "default": "/docs/default.md"})
     )
-    assert resolve_guidance(boundary_config, Path("/opt/polyphony/x")) == Path("/docs/default.md")
+    assert resolve_guidance(boundary_config, Path("/opt/acme/x")) == Path("/docs/default.md")
     assert resolve_guidance(PolicyConfig(guidance=GuidancePolicy(canonical_decisions={"default": "/docs/default.md"})), tmp_path) == Path(
         "/docs/default.md"
     )

@@ -11,12 +11,12 @@ import contextlib
 import fcntl
 import json
 import os
-import tempfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from chitra._fsio import write_json_atomic
 from chitra.state_paths import state_dir
 
 SCHEMA = "chitra.lane-activity.v1"
@@ -100,20 +100,8 @@ def load_lane_activity(root: Path | None = None) -> list[LaneActivity]:
 
 def _write_activity(root: Path | None, records: list[LaneActivity]) -> None:
     path = activity_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema": SCHEMA, "lanes": [record.to_dict() for record in records]}
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp") as tmp:
-            tmp_name = tmp.name
-            json.dump(payload, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-            tmp.flush()
-            os.replace(tmp.name, path)
-            tmp_name = None
-    finally:
-        if tmp_name is not None and os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    write_json_atomic(path, payload)
 
 
 def upsert_lane_activity(root: Path | None, records: Iterable[LaneActivity]) -> None:

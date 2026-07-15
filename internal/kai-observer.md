@@ -12,6 +12,6 @@ Kai watches three chitra outputs on a read-only basis:
 
 It mines these for engineering-decision and validation-lesson signal, which feeds Kai's own reflect and wiki-sync timers.
 
-Confirmed live as of 2026-07-09 via the Crossroads wiki page `projects/software/agents/crossroads/monitor-program/memory.md`, which states: "Kai observer LIVE (feed /kai-feed/ on tophand Caddy; Kai-side reflect+wiki timers on trailhead)."
+Confirmed live as of 2026-07-09 via the Crossroads wiki page `projects/software/agents/crossroads/monitor-program/memory.md`, which records the Kai observer feed on worker-host Caddy and the Kai-side reflect/wiki timers on hub-host.
 
 **Do not use this to inform public docs.** README.md, docs/DESIGN.md, and docs/ROADMAP.md should keep describing this pattern generically and should not be edited to name Kai. Kai is internal fleet infrastructure, not something external chitra users need or should know about.

@@ -27,8 +27,6 @@ from chitra.dispatch import (
     ensure_pane_not_in_mode,
     find_recent_transcript,
     find_recent_transcript_remote,
-    is_chitra_dispatched_task,
-    liveness_check,
     pane_capture_confirms_nudge,
     pane_in_mode,
     pane_input_check,
@@ -39,7 +37,6 @@ from chitra.dispatch import (
     transcript_confirms_nudge,
     transcript_glob,
 )
-from chitra.ledger import append_entry, load_or_create_signing_key
 from chitra.policy_config import DispatchPolicy, PolicyConfig
 
 HAS_TMUX = shutil.which("tmux") is not None
@@ -386,58 +383,6 @@ def test_lane_lock_context_manager_releases_on_exit(tmp_path: Path) -> None:
     other2 = LaneLock(session_ref, lock_dir=lock_dir)
     assert other2.acquire(blocking=False) is True
     other2.release()
-
-
-# --- liveness_check: single-writer-rule guard -----------------------------
-
-
-def test_liveness_check_returns_false_for_malformed_session_ref() -> None:
-    runner = FakeRunner()
-    assert liveness_check("not-a-valid-ref", runner=runner) is False
-    assert runner.calls == []
-
-
-def test_liveness_check_true_when_remote_session_has_attached_client() -> None:
-    runner = FakeRunner(default=fake_completed(0, "sess\n", ""))
-    result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
-    assert result is True
-    # Real ssh-wrapped check, not the old "assume remote is live" stub.
-    assert len(runner.calls) == 1
-    cmd = runner.calls[0]
-    assert cmd[0] == "ssh"
-    assert cmd[-2] == "otherhost"
-    assert "tmux list-clients -t sess" in cmd[-1]
-
-
-def test_liveness_check_false_when_remote_session_has_no_attached_client() -> None:
-    runner = FakeRunner(default=fake_completed(0, "", ""))
-    result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
-    assert result is False
-
-
-def test_liveness_check_false_when_remote_ssh_call_fails() -> None:
-    runner = FakeRunner(default=fake_completed(255, "", "ssh: connect to host otherhost port 22: Connection refused"))
-    result = liveness_check("otherhost:sess:0.0", runner=runner, local_extra={"localhost"})
-    assert result is False
-
-
-def test_liveness_check_true_when_local_session_has_attached_client() -> None:
-    runner = FakeRunner(default=fake_completed(0, "sess\n", ""))
-    result = liveness_check("localhost:sess:0.0", runner=runner, local_extra={"localhost"})
-    assert result is True
-    assert runner.calls == [["tmux", "list-clients", "-t", "sess", "-F", "#{session_name}"]]
-
-
-def test_liveness_check_false_when_local_session_has_no_attached_client() -> None:
-    runner = FakeRunner(default=fake_completed(0, "", ""))
-    result = liveness_check("localhost:sess:0.0", runner=runner, local_extra={"localhost"})
-    assert result is False
-
-
-def test_liveness_check_false_when_tmux_list_clients_fails() -> None:
-    runner = FakeRunner(default=fake_completed(1, "", "no such session"))
-    result = liveness_check("localhost:sess:0.0", runner=runner, local_extra={"localhost"})
-    assert result is False
 
 
 # --- tmux_pane_target ------------------------------------------------------
@@ -931,41 +876,6 @@ def test_dispatch_to_tmux_blocks_directive_voice_violations(nudge: str) -> None:
     # Nothing pasted: no tmux/paste/capture commands issued at all, and no
     # command was ever routed through the stdin-payload (load-buffer) runner.
     assert calls == []
-
-
-# --- origin / never-cancel guard --------------------------------------------
-
-
-def test_is_chitra_dispatched_task_false_for_task_absent_from_ledger(tmp_path: Path) -> None:
-    key = load_or_create_signing_key(tmp_path / "ledger.key")
-    ledger_path = tmp_path / "ledger.jsonl"
-    append_entry(ledger_path, order_id="o1", session_ref="localhost:s:0.0", tag="[C]", nudge="a chitra-dispatched task", key=key)
-
-    assert (
-        is_chitra_dispatched_task(
-            "an operator-typed task chitra never sent",
-            session_ref="localhost:s:0.0",
-            ledger_path=ledger_path,
-            key=key,
-        )
-        is False
-    )
-
-
-def test_is_chitra_dispatched_task_true_for_task_present_in_ledger(tmp_path: Path) -> None:
-    key = load_or_create_signing_key(tmp_path / "ledger.key")
-    ledger_path = tmp_path / "ledger.jsonl"
-    append_entry(ledger_path, order_id="o1", session_ref="localhost:s:0.0", tag="[C]", nudge="a chitra-dispatched task", key=key)
-
-    assert (
-        is_chitra_dispatched_task(
-            "a chitra-dispatched task",
-            session_ref="localhost:s:0.0",
-            ledger_path=ledger_path,
-            key=key,
-        )
-        is True
-    )
 
 
 # --- optional real-tmux integration test (skipped if tmux is unavailable) -

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from chitra._fsio import parse_iso8601
 from chitra.account_registry import RegistryEntry
 from chitra.goals import LOAD_SHED_HOLD_REASON_PREFIX, GoalRecord, GoalStatus, session_host, session_name
 from chitra.lane_activity import LaneActivity
@@ -175,7 +176,7 @@ def _timestamp_rank(value: str) -> float:
     if not value:
         return 0.0
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return parse_iso8601(value).timestamp()
     except ValueError:
         return 0.0
 

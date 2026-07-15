@@ -193,27 +193,6 @@ capabilities:
         params: []
         mutates: true
 
-  - name: queue-management
-    kind: tool
-    purpose: Apply deterministic hygiene decisions to a caller-supplied merge-queue head snapshot.
-    when_to_use: Use only for a queued pull request after the monitor has collected a complete snapshot and an operator has enabled this capability.
-    authority:
-      level: act
-      grants:
-        - Record or clear a chitra-owned queue hold and its local hygiene audit event.
-        - Reassert one chitra-owned hold after a ready label is improperly restored.
-      excludes:
-        - Merge, approve, rebase, or create a branch.
-        - Invoke gh, a subprocess, or network I/O.
-        - Add queue:ready to a non-green head.
-    default_enabled: false
-    commands:
-      - name: chitra-queue
-        description: Evaluate queue hygiene or perform an explicitly enabled local hold bookkeeping action.
-        argv: [chitra-queue]
-        params: []
-        mutates: true
-
   - name: rate-limit-guard
     kind: tool
     purpose: >-

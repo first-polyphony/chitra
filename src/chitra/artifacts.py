@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
-import tempfile
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 
 import structlog
+from pydantic import ConfigDict, TypeAdapter, ValidationInfo, model_validator
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
+from chitra._fsio import parse_iso8601, write_json_atomic
+from chitra.lexicon import ARTIFACT_PROCESS_ONLY_RE, ARTIFACT_WORK_EVIDENCE_RE
 from chitra.state_paths import state_dir
 
 logger = structlog.get_logger(__name__)
@@ -33,14 +35,6 @@ SCHEMA = "chitra.artifacts.v1"
 _BRIEF_LABEL_RE = re.compile(
     r"(?im)^\s*(what was built|what it does|does it actually work)\s*:\s*",
 )
-_PROCESS_ONLY_RE = re.compile(r"\b(i (?:reviewed|worked|investigated|started|followed)|steps? (?:taken|performed))\b", re.I)
-_WORK_EVIDENCE_RE = re.compile(
-    r"(?:\b[0-9a-f]{7,40}\b|(?:^|\s)(?:/|\./)[^\s]+|\b\d+\s+(?:passed|requests?|checks?)\b|"
-    r"\b(?:status|http|probe|exit)\s*[=: ]\s*\d+\b)",
-    re.I,
-)
-
-
 class ArtifactValidationError(ValueError):
     """Raised when an artifact record is not valid monitor doctrine."""
 
@@ -76,9 +70,9 @@ def validate_delivery_brief(brief: str) -> DeliveryBrief:
         raise ArtifactValidationError("brief must answer what was built, what it does, and does it actually work")
     if any(len(value.split()) < 3 for value in sections.values()):
         raise ArtifactValidationError("brief answers must contain concrete outcome detail")
-    if all(_PROCESS_ONLY_RE.search(value) for value in sections.values()):
+    if all(ARTIFACT_PROCESS_ONLY_RE.search(value) for value in sections.values()):
         raise ArtifactValidationError("brief is process narration rather than a delivery result")
-    if not _WORK_EVIDENCE_RE.search(sections["does_it_actually_work"]):
+    if not ARTIFACT_WORK_EVIDENCE_RE.search(sections["does_it_actually_work"]):
         raise ArtifactValidationError("does-it-actually-work must cite a SHA, path, probe result, or numbered check output")
     return DeliveryBrief(**sections)
 
@@ -98,7 +92,7 @@ def brief_is_conforming(brief: str) -> bool:
     return True
 
 
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=ConfigDict(strict=True))
 class ArtifactRecord:
     """The canonical persisted artifact metadata and explicit review state."""
 
@@ -117,18 +111,68 @@ class ArtifactRecord:
     guarded CLI with a non-conforming brief (the F8 direct-JSON-write bypass)."""
 
     def to_dict(self) -> dict[str, str]:
-        return {
-            "url": self.url,
-            "title": self.title,
-            "kind": self.kind,
-            "source": self.source,
-            "brief": self.brief,
-            "published_at": self.published_at,
-            "updated_at": self.updated_at,
-            "review_status": self.review_status,
-            "reviewed_at": self.reviewed_at,
-            "response": self.response,
-        }
+        return cast(
+            dict[str, str],
+            _ARTIFACT_RECORD_ADAPTER.dump_python(self, mode="json", exclude={"brief_conforming"}),
+        )
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ArtifactRecord:
+        return _ARTIFACT_RECORD_ADAPTER.validate_python(payload, strict=False, context={"persisted": True})
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_persisted(cls, payload: object, info: ValidationInfo) -> object:
+        """Validate required v1 strings and derive the non-persisted brief flag."""
+        if not info.context or not info.context.get("persisted"):
+            return payload
+        if not isinstance(payload, dict):
+            raise ValueError("artifact record must be an object")
+        normalized = dict(payload)
+        for field in ("url", "title", "kind", "source", "published_at", "updated_at", "review_status", "reviewed_at", "response"):
+            value = payload.get(field)
+            if not isinstance(value, str):
+                raise ValueError(f"artifact record {field} must be a string")
+            normalized[field] = value
+        raw_brief = payload.get("brief", "")
+        brief = raw_brief if isinstance(raw_brief, str) else ""
+        normalized["brief"] = brief
+        normalized["brief_conforming"] = brief_is_conforming(brief)
+        if not normalized["brief_conforming"]:
+            logger.warning(
+                "artifact_brief_nonconforming",
+                url=normalized["url"],
+                reason="brief bypassed the guarded record CLI (F8 direct-write) or fails the delivery-brief gate",
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_persisted_record(self, info: ValidationInfo) -> Self:
+        if not info.context or not info.context.get("persisted"):
+            return self
+        issues = validate_artifact(self)
+        if issues:
+            raise ValueError("; ".join(issues))
+        parse_iso8601(
+            self.published_at,
+            invalid_message="artifact record published_at must be an ISO8601 UTC datetime",
+            require_utc=True,
+        )
+        parse_iso8601(
+            self.updated_at,
+            invalid_message="artifact record updated_at must be an ISO8601 UTC datetime",
+            require_utc=True,
+        )
+        if self.reviewed_at:
+            parse_iso8601(
+                self.reviewed_at,
+                invalid_message="artifact record reviewed_at must be an ISO8601 UTC datetime",
+                require_utc=True,
+            )
+        return self
+
+
+_ARTIFACT_RECORD_ADAPTER = TypeAdapter(ArtifactRecord)
 
 
 def artifacts_path(root: Path | None = None) -> Path:
@@ -138,17 +182,6 @@ def artifacts_path(root: Path | None = None) -> Path:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _parse_iso8601_utc(value: str, field: str) -> datetime:
-    """Parse one UTC ISO8601 timestamp from persisted artifact state."""
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"artifact record {field} must be an ISO8601 UTC datetime") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise ValueError(f"artifact record {field} must be an ISO8601 UTC datetime")
-    return parsed
 
 
 def _validate_response(response: str) -> None:
@@ -185,47 +218,6 @@ def validate_artifact(rec: ArtifactRecord) -> list[str]:
     return issues
 
 
-def _record_from_dict(payload: object) -> ArtifactRecord:
-    if not isinstance(payload, dict):
-        raise ValueError("artifact record must be an object")
-    fields = ("url", "title", "kind", "source", "published_at", "updated_at", "review_status", "reviewed_at", "response")
-    values: dict[str, str] = {}
-    for field in fields:
-        value = payload.get(field)
-        if not isinstance(value, str):
-            raise ValueError(f"artifact record {field} must be a string")
-        values[field] = value
-    brief = payload.get("brief", "") if isinstance(payload.get("brief", ""), str) else ""
-    conforming = brief_is_conforming(brief)
-    if not conforming:
-        logger.warning(
-            "artifact_brief_nonconforming",
-            url=values["url"],
-            reason="brief bypassed the guarded record CLI (F8 direct-write) or fails the delivery-brief gate",
-        )
-    record = ArtifactRecord(
-        url=values["url"],
-        title=values["title"],
-        kind=cast(ArtifactKind, values["kind"]),
-        source=values["source"],
-        brief=brief,
-        published_at=values["published_at"],
-        updated_at=values["updated_at"],
-        review_status=cast(ReviewStatus, values["review_status"]),
-        reviewed_at=values["reviewed_at"],
-        response=values["response"],
-        brief_conforming=conforming,
-    )
-    issues = validate_artifact(record)
-    if issues:
-        raise ValueError("; ".join(issues))
-    _parse_iso8601_utc(record.published_at, "published_at")
-    _parse_iso8601_utc(record.updated_at, "updated_at")
-    if record.reviewed_at:
-        _parse_iso8601_utc(record.reviewed_at, "reviewed_at")
-    return record
-
-
 def load_artifacts(root: Path | None = None) -> list[ArtifactRecord]:
     """Load stored records; a missing store has no recorded artifacts."""
     path = artifacts_path(root)
@@ -238,25 +230,13 @@ def load_artifacts(root: Path | None = None) -> list[ArtifactRecord]:
     raw_artifacts = payload.get("artifacts")
     if not isinstance(raw_artifacts, list):
         raise ValueError("artifacts.json artifacts must be a list")
-    return [_record_from_dict(item) for item in raw_artifacts]
+    return [ArtifactRecord.from_dict(item) for item in raw_artifacts]
 
 
 def _write_artifacts(root: Path | None, records: list[ArtifactRecord]) -> None:
     path = artifacts_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema": SCHEMA, "updated_at": _utc_now(), "artifacts": [record.to_dict() for record in records]}
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as tmp:
-            tmp_name = tmp.name
-            json.dump(payload, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-        os.replace(tmp_name, path)
-    finally:
-        if tmp_name is not None and os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    write_json_atomic(path, payload)
 
 
 def get_artifact(root: Path | None, url: str) -> ArtifactRecord | None:

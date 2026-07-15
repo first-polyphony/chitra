@@ -34,11 +34,7 @@ Single-writer rule
 ``LaneLock`` enforces one writer per session id. ``dispatchd`` acquires a
 lock for the order's session id before any delivery attempt and releases it
 after. Acquiring a lock for an already-locked session id fails rather than
-silently proceeding. ``claude -p --resume`` is permitted ONLY as a fallback
-for sessions confirmed DETACHED/STOPPED after an explicit liveness check —
-never for a live lane. The ``-p --resume`` fallback path itself is out of
-scope for this build; only the ``LaneLock`` enforcement and a
-``liveness_check`` helper stub are provided here.
+silently proceeding.
 
 Directive-voice guard
 ----------------------
@@ -53,22 +49,6 @@ returns ``DispatchResult(status=BLOCKED, reason="directive-voice: ...")``
 with nothing pasted and no delivery-ledger entry (``dispatchd`` only signs
 the ledger on ``SENT`` — see ``dispatchd.process_one_order``).
 
-Origin / never-cancel guard (MANDATORY CONTRACT for any future reconciler)
-----------------------------------------------------------------------------
-
-No reconciliation/drift-detection code path exists in this codebase yet
-(``dispatchd`` only delivers; nothing currently holds, cancels, or reorders
-a target session's task list). This module nonetheless fixes the contract
-any future reconciler MUST follow, and provides the predicate + ledger
-lookup it must use: ``is_chitra_dispatched_task`` cross-references the
-delivery ledger (``chitra.ledger.verify_delivery``) for a given
-``session_ref`` + task text. A task with **no** matching ledger entry is
-presumed operator-authored and is **immutable to chitra** — a future
-reconciler may only ADD tasks or REORDER tasks for which this predicate
-returns ``True`` (chitra-dispatched ones). It must never remove, hold, or
-"correct away" a task for which this predicate returns ``False``. A
-growing task list is not drift.
-
 Completion-claim auditing
 --------------------------
 
@@ -80,7 +60,6 @@ part of the order contract.
 from __future__ import annotations
 
 import contextlib
-import enum
 import hashlib
 import json
 import os
@@ -94,16 +73,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 import structlog
-from pydantic import BaseModel, Field, model_validator
 
-from chitra.completion_gate import CompletionEvidence, TodoItem
+from chitra._fsio import write_json_atomic
+from chitra.orders import DispatchOrder, DispatchResult, DispatchStatus
 from chitra.policy_config import PolicyConfig
-from chitra.reasoning import DecisionAttestation
-
-from . import ledger as ledger_mod
 
 logger = structlog.get_logger(__name__)
 
@@ -143,158 +119,20 @@ _BANNED = re.compile(r"\boperator\b|\bthe monitor\b|\bchitra (wants|says|needs|r
 _TRANSCRIPT_GLOB_DEFAULT = "*/*.jsonl"
 
 
-# ---------------------------------------------------------------------------
-# Pydantic boundary models
-# ---------------------------------------------------------------------------
-
-
-class DispatchStatus(enum.StrEnum):
-    """Outcome of a dispatch attempt."""
-
-    SENT = "sent"
-    BLOCKED = "blocked"
-    FAILED = "failed"
-    # A completion-claim audit (chitra.completion_gate.evaluate_completion_claim)
-    # found a gap (todo residue, deferral language, or missing evidence). The
-    # order was never delivered -- a disputed completion claim must never
-    # silently pass through as "sent". See dispatchd.process_one_order.
-    COMPLETION_DISPUTE = "completion_dispute"
-    # The order's session is rate-limit- or load-shed-held: parked in the durable
-    # deferred/ subqueue (no pane I/O, no result file persisted) rather than
-    # discarded. dispatchd.run_once/requeue_deferred_for_session return it
-    # to orders/ FIFO once the hold clears, so it is delivered exactly once,
-    # never silently dropped. This status is for in-process visibility only
-    # (a caller inspecting run_once's return value) -- it is never written
-    # to results/, since a persisted terminal result would block the later
-    # real delivery's own idempotency check. See
-    # docs/SOL-ADVERSARIAL-REVIEW finding #1.
-    DEFERRED = "deferred"
-
-
-class DispatchOrder(BaseModel):
-    """A dispatch order consumed by ``dispatchd``.
-
-    ``session_ref`` uses the ``host:session:pane`` convention from the
-    source. ``nudge`` is the verbatim text to inject. ``order_id`` is the
-    caller-supplied unique id used for result-file naming. ``tag`` marks the
-    message's authenticity class in the delivery ledger — ``"[C]"`` (chitra
-    relay) is the default; a caller relaying verbatim operator-typed text
-    with no relay in between may use a different tag, but the ledger records
-    whatever tag is asserted so it can be audited later. ``routing_hint`` is
-    an opaque, caller-supplied string recording a routing/model-preference
-    decision already made upstream — chitra never reads, validates, or acts
-    on its contents; it is only carried through to ``DispatchResult`` and
-    the ledger for audit purposes, exactly like ``tag``. ``task_type`` is a
-    separate, optional caller-supplied classification string (e.g.
-    ``"code-review"``) — chitra does not decide what a task type IS or
-    evaluate content to classify one; the caller states it. If the caller
-    sets ``task_type`` but leaves ``routing_hint`` unset, ``dispatchd`` may
-    fill in ``routing_hint`` from a purely mechanical ``task_type ->
-    routing_hint`` lookup table (see ``chitra.routing_config``) — an
-    explicit ``routing_hint`` from the caller always wins over this lookup.
-    """
-
-    order_id: str
-    session_ref: str
-    nudge: str
-    """Verbatim text to inject. Convention (enforced in practice by
-    ``directive_voice_violation``'s regex match on the ``operator`` token):
-    chitra must never quote the operator verbatim or speak in the
-    operator's voice — no "the operator wants/says", no "chitra
-    wants/says/needs/relays", no bare "operator" attribution. A nudge that
-    trips the check is rejected by ``dispatch_to_tmux`` (status
-    ``BLOCKED``) before anything is pasted."""
-    tag: str = "[C]"
-    routing_hint: str | None = None
-    task_type: str | None = None
-    message_kind: Literal["legacy", "operator_relay", "reasoned_answer", "reasoned_nudge", "reasoned_action"] = "legacy"
-    decision_attestation: DecisionAttestation | None = None
-    input_baseline_hash: str | None = None
-    input_seen_hash: str | None = None
-    snapshot_tail_hash: str | None = None
-    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
-
-    # Explicit todo state remains optional because watchd now forces the
-    # event-boundary review even when no TodoWrite state is available.
-    completion_todo_items: list[TodoItem] | None = None
-    completion_evidence: list[CompletionEvidence] = Field(default_factory=list)
-    completion_open_asks: list[str] = Field(default_factory=list)
-    completion_blockers: list[str] = Field(default_factory=list)
-
-    # Opt-in exemption from dispatchd's guard freeze check (see
-    # dispatchd.process_one_order). False for every ordinary order -- the
-    # freeze applies and the order is durably deferred, never discarded.
-    # Setting this boolean alone is NOT sufficient to bypass the freeze:
-    # dispatchd additionally requires task_type to be one of its own sealed
-    # internal task types (chitra.rate_limit_guard's checkpoint/stop/re-arm
-    # nudges) before honoring it -- an arbitrary queue writer cannot invent a
-    # new bypass merely by setting this field, since dispatchd (not the
-    # order) controls the allowlist. See docs/SOL-ADVERSARIAL-REVIEW finding #7.
-    bypass_rate_limit_freeze: bool = False
-
-    @model_validator(mode="after")
-    def validate_reasoning_attestation(self) -> DispatchOrder:
-        """Bind autonomous message bytes to one pre-dispatch attestation."""
-        reasoned_kinds = {"reasoned_answer", "reasoned_nudge", "reasoned_action"}
-        if self.message_kind in reasoned_kinds and self.decision_attestation is None:
-            raise ValueError(f"{self.message_kind} dispatch requires decision_attestation")
-        if self.message_kind not in reasoned_kinds and self.decision_attestation is not None:
-            raise ValueError(f"{self.message_kind} dispatch cannot carry a decision_attestation")
-        if self.decision_attestation is not None:
-            if self.decision_attestation.outcome != "answer":
-                raise ValueError("an abstained decision cannot be dispatched")
-            if self.decision_attestation.message_kind != self.message_kind:
-                raise ValueError("message_kind must match the decision attestation")
-            if self.decision_attestation.approved_text != self.nudge:
-                raise ValueError("nudge must exactly match the attested approved_text")
-            if self.decision_attestation.operator_confirmation_required and not self.decision_attestation.operator_confirmed:
-                raise ValueError("operator-gated decisions require explicit confirmation before dispatch")
-        return self
-
-
 def enqueue_dispatch_order(queue_dir: Path, order: DispatchOrder) -> Path:
     """Atomically enqueue one order for the already-running ``dispatchd``."""
     orders_dir = queue_dir / "orders"
     orders_dir.mkdir(parents=True, exist_ok=True)
     path = orders_dir / f"{order.order_id}.json"
-    temporary = orders_dir / f".{order.order_id}.json.tmp"
-    temporary.write_text(order.model_dump_json(indent=2), encoding="utf-8")
-    temporary.replace(path)
+    write_json_atomic(
+        path,
+        order.model_dump(mode="json"),
+        temporary_path=orders_dir / f".{order.order_id}.json.tmp",
+        trailing_newline=False,
+        sort_keys=False,
+        cleanup_on_error=False,
+    )
     return path
-
-
-class DispatchResult(BaseModel):
-    """Result of processing a dispatch order.
-
-    ``routing_hint`` is copied through unchanged from the originating
-    ``DispatchOrder`` when the caller supplied one (opaque pass-through) or
-    the ``defaults`` config filled it in. When a structured ``routes`` entry
-    resolved the task_type instead, ``routing_hint`` holds the derived
-    ``model@harness`` string and the resolved selection is also recorded
-    structurally in ``resolved_model`` / ``resolved_harness`` / ``resolved_zdr``
-    (``routing_hint_source == "route"``).
-    """
-
-    order_id: str
-    session_ref: str
-    status: DispatchStatus
-    reason: str = ""
-    marker: str = ""
-    tail_hash: str = ""
-    transcript_path: str | None = None
-    routing_hint: str | None = None
-    task_type: str | None = None
-    routing_hint_source: str = "unset"
-    # Resolved structured selection when ``routing_hint_source == "route"``
-    # (see chitra.routing_config.resolve_route): the concrete model + harness
-    # (+ zdr) chitra resolved from the task_type's ``routes`` entry. None /
-    # False for the opaque ``defaults`` path, an explicit caller hint, or no
-    # routing config -- those record only the opaque ``routing_hint``.
-    resolved_model: str | None = None
-    resolved_harness: str | None = None
-    resolved_zdr: bool = False
-    decision_attestation_id: str | None = None
-    at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 # ---------------------------------------------------------------------------
@@ -345,32 +183,12 @@ class TmuxInputRunner(Protocol):
     def __call__(self, cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]: ...
 
 
-def run_cmd(cmd: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    """Run a command, capturing output, never raising on non-zero exit.
+def run_cmd(cmd: list[str], payload: str | None = None, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    """Run a command with optional stdin, capturing output without raising.
 
-    Mirrors the source's ``run_cmd``. ``FileNotFoundError`` (binary missing)
-    returns rc=127; ``TimeoutExpired`` returns rc=124.
+    ``FileNotFoundError`` (binary missing) returns rc=127;
+    ``TimeoutExpired`` returns rc=124.
     """
-    try:
-        return subprocess.run(
-            cmd,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        return subprocess.CompletedProcess(cmd, 124, stdout=stdout, stderr=stderr or f"timed out after {timeout}s")
-    except FileNotFoundError as exc:
-        return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=str(exc))
-
-
-def run_cmd_input(cmd: list[str], payload: str, *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    """Run a command with stdin payload, capturing output, never raising."""
     try:
         return subprocess.run(
             cmd,
@@ -388,6 +206,17 @@ def run_cmd_input(cmd: list[str], payload: str, *, timeout: int = 20) -> subproc
         return subprocess.CompletedProcess(cmd, 124, stdout=stdout, stderr=stderr or f"timed out after {timeout}s")
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=str(exc))
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return whether ``pid`` names a process that still exists."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -473,28 +302,6 @@ def directive_voice_violation(nudge: str, *, patterns: Sequence[re.Pattern[str]]
         if m:
             return m.group(0)
     return None
-
-
-def is_chitra_dispatched_task(
-    task_text: str,
-    *,
-    session_ref: str,
-    ledger_path: Path,
-    key: bytes,
-) -> bool:
-    """Origin / never-cancel guard: is ``task_text`` something chitra itself
-    dispatched to ``session_ref``?
-
-    Cross-references the delivery ledger via ``ledger.verify_delivery``.
-    Returns ``True`` only if a signed ledger entry proves chitra delivered
-    this exact text to this session. ``False`` means no matching entry
-    exists — the task is presumed operator-authored and MUST be treated as
-    immutable by any reconciler (see this module's docstring): a
-    reconciler may add tasks or reorder tasks for which this returns
-    ``True``, but must never remove, hold, or "correct away" a task for
-    which this returns ``False``.
-    """
-    return ledger_mod.verify_delivery(ledger_path, key=key, session_ref=session_ref, nudge=task_text) is not None
 
 
 def strip_terminal_controls(text: str) -> str:
@@ -642,29 +449,23 @@ def pane_input_check(
 # ---------------------------------------------------------------------------
 
 
-def capture_local(pane_id: str, lines: int, runner: TmuxRunner | None = None) -> list[str]:
-    """Capture the tail of a local tmux pane as a list of stripped lines.
-
-    ``-e`` preserves ANSI escape sequences so ``pane_input_check`` can tell a
-    dim placeholder hint apart from a real draft; the escapes are stripped
-    downstream wherever plain text is needed (``strip_terminal_controls``).
-    """
-    run = runner or run_cmd
+def capture(
+    host: str,
+    pane_id: str,
+    lines: int,
+    *,
+    runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
+) -> list[str]:
+    """Capture a local or remote tmux pane through ``run_on_host``."""
     start = "-" if lines < 0 else f"-{lines}"
-    proc = run(["tmux", "capture-pane", "-e", "-p", "-t", pane_id, "-S", start], timeout=5)
-    if proc.returncode != 0:
-        return []
-    captured = [line.rstrip() for line in proc.stdout.splitlines() if line.strip()]
-    return captured if lines < 0 else captured[-lines:]
-
-
-def capture_remote(host: str, pane_id: str, lines: int, runner: TmuxRunner | None = None) -> list[str]:
-    """Capture the tail of a remote tmux pane over ssh."""
-    run = runner or run_cmd
-    quoted_pane = shlex.quote(pane_id)
-    start = "-" if lines < 0 else f"-{int(lines)}"
-    cmd = ssh_command(host, f"tmux capture-pane -e -p -t {quoted_pane} -S {shlex.quote(start)} 2>/dev/null || true")
-    proc = run(cmd, timeout=8)
+    proc = run_on_host(
+        host,
+        ["tmux", "capture-pane", "-e", "-p", "-t", pane_id, "-S", start],
+        runner=runner,
+        local_extra=local_extra,
+        timeout=8,
+    )
     if proc.returncode != 0:
         return []
     captured = [line.rstrip() for line in proc.stdout.splitlines() if line.strip()]
@@ -703,6 +504,21 @@ def ssh_command(target: str, remote_command: str) -> list[str]:
     return cmd
 
 
+def run_on_host(
+    host: str,
+    argv: Sequence[str],
+    *,
+    runner: TmuxRunner | None = None,
+    local_extra: set[str] | None = None,
+    timeout: int = 20,
+) -> subprocess.CompletedProcess[str]:
+    """Run one argv locally or as a safely quoted command over ssh."""
+    command = list(argv)
+    if host and not is_local_host(host, local_extra):
+        command = ssh_command(host, shlex.join(command))
+    return (runner or run_cmd)(command, timeout=timeout)
+
+
 def capture_dispatch_pane(
     host: str,
     pane: str,
@@ -716,9 +532,7 @@ def capture_dispatch_pane(
     Local-host detection uses ``is_local_host`` with the supplied
     ``local_extra`` aliases (for tests).
     """
-    if is_local_host(host, local_extra):
-        return capture_local(pane, lines, runner=runner)
-    return capture_remote(host, pane, lines, runner=runner)
+    return capture(host, pane, lines, runner=runner, local_extra=local_extra)
 
 
 # ---------------------------------------------------------------------------
@@ -746,12 +560,13 @@ def pane_in_mode(
     server for a remote target's copy-mode state is meaningless — it reports
     on the wrong tmux server entirely.
     """
-    run = runner or run_cmd
-    if not host or is_local_host(host, local_extra):
-        cmd = ["tmux", "display-message", "-p", "-t", pane, "#{pane_in_mode}"]
-    else:
-        cmd = ssh_command(host, f"tmux display-message -p -t {shlex.quote(pane)} '#{{pane_in_mode}}'")
-    proc = run(cmd, timeout=5)
+    proc = run_on_host(
+        host,
+        ["tmux", "display-message", "-p", "-t", pane, "#{pane_in_mode}"],
+        runner=runner,
+        local_extra=local_extra,
+        timeout=5,
+    )
     return proc.returncode == 0 and proc.stdout.strip() == "1"
 
 
@@ -769,12 +584,13 @@ def cancel_copy_mode(
     ``wait_seconds`` (default 0.3s) before injecting. ``host`` selects local
     vs ssh-wrapped execution, exactly like ``pane_in_mode``.
     """
-    run = runner or run_cmd
-    if not host or is_local_host(host, local_extra):
-        cmd = ["tmux", "send-keys", "-t", pane, "-X", "cancel"]
-    else:
-        cmd = ssh_command(host, f"tmux send-keys -t {shlex.quote(pane)} -X cancel")
-    proc = run(cmd, timeout=5)
+    proc = run_on_host(
+        host,
+        ["tmux", "send-keys", "-t", pane, "-X", "cancel"],
+        runner=runner,
+        local_extra=local_extra,
+        timeout=5,
+    )
     if proc.returncode != 0:
         logger.warning("cancel_copy_mode_failed", pane=pane, host=host, stderr=proc.stderr.strip())
         return False
@@ -824,7 +640,7 @@ def paste_nudge_to_local_tmux(
     This is bug fix (a): the source omits ``-p`` on ``paste-buffer``.
     """
     run = runner or run_cmd
-    run_in = input_runner or run_cmd_input
+    run_in = input_runner or run_cmd
     buffer_name = tmux_buffer_name(nudge)
     load = run_in(["tmux", "load-buffer", "-b", buffer_name, "-"], nudge, timeout=5)
     if load.returncode != 0:
@@ -935,18 +751,18 @@ def transcript_mtime(
     unreachable host); a caller treats that as "cannot verify", never as
     "stopped".
     """
-    if host and not is_local_host(host, local_extra):
-        run = runner or run_cmd
-        proc = run(ssh_command(host, f"stat -c %Y {shlex.quote(transcript_path)} 2>/dev/null"), timeout=8)
-        if proc.returncode != 0:
-            return None
-        try:
-            return float(proc.stdout.strip())
-        except ValueError:
-            return None
+    proc = run_on_host(
+        host,
+        ["stat", "-c", "%Y", transcript_path],
+        runner=runner,
+        local_extra=local_extra,
+        timeout=8,
+    )
+    if proc.returncode != 0:
+        return None
     try:
-        return Path(transcript_path).stat().st_mtime
-    except OSError:
+        return float(proc.stdout.strip())
+    except ValueError:
         return None
 
 
@@ -1179,52 +995,6 @@ def pane_capture_confirms_nudge(
 
 
 # ---------------------------------------------------------------------------
-# Liveness check (stub for the -p --resume fallback path)
-# ---------------------------------------------------------------------------
-
-
-def liveness_check(
-    session_ref: str,
-    *,
-    runner: TmuxRunner | None = None,
-    local_extra: set[str] | None = None,
-) -> bool:
-    """Return True if the lane has a LIVE attached tmux/Claude Code process.
-
-    A live lane MUST be dispatched via the tmux-injection recipe, never via
-    ``claude -p --resume``. This is the single-writer-rule guard. The actual
-    ``-p --resume`` fallback path (for confirmed DETACHED/STOPPED sessions)
-    is out of scope for this build — only the enforcement check is provided.
-
-    The check inspects whether the lane's tmux session has any attached
-    client — locally via a direct ``tmux list-clients`` call, or over ssh
-    (mirroring ``capture_remote``/``ssh_command``) for a remote host. This
-    used to unconditionally return ``True`` for any remote host ("assume
-    live; the fallback path is not yet built") — that was never a real
-    liveness check, just an enforcement placeholder, and remote dispatch is
-    now chitra's primary path, so a real check is required here. A more
-    thorough impl (scanning for a running ``claude`` process bound to the
-    session id, rather than just an attached tmux client) is left for the
-    fallback-path build.
-    """
-    run = runner or run_cmd
-    parts = session_ref.split(":")
-    if len(parts) != 3:
-        return False
-    host, session, _pane = parts
-    if is_local_host(host, local_extra):
-        proc = run(["tmux", "list-clients", "-t", session, "-F", "#{session_name}"], timeout=5)
-    else:
-        proc = run(
-            ssh_command(host, f"tmux list-clients -t {shlex.quote(session)} -F '#{{session_name}}'"),
-            timeout=8,
-        )
-    if proc.returncode != 0:
-        return False
-    return bool(proc.stdout.strip())
-
-
-# ---------------------------------------------------------------------------
 # LaneLock — single-writer enforcement per session id
 # ---------------------------------------------------------------------------
 
@@ -1262,16 +1032,6 @@ class LaneLock:
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_ref)
         self.lock_path = base / f"lane-{safe}.lock"
         self._acquired = False
-
-    @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
 
     def acquire(self, *, blocking: bool = False, poll_seconds: float = 0.1, timeout_seconds: float = 5.0) -> bool:
         """Acquire the lock.
@@ -1311,7 +1071,7 @@ class LaneLock:
             pid = int(data.get("pid", 0))
         except (OSError, ValueError, json.JSONDecodeError):
             return False
-        if self._pid_alive(pid):
+        if _pid_alive(pid):
             return False
         try:
             self.lock_path.unlink()
@@ -1375,7 +1135,7 @@ def dispatch_to_tmux(
     Returns a ``DispatchResult`` with status ``sent`` / ``blocked`` / ``failed``.
     """
     run = runner or run_cmd
-    run_in = input_runner or run_cmd_input
+    run_in = input_runner or run_cmd
     tuning = tuning or DispatchTuning()
     if verify_wait_seconds is not None:
         tuning = DispatchTuning(
@@ -1388,16 +1148,30 @@ def dispatch_to_tmux(
         [re.compile(pattern, re.IGNORECASE) for pattern in policy.dispatch.banned_attribution_patterns] if policy is not None else None
     )
     extra_idle_regexes = [re.compile(pattern) for pattern in policy.dispatch.extra_idle_input_regexes] if policy is not None else ()
-    parts = order.session_ref.split(":")
-    if len(parts) != 3:
+
+    def _result(
+        status: DispatchStatus,
+        reason: str,
+        *,
+        marker: str = "",
+        tail_hash: str = "",
+        transcript_path: str | None = None,
+    ) -> DispatchResult:
         return DispatchResult(
             order_id=order.order_id,
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
             task_type=order.task_type,
-            status=DispatchStatus.FAILED,
-            reason="unsupported session_ref (expected host:session:pane)",
+            status=status,
+            reason=reason,
+            marker=marker,
+            tail_hash=tail_hash,
+            transcript_path=transcript_path,
         )
+
+    parts = order.session_ref.split(":")
+    if len(parts) != 3:
+        return _result(DispatchStatus.FAILED, "unsupported session_ref (expected host:session:pane)")
     host, session, pane_field = parts
     pane = tmux_pane_target(session, pane_field)
 
@@ -1407,25 +1181,11 @@ def dispatch_to_tmux(
     bad = directive_voice_violation(order.nudge, patterns=voice_patterns)
     if bad is not None:
         logger.info("tmux_dispatch_blocked_directive_voice", session_ref=order.session_ref, phrase=bad)
-        return DispatchResult(
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            routing_hint=order.routing_hint,
-            task_type=order.task_type,
-            status=DispatchStatus.BLOCKED,
-            reason=f"directive-voice: banned attribution phrase {bad!r}",
-        )
+        return _result(DispatchStatus.BLOCKED, f"directive-voice: banned attribution phrase {bad!r}")
 
     hosts = allowed_hosts if allowed_hosts is not None else allowed_remote_dispatch_hosts()
     if host not in hosts and not is_local_host(host, local_extra):
-        return DispatchResult(
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            routing_hint=order.routing_hint,
-            task_type=order.task_type,
-            status=DispatchStatus.BLOCKED,
-            reason=f"remote dispatch to {host} not in allowlist",
-        )
+        return _result(DispatchStatus.BLOCKED, f"remote dispatch to {host} not in allowlist")
 
     # Pre-dispatch idle/draft check (safety net from the source).
     pre_capture = capture_dispatch_pane(host, pane, lines=tuning.capture_lines, runner=run, local_extra=local_extra)
@@ -1444,53 +1204,30 @@ def dispatch_to_tmux(
             tail_hash=pre_check.tail_hash,
             last_line=pre_check.last_line,
         )
-        return DispatchResult(
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            routing_hint=order.routing_hint,
-            task_type=order.task_type,
-            status=DispatchStatus.BLOCKED,
-            reason=pre_check.reason,
-            tail_hash=pre_check.tail_hash,
-        )
+        return _result(DispatchStatus.BLOCKED, pre_check.reason, tail_hash=pre_check.tail_hash)
 
     # Bug fix (b): copy-mode detection + cancel, run against the actual
     # target host (local or ssh-wrapped) — checking the local tmux server
     # for a remote target's copy-mode state would report on the wrong tmux
     # server entirely.
     if not ensure_pane_not_in_mode(pane, host=host, runner=run, local_extra=local_extra):
-        return DispatchResult(
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            routing_hint=order.routing_hint,
-            task_type=order.task_type,
-            status=DispatchStatus.BLOCKED,
-            reason="blocked: pane in copy-mode and cancel failed",
-        )
+        return _result(DispatchStatus.BLOCKED, "blocked: pane in copy-mode and cancel failed")
 
     # Bug fix (a): paste-buffer -p.
     if is_local_host(host, local_extra):
         proc = paste_nudge_to_local_tmux(pane, order.nudge, runner=run, input_runner=run_in)
         if proc.returncode != 0:
-            return DispatchResult(
-                order_id=order.order_id,
-                session_ref=order.session_ref,
-                routing_hint=order.routing_hint,
-                task_type=order.task_type,
-                status=DispatchStatus.FAILED,
-                reason=proc.stderr.strip() or proc.stdout.strip() or f"tmux paste-buffer failed rc={proc.returncode}",
+            return _result(
+                DispatchStatus.FAILED,
+                proc.stderr.strip() or proc.stdout.strip() or f"tmux paste-buffer failed rc={proc.returncode}",
             )
     else:
         remote_cmd = remote_tmux_paste_command(pane, order.nudge)
         proc = run(ssh_command(host, remote_cmd), timeout=10)
         if proc.returncode != 0:
-            return DispatchResult(
-                order_id=order.order_id,
-                session_ref=order.session_ref,
-                routing_hint=order.routing_hint,
-                task_type=order.task_type,
-                status=DispatchStatus.FAILED,
-                reason=proc.stderr.strip() or proc.stdout.strip() or f"remote tmux paste-buffer failed rc={proc.returncode}",
+            return _result(
+                DispatchStatus.FAILED,
+                proc.stderr.strip() or proc.stdout.strip() or f"remote tmux paste-buffer failed rc={proc.returncode}",
             )
 
     sleep(tuning.post_paste_wait_seconds)
@@ -1516,13 +1253,9 @@ def dispatch_to_tmux(
             marker=marker,
             transcript=str(transcript_path),
         )
-        return DispatchResult(
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            routing_hint=order.routing_hint,
-            task_type=order.task_type,
-            status=DispatchStatus.SENT,
-            reason="sent: confirmed via transcript-grep",
+        return _result(
+            DispatchStatus.SENT,
+            "sent: confirmed via transcript-grep",
             marker=marker,
             transcript_path=str(transcript_path) if transcript_path is not None else None,
         )
@@ -1544,13 +1277,9 @@ def dispatch_to_tmux(
             session_ref=order.session_ref,
             marker=marker,
         )
-        return DispatchResult(
-            order_id=order.order_id,
-            session_ref=order.session_ref,
-            routing_hint=order.routing_hint,
-            task_type=order.task_type,
-            status=DispatchStatus.SENT,
-            reason="sent: confirmed via pane-capture fallback (transcript unavailable)",
+        return _result(
+            DispatchStatus.SENT,
+            "sent: confirmed via pane-capture fallback (transcript unavailable)",
             marker=marker,
         )
     logger.info(
@@ -1558,12 +1287,8 @@ def dispatch_to_tmux(
         session_ref=order.session_ref,
         marker=marker,
     )
-    return DispatchResult(
-        order_id=order.order_id,
-        session_ref=order.session_ref,
-        routing_hint=order.routing_hint,
-        task_type=order.task_type,
-        status=DispatchStatus.FAILED,
-        reason="send-failed-no-confirmation (transcript-grep and pane-capture both found no marker)",
+    return _result(
+        DispatchStatus.FAILED,
+        "send-failed-no-confirmation (transcript-grep and pane-capture both found no marker)",
         marker=marker,
     )

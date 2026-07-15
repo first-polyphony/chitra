@@ -20,18 +20,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chitra.goal_enforcement import SessionReviewSignal, freeze_goal
 from chitra.goals import GoalRecord, check_specification
+from chitra.lexicon import OPERATOR_GATE_PATTERNS
 
 logger = structlog.get_logger(__name__)
 
 RiskClass = Literal["a0", "a1", "a2", "a3"]
 DecisionSource = Literal["goal", "principle", "oracle-escalated", "abstained"]
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_OPERATOR_GATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("spend", re.compile(r"\b(spend|purchase|buy|billing|payment|paid plan|costs?\s+\$)\b", re.I)),
-    ("credentials", re.compile(r"\b(credentials?|password|secret|api[- ]?key|oauth|login|authentication token)\b", re.I)),
-    ("irreversible action", re.compile(r"\b(irreversible|delete|destroy|drop database|force[- ]push|terminate|revoke)\b", re.I)),
-    ("strategy redirect", re.compile(r"\b(redirect|change (?:the )?goal|switch objectives?|expand (?:the )?scope)\b", re.I)),
-)
 
 
 class ReasoningContractError(ValueError):
@@ -352,7 +347,7 @@ class DecisionReasoner:
         if question.risk_class == "a3":
             gate_reasons.append("a3 consequence")
         combined_text = f"{question.text}\n{answer}"
-        for reason, pattern in _OPERATOR_GATE_PATTERNS:
+        for reason, pattern in OPERATOR_GATE_PATTERNS:
             if pattern.search(combined_text):
                 gate_reasons.append(reason)
         if outcome == "abstain":

@@ -29,6 +29,7 @@ from typing import Any, Literal, Protocol
 
 import structlog
 
+from chitra._fsio import env_path, parse_iso8601, write_json_atomic
 from chitra.board_updater import validate_board_facts
 from chitra.goals import GoalRecord, GoalStatus, done_when_with_delta, session_host, session_name
 from chitra.state_paths import state_dir as default_state_dir
@@ -462,12 +463,8 @@ def _roster_column_widths(rows: Sequence[tuple[str, str, str, str, str]]) -> lis
     return [marker_w, session_w, goal_w, now_w, needs_w]
 
 
-def _env_path(name: str, default: Path) -> Path:
-    return Path(os.environ.get(name, str(default))).expanduser()
-
-
 def default_board_dir() -> Path:
-    return _env_path("CHITRA_BOARD_DIR", default_state_dir() / "board")
+    return env_path("CHITRA_BOARD_DIR", default_state_dir() / "board")
 
 
 def _env_hosts(value: str | None) -> set[str]:
@@ -489,15 +486,14 @@ def row_state_key(session: dict[str, Any]) -> str:
     return STATE_KEYS.get(session["state"]["cls"], "work")
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
 def write_health(board_dir: Path, ok: bool, error: str | None = None) -> None:
-    _write_json_atomic(board_dir / "health.json", {"ok": ok, "error": error, "ts": int(time.time())})
+    path = board_dir / "health.json"
+    write_json_atomic(
+        path,
+        {"ok": ok, "error": error, "ts": int(time.time())},
+        temporary_path=path.with_name(path.name + ".tmp"),
+        cleanup_on_error=False,
+    )
 
 
 def normalize_tail(raw: str) -> list[str]:
@@ -664,7 +660,7 @@ def _iso_stamp(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = parse_iso8601(value)
     except ValueError:
         return None
     return stamp(int(parsed.timestamp()))

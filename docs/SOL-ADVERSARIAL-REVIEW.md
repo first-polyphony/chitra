@@ -1,6 +1,6 @@
 # SOL adversarial review
 
-Reviewed read-only on 2026-07-12. I inspected the four PRs through `gh`, the PR-head source and tests through the GitHub API, both supplied recovery reports, the local Chitra checkout, and the deployed-source/runtime split on trailhead over read-only SSH. I did **not** accept PR descriptions as evidence. GitHub's check-runs API returned HTTP 403 for the provisioned PAT, so the exact full-suite pass counts are author-reported, not independently corroborated by CI in this review.
+Reviewed read-only on 2026-07-12. I inspected the four PRs through `gh`, the PR-head source and tests through the GitHub API, both supplied recovery reports, the local Chitra checkout, and the deployed-source/runtime split on hub-host over read-only SSH. I did **not** accept PR descriptions as evidence. GitHub's check-runs API returned HTTP 403 for the provisioned PAT, so the exact full-suite pass counts are author-reported, not independently corroborated by CI in this review.
 
 ## Ranked findings
 
@@ -107,13 +107,13 @@ The tests monkeypatch `dispatch_to_tmux`, execute one process sequentially, neve
 - The PR calls cards an “unreviewed” unilateral regression. The recovered transcript says the opposite: a later checkpoint records the operator's explicit “try a different tack” request and “rejected box table.” It also says the operator's actual pasted examples failed to arrive twice. The later phrase “desired table + colors” creates unresolved ambiguity; it does not erase the explicit rejection. This PR converts ambiguity into certainty without operator confirmation.
 - `_wrap_cell()` uses `textwrap.wrap()`'s code-point count, while `_pad()` uses display width. A Goal containing 20 `🧪` characters is treated as a 20-character line but renders 40 columns. I reproduced the full effect read-only: at `COLUMNS=100`, one box roster produced frame widths `{100, 119}`. The existing alignment test uses ASCII `x`/`y`; it exercises the marker emoji but not emoji/CJK in Goal/Now/Needs. The original alignment defect is not generally fixed.
 - The adapter doctrine is internally contradictory: it says status is a table at lines 30-31, says cards are default and hand-drawn box characters must stop at lines 107-117, then demands a table and says box drawing is ideal at lines 168-188. PR #54 changes only Chitra's default, leaving the monitor's governing prose inconsistent.
-- `render_roster()` is the CLI/text roster. The separate HTML board renderer is untouched. The supplied findings explicitly warn that the tophand board poster is a distinct surface. If the complaint referred to that posted board or to an already-running monitor, PR #54 does not fix the observed surface.
+- `render_roster()` is the CLI/text roster. The separate HTML board renderer is untouched. The supplied findings explicitly warn that the worker-host board poster is a distinct surface. If the complaint referred to that posted board or to an already-running monitor, PR #54 does not fix the observed surface.
 
 **Recommended action:** Do not merge on inferred intent. Obtain/recover the actual reference examples or an explicit ruling: cards, box, or Markdown. Then make one canonical format contract apply to Chitra, adapter doctrine, and the actual posted surface. Replace hand-rolled width logic with a tested terminal-width library or display-width-aware wrapper, including emoji sequences, CJK, long unbroken strings, and narrow terminals.
 
 ### 9. HIGH — Current goal persistence is atomic per write but not safe against concurrent writers
 
-**Evidence:** trailhead `/opt/polyphony/chitra-main/src/chitra/goals.py:250-275, 281-324`; `/opt/polyphony/chitra-main/tests/test_goals.py:59-67`.
+**Evidence:** hub-host `/opt/polyphony/chitra-main/src/chitra/goals.py:250-275, 281-324`; `/opt/polyphony/chitra-main/tests/test_goals.py:59-67`.
 
 **Failure scenario:** Monitor A reads goals `[A, B]` to update A. Monitor B reads the same snapshot to add an open ask to B. A writes `[B, A']`; B writes `[A, B']`. Whichever `os.replace()` runs last silently erases the other's mutation. `hold_goal`, `resume_goal`, `add_ask`, `resolve_ask`, `update_now`, and PR #55's sweep all use this read-modify-replace store.
 
@@ -123,9 +123,9 @@ The test named `test_store_round_trip_and_atomic_write` proves only that no temp
 
 ### 10. MEDIUM — #2208 source is deployed, but its runtime behavior is not; the next relaunch will place a bearer credential in a world-readable file
 
-**Evidence:** PR #2208, `infra/ccr/sol-cc:103-114`; `infra/ccr/claude-code-settings.json:6-15`; read-only trailhead inspection.
+**Evidence:** PR #2208, `infra/ccr/sol-cc:103-114`; `infra/ccr/claude-code-settings.json:6-15`; read-only hub-host inspection.
 
-Trailhead source checkout is current (`9c98e372`, containing merge `abd54dda`), so “deployed to `/opt/polyphony/deploy-main`” is true only for source. The live runtime file `/opt/polyphony/ccr/claude-code-settings.json` had mtime `2026-07-11 23:40 EDT`, still contained `apiKeyHelper`, and had no `CLAUDE_CODE_OAUTH_TOKEN`, effort flag, or Opus default. It predates the merged source file (`2026-07-12 07:42 EDT`). No active Claude process carried `CCR_CLAUDE_CODE_WRAPPER=1` during inspection. Thus the #2208 behavior has not been proven in the active Chitra session.
+Hub-host source checkout is current (`9c98e372`, containing merge `abd54dda`), so “deployed to `/opt/polyphony/deploy-main`” is true only for source. The live runtime file `/opt/polyphony/ccr/claude-code-settings.json` had mtime `2026-07-11 23:40 EDT`, still contained `apiKeyHelper`, and had no `CLAUDE_CODE_OAUTH_TOKEN`, effort flag, or Opus default. It predates the merged source file (`2026-07-12 07:42 EDT`). No active Claude process carried `CCR_CLAUDE_CODE_WRAPPER=1` during inspection. Thus the #2208 behavior has not been proven in the active Chitra session.
 
 On the next `sol-cc` launch, `sed` materializes `CCR_CLAUDE_CLIENT_KEY` into JSON and then `chmod 0644`s it. Even if this is a localhost-only gateway credential rather than an upstream Anthropic secret, every local user can read a bearer that authorizes gateway calls. Moving from an executable helper to `CLAUDE_CODE_OAUTH_TOKEN` also puts the credential in the child environment and common diagnostic surfaces. Dropping the misleading billing badge is not a sufficient reason to weaken local credential handling.
 
@@ -175,7 +175,7 @@ below describes the pre-v0.8.2 failure that motivated the repair.
 
 ### 15. MEDIUM — Version numbers are inflated; the package and product maturity are being conflated
 
-**Evidence:** local `/opt/polyphony/chitra-main` is ten commits behind and has `pyproject.toml` 0.5.0; trailhead is current at `e4b627d` and has 0.8.0. Published tags are `v0.2.0` (2026-07-09), `v0.7.0` (2026-07-11 20:16 EDT), and `v0.8.0` (2026-07-11 22:53 EDT). There are no `v0.3.0`–`v0.6.0` tags even though the changelog narrates those versions.
+**Evidence:** local `/opt/polyphony/chitra-main` is ten commits behind and has `pyproject.toml` 0.5.0; hub-host is current at `e4b627d` and has 0.8.0. Published tags are `v0.2.0` (2026-07-09), `v0.7.0` (2026-07-11 20:16 EDT), and `v0.8.0` (2026-07-11 22:53 EDT). There are no `v0.3.0`–`v0.6.0` tags even though the changelog narrates those versions.
 
 **Assessment:** Yes, the version is inflated. Six minor-version increments in roughly two days do not correspond to six independently hardened maturity steps. Core features are real—pane observation, deterministic dispatch, goal state, usage evaluation, rosters—but transactionality, crash idempotence, deploy activation, evidence-backed status, and autonomous pause/resume are not production-hard. The honest feature maturity is **0.3.2 at most**.
 
