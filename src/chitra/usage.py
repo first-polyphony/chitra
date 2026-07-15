@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import select
 import subprocess
 import sys
@@ -33,6 +34,33 @@ CodexProcessFactory = Callable[..., subprocess.Popen[str]]
 CodexClock = Callable[[], float]
 DEFAULT_USAGE_POLICY = UsagePolicy()
 DEFAULT_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
+
+
+def _codex_snapshot_timeout_secs() -> float:
+    """Wall-clock budget for one fresh ``codex app-server`` exchange.
+
+    Default 45s: a cold app-server start on a heavily loaded host was observed
+    to blow the previous fixed 15s cap (trailhead load storm, 2026-07-15),
+    which starved the rate-limit guard of codex capacity data. Overridable via
+    CHITRA_CODEX_SNAPSHOT_TIMEOUT_SECS for sustained load storms.
+    """
+    raw = os.environ.get("CHITRA_CODEX_SNAPSHOT_TIMEOUT_SECS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 45.0
+    return value if value > 0 else 45.0
+
+
+CODEX_SNAPSHOT_TIMEOUT_SECS = _codex_snapshot_timeout_secs()
+
+
+def _codex_timeout_message() -> str:
+    loadavg = ", ".join(f"{x:.2f}" for x in os.getloadavg())
+    return (
+        f"codex app-server did not respond within {CODEX_SNAPSHOT_TIMEOUT_SECS:g} seconds "
+        f"(host loadavg 1m/5m/15m: {loadavg}; slow app-server start under load is the known cause)"
+    )
 
 
 class CodexSnapshotError(RuntimeError):
@@ -349,7 +377,7 @@ def _read_response(
     while True:
         remaining = deadline - clock()
         if remaining <= 0:
-            raise CodexSnapshotError("codex app-server did not respond within 15 seconds")
+            raise CodexSnapshotError(_codex_timeout_message())
         returncode = process.poll()
         if returncode is not None:
             raise CodexSnapshotError(f"codex app-server failed ({returncode}): ")
@@ -359,7 +387,7 @@ def _read_response(
             line = process.stdout.readline()
         else:
             if not ready:
-                raise CodexSnapshotError("codex app-server did not respond within 15 seconds")
+                raise CodexSnapshotError(_codex_timeout_message())
             line = process.stdout.readline()
         try:
             response = json.loads(line)
@@ -456,7 +484,7 @@ def codex_snapshot(
     current = datetime.now(UTC) if now is None else now.astimezone(UTC)
     command = [str(codex_bin), "app-server", "--stdio"]
     try:
-        deadline = clock() + 15
+        deadline = clock() + CODEX_SNAPSHOT_TIMEOUT_SECS
         process = process_factory(command)
     except FileNotFoundError as exc:
         raise CodexSnapshotError(f"codex binary was not found: {codex_bin}") from exc
