@@ -231,7 +231,7 @@ Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-
         if command[1] == "list-panes":
             return _completed(command, "%1\tfleet:0.0\n")
         if command[1] == "capture-pane":
-            return _completed(command, next(captures))
+            return _completed(command, next(captures, _CITED_CLAIM_CAPTURE))
         raise AssertionError(f"unexpected command: {command}")
 
     reviewer = _AcceptingReviewer()
@@ -240,6 +240,13 @@ Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-
     assert watcher.poll_once() == 0
     assert watcher.poll_once() == 1
 
+    for _ in range(50):
+        stored = get_goal(tmp_path, goal.session_ref)
+        assert stored is not None
+        if stored.status == "done-pending-close":
+            break
+        threading.Event().wait(0.01)
+        watcher.poll_once()
     stored = get_goal(tmp_path, goal.session_ref)
     assert stored is not None
     assert stored.status == "done-pending-close"

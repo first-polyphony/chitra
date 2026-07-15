@@ -115,6 +115,7 @@ from .goals import (
     RATE_LIMIT_HOLD_REASON_PREFIX,
     GoalRecord,
     close_goal,
+    done_when_with_delta,
     due_goals,
     get_goal,
     hold_goal,
@@ -225,14 +226,16 @@ class CodexLanePauseStrategy:
 def _pause_strategy(backend: PauseBackend) -> LanePauseStrategy:
     return CodexLanePauseStrategy() if backend == "codex" else ClaudeLanePauseStrategy()
 
+
 NEVER_PAUSE_SESSION_PREFIXES = ("trailhead:monitor:", "trailhead:boomtown:")
 
 
 def _resume_nudge(record: GoalRecord) -> str:
     """Build the re-arm nudge from a lane's OWN stored fields -- no LLM authorship."""
+    done_when = done_when_with_delta(record)
     if record.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
-        return f"Host pressure has cleared -- resuming. Goal: {record.goal} Done when: {record.done_when}"
-    return f"Rate-limit window has reset -- resuming. Goal: {record.goal} Done when: {record.done_when}"
+        return f"Host pressure has cleared -- resuming. Goal: {record.goal} Done when: {done_when}"
+    return f"Rate-limit window has reset -- resuming. Goal: {record.goal} Done when: {done_when}"
 
 
 def _resume_task_type(record: GoalRecord) -> str:
@@ -345,9 +348,7 @@ class _Advance:
     finished: bool = False  # resume-side only: True once a resume nudge is CONFIRMED sent
 
 
-def _bounded_wait(
-    txn: Transaction, *, deadline_seconds: int, max_attempts: int, now: datetime, waiting_for: str
-) -> _Advance:
+def _bounded_wait(txn: Transaction, *, deadline_seconds: int, max_attempts: int, now: datetime, waiting_for: str) -> _Advance:
     """No evidence yet: wait quietly until the phase's own deadline, then
     hand off to ``_escalate_or_retry``. Never strands: bounded by
     ``max_attempts``, see that function."""
@@ -357,9 +358,7 @@ def _bounded_wait(
     return _escalate_or_retry(txn, deadline_seconds=deadline_seconds, max_attempts=max_attempts, now=now, waiting_for=waiting_for)
 
 
-def _escalate_or_retry(
-    txn: Transaction, *, deadline_seconds: int, max_attempts: int, now: datetime, waiting_for: str
-) -> _Advance:
+def _escalate_or_retry(txn: Transaction, *, deadline_seconds: int, max_attempts: int, now: datetime, waiting_for: str) -> _Advance:
     """A phase's deadline has passed (or a terminal non-SENT result already
     proves the last attempt failed): retry up to ``max_attempts``, extending
     the deadline each time, then permanently mark ``escalated``. An escalated
@@ -383,9 +382,7 @@ def _escalate_or_retry(
     return _Advance(retried, note=f"{txn.session_ref}: {waiting_for} -- retrying (attempt {retried.attempts}/{max_attempts})")
 
 
-def plan_pauses(
-    verdicts: list[AccountedVerdict], *, host: str, goals_root: Path | None
-) -> tuple[list[AccountedVerdict], list[str]]:
+def plan_pauses(verdicts: list[AccountedVerdict], *, host: str, goals_root: Path | None) -> tuple[list[AccountedVerdict], list[str]]:
     """Pure planning pass: which fresh 'pause'-level verdicts need a NEW
     transaction started right now. Returns ``(to_pause, skip_reasons)``.
 
@@ -1114,9 +1111,7 @@ def sweep(
                 upsert_load_state(goals_root, load_state)
                 report.shed_lanes = list(load_state.shed_lanes)
             report.resumed.append(ResumeOutcome(session_ref=txn.session_ref, resume_order_id=advance.txn.resume_order_id))
-            report.advanced.append(
-                f"{txn.session_ref}: resume confirmed sent; hold cleared; {len(requeued)} deferred order(s) requeued"
-            )
+            report.advanced.append(f"{txn.session_ref}: resume confirmed sent; hold cleared; {len(requeued)} deferred order(s) requeued")
             continue
         if advance.txn != txn:
             upsert_transaction(goals_root, advance.txn)

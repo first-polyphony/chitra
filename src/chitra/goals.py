@@ -21,7 +21,7 @@ from typing import Any, Literal, cast
 
 import structlog
 
-from chitra.close_gate import lint_done_when, require_close_inventory
+from chitra.close_gate import RequiredItem, _recorded_descopes, lint_done_when, require_close_inventory
 from chitra.completion_gate import CompletionEvidence
 from chitra.state_paths import state_dir
 
@@ -58,6 +58,8 @@ SCHEMA = "chitra.goals.v1"
 # queue) need to agree on.
 RATE_LIMIT_HOLD_REASON_PREFIX = "rate-limit:"
 LOAD_SHED_HOLD_REASON_PREFIX = "load-shed:"
+DONE_STATUSES = frozenset(("done-pending-verification", "done-pending-close"))
+LEGACY_ENROLLED_AT = "1970-01-01T00:00:00+00:00"
 
 
 class GoalValidationError(ValueError):
@@ -66,6 +68,10 @@ class GoalValidationError(ValueError):
 
 class GoalRedirectRequiredError(GoalValidationError):
     """Raised when a strategic goal revision must use the redirect path."""
+
+
+class EnrolledScopeImmutableError(GoalValidationError):
+    """Raised when a write attempts to replace a lane's enrollment anchor."""
 
 
 class GoalNotFoundError(KeyError):
@@ -81,6 +87,9 @@ class GoalRecord:
     done_when: str
     source: str
     status: GoalStatus
+    lane_id: str = ""
+    enrolled_done_when: str = ""
+    enrolled_at: str = ""
     intent: str = ""
     scope: str = ""
     goal_version: int = 1
@@ -101,6 +110,9 @@ class GoalRecord:
             "done_when": self.done_when,
             "source": self.source,
             "status": self.status,
+            "lane_id": self.lane_id,
+            "enrolled_done_when": self.enrolled_done_when,
+            "enrolled_at": self.enrolled_at,
             "intent": self.intent,
             "scope": self.scope,
             "goal_version": self.goal_version,
@@ -125,6 +137,11 @@ def session_name(session_ref: str) -> str:
     """Return the session component, or a bare token when no host is known."""
     parts = session_ref.split(":")
     return parts[1] if len(parts) >= 2 and parts[1] else parts[0]
+
+
+def lane_id_from_session_ref(session_ref: str) -> str:
+    """Return the durable lane name without host or volatile instance suffix."""
+    return session_name(session_ref)
 
 
 def validate_goal(rec: GoalRecord) -> list[str]:
@@ -198,7 +215,7 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _record_from_dict(payload: object) -> GoalRecord:
+def _record_from_dict(payload: object, *, legacy_enrolled_at: str = "") -> GoalRecord:
     if not isinstance(payload, dict):
         raise ValueError("goal record must be an object")
     fields = ("session_ref", "goal", "done_when", "source", "status", "now", "last_verified", "created_at", "updated_at")
@@ -214,6 +231,11 @@ def _record_from_dict(payload: object) -> GoalRecord:
         done_when=values["done_when"],
         source=values["source"],
         status=cast(GoalStatus, values["status"]),
+        lane_id=_optional_string_from_payload(payload, "lane_id") or lane_id_from_session_ref(values["session_ref"]),
+        enrolled_done_when=_optional_string_from_payload(payload, "enrolled_done_when") or values["done_when"],
+        enrolled_at=(
+            _optional_string_from_payload(payload, "enrolled_at") or values["created_at"] or legacy_enrolled_at or LEGACY_ENROLLED_AT
+        ),
         intent=_intent_from_payload(payload),
         scope=_scope_from_payload(payload),
         goal_version=_goal_version_from_payload(payload),
@@ -227,6 +249,14 @@ def _record_from_dict(payload: object) -> GoalRecord:
         hold_reason=_hold_reason_from_payload(payload),
         resume_at=_resume_at_from_payload(payload),
     )
+
+
+def _optional_string_from_payload(payload: dict[str, object], field: str) -> str:
+    """Read one optional string field from compatible persisted records."""
+    value = payload.get(field, "")
+    if not isinstance(value, str):
+        raise ValueError(f"goal record {field} must be a string")
+    return value
 
 
 def _open_asks_from_payload(payload: dict[str, object]) -> tuple[str, ...]:
@@ -310,7 +340,11 @@ def _goal_history_from_payload(payload: dict[str, object]) -> tuple[dict[str, st
 
 
 def load_goals(root: Path | None = None) -> list[GoalRecord]:
-    """Load stored records; a missing store has no recorded lanes."""
+    """Load records, backfilling legacy enrollment anchors in memory.
+
+    Records written before enrollment anchors existed use their current
+    ``done_when`` once, and persist that normalized anchor on their next write.
+    """
     path = goals_path(root)
     try:
         payload: Any = json.loads(path.read_text(encoding="utf-8"))
@@ -321,7 +355,10 @@ def load_goals(root: Path | None = None) -> list[GoalRecord]:
     raw_goals = payload.get("goals")
     if not isinstance(raw_goals, list):
         raise ValueError("goals.json goals must be a list")
-    return [_record_from_dict(item) for item in raw_goals]
+    document_updated_at = payload.get("updated_at", "")
+    if not isinstance(document_updated_at, str):
+        raise ValueError("goals.json updated_at must be a string")
+    return [_record_from_dict(item, legacy_enrolled_at=document_updated_at) for item in raw_goals]
 
 
 def _write_goals(root: Path | None, records: list[GoalRecord]) -> None:
@@ -358,7 +395,16 @@ def upsert_goal(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = F
     return stored
 
 
-def _upsert_goal_locked(root: Path | None, rec: GoalRecord, *, clear_open_asks: bool = False) -> GoalRecord:
+def _upsert_goal_locked(
+    root: Path | None,
+    rec: GoalRecord,
+    *,
+    clear_open_asks: bool = False,
+    allow_strategic_change: bool = False,
+    allow_goal_metadata_change: bool = False,
+    allow_done_transition: bool = False,
+    mutation_time: str | None = None,
+) -> GoalRecord:
     """The body of ``upsert_goal``, assuming the caller already holds
     ``_goal_store_lock``. Callers that must read-then-modify an existing
     record (``add_ask``, ``resolve_ask``, ``hold_goal``, ``resume_goal``,
@@ -370,10 +416,40 @@ def _upsert_goal_locked(root: Path | None, rec: GoalRecord, *, clear_open_asks: 
     leave a real window between the caller's own read and the write. See
     docs/SOL-ADVERSARIAL-REVIEW finding #9.
     """
-    existing = get_goal(root, rec.session_ref)
-    if existing is not None and not _strategic_fields_match(existing, rec):
+    records = load_goals(root)
+    existing = next((record for record in records if record.session_ref == rec.session_ref), None)
+    if existing is not None and not _strategic_fields_match(existing, rec) and not allow_strategic_change:
         raise GoalRedirectRequiredError("strategic goal fields changed; use chitra-goals redirect --reason ...")
-    now = _utc_now()
+    now = _utc_now() if mutation_time is None else mutation_time
+    derived_lane_id = lane_id_from_session_ref(rec.session_ref)
+    lane_id = derived_lane_id
+    if existing is not None:
+        if rec.lane_id.strip() and rec.lane_id.strip() != existing.lane_id:
+            raise GoalValidationError("lane_id is immutable once a goal is enrolled")
+        lane_id = existing.lane_id
+        if rec.enrolled_done_when and rec.enrolled_done_when != existing.enrolled_done_when:
+            raise EnrolledScopeImmutableError("enrolled_done_when is immutable once a goal is enrolled")
+        if rec.enrolled_at and rec.enrolled_at != existing.enrolled_at:
+            raise EnrolledScopeImmutableError("enrolled_at is immutable once a goal is enrolled")
+        enrolled_done_when = existing.enrolled_done_when
+        enrolled_at = existing.enrolled_at
+    else:
+        if rec.lane_id.strip() and rec.lane_id.strip() != derived_lane_id:
+            raise GoalValidationError("lane_id must be derived from the durable session name")
+        if rec.enrolled_done_when and rec.enrolled_done_when != rec.done_when:
+            raise EnrolledScopeImmutableError("enrolled_done_when must equal done_when at first enrollment")
+        enrolled_done_when = rec.done_when
+        enrolled_at = now
+    conflicting_lane = next(
+        (record for record in records if record.session_ref != rec.session_ref and record.lane_id == lane_id),
+        None,
+    )
+    if conflicting_lane is not None:
+        raise GoalRedirectRequiredError(
+            f"lane {lane_id!r} already has an open goal at {conflicting_lane.session_ref}; use chitra-goals redirect --reason ..."
+        )
+    if rec.status in DONE_STATUSES and (existing is None or rec.status != existing.status) and not allow_done_transition:
+        raise GoalValidationError("done-* status transitions require the completion gate")
     open_asks = rec.open_asks
     if existing is not None and not open_asks and existing.open_asks and not clear_open_asks:
         open_asks = existing.open_asks
@@ -388,10 +464,13 @@ def _upsert_goal_locked(root: Path | None, rec: GoalRecord, *, clear_open_asks: 
         done_when=rec.done_when,
         source=rec.source,
         status=rec.status,
+        lane_id=lane_id,
+        enrolled_done_when=enrolled_done_when,
+        enrolled_at=enrolled_at,
         intent=rec.intent,
         scope=rec.scope,
-        goal_version=existing.goal_version if existing is not None else rec.goal_version,
-        goal_history=existing.goal_history if existing is not None else rec.goal_history,
+        goal_version=(rec.goal_version if existing is None or allow_goal_metadata_change else existing.goal_version),
+        goal_history=(rec.goal_history if existing is None or allow_goal_metadata_change else existing.goal_history),
         now=rec.now,
         last_verified=rec.last_verified,
         created_at=existing.created_at if existing is not None else now,
@@ -401,7 +480,7 @@ def _upsert_goal_locked(root: Path | None, rec: GoalRecord, *, clear_open_asks: 
         hold_reason=hold_reason,
         resume_at=resume_at,
     )
-    records = [record for record in load_goals(root) if record.session_ref != rec.session_ref]
+    records = [record for record in records if record.session_ref != rec.session_ref]
     records.append(stored)
     _write_goals(root, records)
     return stored
@@ -410,8 +489,7 @@ def _upsert_goal_locked(root: Path | None, rec: GoalRecord, *, clear_open_asks: 
 def _strategic_fields_match(left: GoalRecord, right: GoalRecord) -> bool:
     """Compare strategic fields while treating whitespace-only revisions alike."""
     return all(
-        getattr(left, field).strip() == getattr(right, field).strip()
-        for field in ("goal", "done_when", "intent", "scope", "source")
+        getattr(left, field).strip() == getattr(right, field).strip() for field in ("goal", "done_when", "intent", "scope", "source")
     )
 
 
@@ -440,6 +518,8 @@ def redirect_goal(
             intent=existing.intent if intent is None else intent,
             scope=existing.scope if scope is None else scope,
             source=existing.source if source is None else source,
+            status="working" if existing.status in DONE_STATUSES else existing.status,
+            last_verified="" if existing.status in DONE_STATUSES else existing.last_verified,
         )
         if _strategic_fields_match(existing, redirected):
             raise ValueError("redirect must change at least one strategic field")
@@ -455,16 +535,20 @@ def redirect_goal(
             "revised_at": revised_at,
             "reason": reason,
         }
-        stored = replace(
+        candidate = replace(
             redirected,
             goal_version=existing.goal_version + 1,
             goal_history=(*existing.goal_history, history_entry),
             created_at=existing.created_at,
             updated_at=revised_at,
         )
-        records = [record for record in load_goals(root) if record.session_ref != session_ref]
-        records.append(stored)
-        _write_goals(root, records)
+        stored = _upsert_goal_locked(
+            root,
+            candidate,
+            allow_strategic_change=True,
+            allow_goal_metadata_change=True,
+            mutation_time=revised_at,
+        )
     logger.info("goal_mutated", session_ref=session_ref, action="redirect")
     return stored
 
@@ -495,10 +579,13 @@ def record_review_restart(
             "revised_at": _utc_now(),
             "reason": "goal redirected during watched-session review; automatically restarted with one reviewer",
         }
-        stored = replace(existing, goal_history=(*existing.goal_history, event), updated_at=_utc_now())
-        records = [record for record in load_goals(root) if record.session_ref != session_ref]
-        records.append(stored)
-        _write_goals(root, records)
+        revised_at = event["revised_at"]
+        stored = _upsert_goal_locked(
+            root,
+            replace(existing, goal_history=(*existing.goal_history, event), updated_at=revised_at),
+            allow_goal_metadata_change=True,
+            mutation_time=revised_at,
+        )
     logger.info("goal_review_restarted", session_ref=session_ref, behavior_sha256=behavior_sha256)
     return stored
 
@@ -512,6 +599,8 @@ def update_now(
     last_verified: str | None = None,
 ) -> GoalRecord:
     """Update only the current tactical state of an existing goal record."""
+    if status in DONE_STATUSES:
+        raise GoalValidationError("update_now cannot set a done-* status; use the completion-gate path")
     with _goal_store_lock(root):
         existing = get_goal(root, session_ref)
         if existing is None:
@@ -526,6 +615,27 @@ def update_now(
             ),
         )
     logger.info("goal_mutated", session_ref=stored.session_ref, action="upsert")
+    return stored
+
+
+def mark_completion_gate_passed(
+    root: Path | None,
+    session_ref: str,
+    *,
+    now: str,
+    last_verified: str,
+) -> GoalRecord:
+    """Record Watchd's already-passed completion audit and goal review."""
+    with _goal_store_lock(root):
+        existing = get_goal(root, session_ref)
+        if existing is None:
+            raise GoalNotFoundError(session_ref)
+        stored = _upsert_goal_locked(
+            root,
+            replace(existing, now=now, status="done-pending-close", last_verified=last_verified),
+            allow_done_transition=True,
+        )
+    logger.info("goal_mutated", session_ref=stored.session_ref, action="completion-gate-passed")
     return stored
 
 
@@ -638,6 +748,23 @@ def list_goals(root: Path | None = None) -> list[GoalRecord]:
     return load_goals(root)
 
 
+def descope_delta(record: GoalRecord) -> tuple[RequiredItem, ...]:
+    """Return every enrolled/history item absent from the current condition."""
+    return _recorded_descopes(
+        record.enrolled_done_when or record.done_when,
+        record.done_when,
+        goal_history=record.goal_history,
+    )
+
+
+def done_when_with_delta(record: GoalRecord) -> str:
+    """Render current conditions without hiding any dropped enrolled items."""
+    dropped = descope_delta(record)
+    if not dropped:
+        return record.done_when
+    return f"{record.done_when} (dropping: {', '.join(item.text for item in dropped)})"
+
+
 def close_goal(
     root: Path | None,
     session_ref: str,
@@ -662,8 +789,9 @@ def close_goal(
             raise GoalNotFoundError(session_ref)
         if not administrative:
             require_close_inventory(
-                closed.done_when,
+                closed.enrolled_done_when,
                 delivered_items,
+                current_done_when=closed.done_when,
                 evidence=completion_evidence,
                 close_notes=close_notes,
                 operator_acknowledged_items=operator_acknowledged_items,
