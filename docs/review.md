@@ -55,17 +55,13 @@ absence of verification as permanent.
 
 ### Design decisions and why
 
-- **`taxonomy.json` as packaged data, not a Python literal.** The ruleset is
-  declarative data (24 `code`/`cue`/`disposition` triples), not behavior.
-  Keeping it as JSON next to a thin typed loader (`taxonomy.py`) means a
-  future update to the ruleset is a data-only diff, and the loader's
-  Pydantic validation still catches malformed entries at load time.
-- **Only 2 of 24 codes are operationalized.** `evaluate_completion_claim`
-  only acts on `DEFERRAL_STUB` (todo residue + deferral-language matching)
-  and `FAKE_DONE`-style patterns (the deploy/live-verify evidence-gap
-  check). The other 22 codes are shipped for completeness and future
-  extension, not silently assumed to be covered. This is stated explicitly
-  in `docs/evasion-taxonomy.md` rather than left implicit.
+- **`taxonomy.json` contains the operational subset.** The packaged data has
+  only the `DEFERRAL_STUB` and `FAKE_DONE` `code`/`cue` entries validated by
+  the thin typed loader (`taxonomy.py`).
+- **The other 22 codes are documentation only.** Their cues and originating
+  dispositions remain in `docs/evasion-taxonomy.md`; they do not imply
+  runtime coverage. `evaluate_completion_claim` acts only on todo residue,
+  fixed deferral-language matching, and deploy/live-verify evidence gaps.
 - **`CompletionClaimEvent` is a new, narrow enum, not an addition to an
   existing one.** `triaged.py` has no formal event-type enum today — it
   parses opaque `<ts> <lane> <text>` lines with no typed classification.

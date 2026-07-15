@@ -10,7 +10,6 @@ an LLM.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import threading
@@ -22,6 +21,7 @@ from typing import Literal
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
+from chitra._fsio import env_path, write_json_atomic
 from chitra.account_registry import RegistryEntry, load_registry
 from chitra.goals import (
     LOAD_SHED_HOLD_REASON_PREFIX,
@@ -154,11 +154,6 @@ class SweepdConfig:
     poll_seconds: float
 
 
-def _env_path(name: str, default: Path) -> Path:
-    """Resolve an optional path override without changing the state default."""
-    return Path(os.environ.get(name, str(default))).expanduser()
-
-
 def _env_positive_float(name: str, default: float) -> float:
     """Resolve a positive interval from the environment or use ``default``."""
     raw = os.environ.get(name, "").strip()
@@ -183,11 +178,11 @@ def resolve_config(
 ) -> SweepdConfig:
     """Resolve CLI arguments, then explicit environment overrides, then defaults."""
     resolved_state_dir = state_dir or default_state_dir()
-    resolved_digest_path = digest_path or _env_path("CHITRA_SWEEP_DIGEST_PATH", resolved_state_dir / DIGEST_FILENAME)
-    resolved_snapshot_path = snapshot_path or _env_path(
+    resolved_digest_path = digest_path or env_path("CHITRA_SWEEP_DIGEST_PATH", resolved_state_dir / DIGEST_FILENAME)
+    resolved_snapshot_path = snapshot_path or env_path(
         "CHITRA_SWEEP_SNAPSHOT_PATH", resolved_state_dir / SNAPSHOT_FILENAME
     )
-    resolved_flags_path = flags_path or _env_path("CHITRA_SWEEP_FLAGS_PATH", resolved_state_dir / FLAGS_FILENAME)
+    resolved_flags_path = flags_path or env_path("CHITRA_SWEEP_FLAGS_PATH", resolved_state_dir / FLAGS_FILENAME)
     resolved_poll_seconds = poll_seconds if poll_seconds is not None else _env_positive_float(
         "CHITRA_SWEEP_POLL_SECONDS", DEFAULT_POLL_SECONDS
     )
@@ -368,12 +363,12 @@ def load_snapshot(path: Path) -> SweepSnapshot:
 
 def _write_model(path: Path, model: BaseModel) -> None:
     """Atomically persist one typed JSON document."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(model.model_dump(mode="json", by_alias=True), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    write_json_atomic(
+        path,
+        model.model_dump(mode="json", by_alias=True),
+        temporary_path=path.with_name(f".{path.name}.tmp"),
+        cleanup_on_error=False,
     )
-    temporary.replace(path)
 
 
 def save_snapshot(path: Path, snapshot: SweepSnapshot) -> None:

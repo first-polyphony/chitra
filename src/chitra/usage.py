@@ -17,8 +17,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import Annotated, Literal, Self, cast
 
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationInfo, model_validator
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+
+from chitra._fsio import parse_iso8601
 from chitra.policy_config import UsagePolicy, load_policy_config
 
 SCHEMA = "chitra.usage.v1"
@@ -35,15 +39,28 @@ class CodexSnapshotError(RuntimeError):
     """Raised when the local Codex app-server cannot provide a usage snapshot."""
 
 
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=ConfigDict(strict=True))
 class UsageWindow:
     """One provider usage window expressed as a percentage and reset epoch."""
 
-    pct: float
+    pct: Annotated[float, Field(ge=0, le=100)]
     resets_at: int
 
     @classmethod
     def from_dict(cls, payload: object, *, field_name: str) -> UsageWindow:
+        return _USAGE_WINDOW_ADAPTER.validate_python(
+            payload,
+            strict=False,
+            context={"persisted": True, "field_name": field_name},
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_persisted(cls, payload: object, info: ValidationInfo) -> object:
+        """Retain numeric bounds and bool rejection at the JSON boundary."""
+        if not info.context or not info.context.get("persisted"):
+            return payload
+        field_name = str(info.context.get("field_name", "window"))
         if not isinstance(payload, dict):
             raise ValueError(f"usage snapshot {field_name} must be an object or null")
         pct = payload.get("pct")
@@ -52,13 +69,16 @@ class UsageWindow:
             raise ValueError(f"usage snapshot {field_name}.pct must be a number from 0 through 100")
         if isinstance(resets_at, bool) or not isinstance(resets_at, int):
             raise ValueError(f"usage snapshot {field_name}.resets_at must be an integer epoch")
-        return cls(pct=float(pct), resets_at=resets_at)
+        return {**payload, "pct": float(pct), "resets_at": resets_at}
 
     def to_dict(self) -> dict[str, float | int]:
-        return {"pct": self.pct, "resets_at": self.resets_at}
+        return cast(dict[str, float | int], _USAGE_WINDOW_ADAPTER.dump_python(self, mode="json"))
 
 
-@dataclass(frozen=True, slots=True)
+_USAGE_WINDOW_ADAPTER = TypeAdapter(UsageWindow)
+
+
+@pydantic_dataclass(frozen=True, slots=True, config=ConfigDict(strict=True))
 class UsageSnapshot:
     """A strict on-disk ``chitra.usage.v1`` provider usage snapshot."""
 
@@ -72,6 +92,14 @@ class UsageSnapshot:
 
     @classmethod
     def from_dict(cls, payload: object) -> UsageSnapshot:
+        return _USAGE_SNAPSHOT_ADAPTER.validate_python(payload, strict=False, context={"persisted": True})
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_persisted(cls, payload: object, info: ValidationInfo) -> object:
+        """Validate the v1 document while retaining legacy field defaults."""
+        if not info.context or not info.context.get("persisted"):
+            return payload
         if not isinstance(payload, dict):
             raise ValueError("usage snapshot must be an object")
         if payload.get("schema") != SCHEMA:
@@ -79,34 +107,35 @@ class UsageSnapshot:
         kind = payload.get("kind")
         if kind not in ("claude", "codex"):
             raise ValueError("usage snapshot kind must be claude or codex")
-        values: dict[str, str] = {}
+        normalized = dict(payload)
         for field in ("ts", "session_id", "tmux_session"):
             value = payload.get(field)
             if not isinstance(value, str):
                 raise ValueError(f"usage snapshot {field} must be a string")
-            values[field] = value
-        _parse_utc_timestamp(values["ts"])
-        return cls(
-            kind=cast(UsageKind, kind),
-            ts=values["ts"],
-            session_id=values["session_id"],
-            tmux_session=values["tmux_session"],
-            five_hour=_window_from_payload(payload, "five_hour"),
-            seven_day=_window_from_payload(payload, "seven_day"),
-            account=_account_from_payload(payload),
-        )
+            normalized[field] = value
+        account = payload.get("account", "")
+        if not isinstance(account, str):
+            raise ValueError("usage snapshot account must be a string")
+        normalized["account"] = account
+        for field_name in ("five_hour", "seven_day"):
+            raw_window = payload.get(field_name)
+            normalized[field_name] = (
+                None if raw_window is None else UsageWindow.from_dict(raw_window, field_name=field_name)
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_persisted_timestamp(self, info: ValidationInfo) -> Self:
+        if info.context and info.context.get("persisted"):
+            _parse_utc_timestamp(self.ts)
+        return self
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": SCHEMA,
-            "kind": self.kind,
-            "ts": self.ts,
-            "session_id": self.session_id,
-            "tmux_session": self.tmux_session,
-            "account": self.account,
-            "five_hour": None if self.five_hour is None else self.five_hour.to_dict(),
-            "seven_day": None if self.seven_day is None else self.seven_day.to_dict(),
-        }
+        fields = cast(dict[str, object], _USAGE_SNAPSHOT_ADAPTER.dump_python(self, mode="json"))
+        return {"schema": SCHEMA, **fields}
+
+
+_USAGE_SNAPSHOT_ADAPTER = TypeAdapter(UsageSnapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,28 +164,12 @@ class AccountedVerdict:
 
 def _parse_utc_timestamp(value: str) -> datetime:
     """Parse an ISO8601 timestamp whose offset is explicitly UTC."""
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("usage snapshot ts must be an ISO8601-UTC datetime") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise ValueError("usage snapshot ts must be an ISO8601-UTC datetime")
-    return parsed.astimezone(UTC)
-
-
-def _window_from_payload(payload: dict[str, object], field_name: str) -> UsageWindow | None:
-    raw_window = payload.get(field_name)
-    if raw_window is None:
-        return None
-    return UsageWindow.from_dict(raw_window, field_name=field_name)
-
-
-def _account_from_payload(payload: dict[str, object]) -> str:
-    """Read optional account identity retained by older persisted snapshots."""
-    account = payload.get("account", "")
-    if not isinstance(account, str):
-        raise ValueError("usage snapshot account must be a string")
-    return account
+    return parse_iso8601(
+        value,
+        invalid_message="usage snapshot ts must be an ISO8601-UTC datetime",
+        require_utc=True,
+        normalize_utc=True,
+    )
 
 
 def read_snapshots(
@@ -202,23 +215,15 @@ def _binding_window(
 def evaluate(
     snapshot: UsageSnapshot,
     *,
-    pause_5h: float | None = None,
-    pause_7d: float | None = None,
-    warn_5h: float | None = None,
-    warn_7d: float | None = None,
     policy: UsagePolicy | None = None,
 ) -> Verdict:
     """Return the pure deterministic policy verdict for one snapshot."""
     configured = DEFAULT_USAGE_POLICY if policy is None else policy
-    resolved_pause_5h = configured.pause_5h_pct if pause_5h is None else pause_5h
-    resolved_pause_7d = configured.pause_7d_pct if pause_7d is None else pause_7d
-    resolved_warn_5h = configured.warn_5h_pct if warn_5h is None else warn_5h
-    resolved_warn_7d = configured.warn_7d_pct if warn_7d is None else warn_7d
     pause_binding = _binding_window(
         snapshot.five_hour,
         snapshot.seven_day,
-        five_hour_threshold=resolved_pause_5h,
-        seven_day_threshold=resolved_pause_7d,
+        five_hour_threshold=configured.pause_5h_pct,
+        seven_day_threshold=configured.pause_7d_pct,
     )
     if pause_binding:
         window = snapshot.five_hour if pause_binding == "5h" else snapshot.seven_day
@@ -227,8 +232,8 @@ def evaluate(
     warn_binding = _binding_window(
         snapshot.five_hour,
         snapshot.seven_day,
-        five_hour_threshold=resolved_warn_5h,
-        seven_day_threshold=resolved_warn_7d,
+        five_hour_threshold=configured.warn_5h_pct,
+        seven_day_threshold=configured.warn_7d_pct,
     )
     if warn_binding:
         return Verdict(level="approaching", binding_window=warn_binding, resume_at_epoch=0)
@@ -523,26 +528,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     evaluate_command.add_argument("--codex-bin", type=Path, default=Path("codex"))
     evaluate_command.add_argument("--staleness-seconds", type=int, default=1200)
     evaluate_command.add_argument("--policy-config", type=Path)
-    for option in ("pause-5h", "pause-7d", "warn-5h", "warn-7d"):
-        evaluate_command.add_argument(f"--{option}", type=float, default=None)
 
     policy_command = commands.add_parser("policy", help="Print the effective usage policy as JSON.")
     policy_command.add_argument("--policy-config", type=Path)
     return parser
-
-
-def _usage_policy_with_cli_overrides(args: argparse.Namespace) -> UsagePolicy:
-    """Load one policy file and apply explicit command-line threshold overrides."""
-    configured = load_policy_config(args.policy_config).usage
-    return UsagePolicy.model_validate(
-        {
-            **configured.model_dump(),
-            "pause_5h_pct": configured.pause_5h_pct if args.pause_5h is None else args.pause_5h,
-            "pause_7d_pct": configured.pause_7d_pct if args.pause_7d is None else args.pause_7d,
-            "warn_5h_pct": configured.warn_5h_pct if args.warn_5h is None else args.warn_5h,
-            "warn_7d_pct": configured.warn_7d_pct if args.warn_7d is None else args.warn_7d,
-        }
-    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -561,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "policy":
             print(json.dumps(load_policy_config(args.policy_config).usage.model_dump(), indent=2, sort_keys=True))
         else:
-            policy = _usage_policy_with_cli_overrides(args)
+            policy = load_policy_config(args.policy_config).usage
             snapshots = read_snapshots(args.dir, staleness_seconds=args.staleness_seconds)
             if args.codex:
                 snapshots.append((codex_snapshot(codex_bin=args.codex_bin), True))

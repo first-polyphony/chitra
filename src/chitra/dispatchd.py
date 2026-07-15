@@ -95,25 +95,24 @@ from pathlib import Path
 import structlog
 
 from . import ledger as ledger_mod
+from ._fsio import write_json_atomic
 from .completion_gate import evaluate_completion_claim, is_completion_claim
 from .dispatch import (
     DISPATCH_VERIFY_WAIT_SECONDS,
-    DispatchOrder,
-    DispatchResult,
-    DispatchStatus,
     DispatchTuning,
     LaneLock,
     LaneLockError,
     TmuxRunner,
+    _pid_alive,
     dispatch_to_tmux,
     nudge_confirmation_marker,
     transcript_confirms_nudge,
 )
 from .goals import LOAD_SHED_HOLD_REASON_PREFIX, RATE_LIMIT_HOLD_REASON_PREFIX, get_goal
+from .orders import DispatchOrder, DispatchResult, DispatchStatus
 from .policy_config import PolicyConfig, load_policy_config
 from .routing_config import RoutingConfig, load_routing_config, resolve_route, resolve_routing_hint
 from .state_paths import default_attestation_ledger_path, default_ledger_key_path, default_ledger_path, default_queue_dir
-from .taxonomy import load_taxonomy
 
 logger = structlog.get_logger(__name__)
 
@@ -182,20 +181,34 @@ def session_scope_violation(
 def _write_result_atomic(results_dir: Path, result: DispatchResult) -> Path:
     """Write a result JSON atomically (write to temp, rename)."""
     target = results_dir / f"{result.order_id}.json"
-    tmp = results_dir / f".{result.order_id}.json.tmp"
-    tmp.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-    tmp.replace(target)
+    write_json_atomic(
+        target,
+        result.model_dump(mode="json"),
+        temporary_path=results_dir / f".{result.order_id}.json.tmp",
+        trailing_newline=False,
+        sort_keys=False,
+        cleanup_on_error=False,
+    )
     return target
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+def _finalize_claimed_order(
+    claimed_path: Path,
+    *,
+    results_dir: Path,
+    destination_dir: Path,
+    result: DispatchResult,
+    suppress_move_errors: bool = False,
+) -> DispatchResult:
+    """Persist one terminal result and move its claimed order exactly once."""
+    _write_result_atomic(results_dir, result)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    if suppress_move_errors:
+        with contextlib.suppress(OSError):
+            claimed_path.replace(destination_dir / claimed_path.name)
+    else:
+        claimed_path.replace(destination_dir / claimed_path.name)
+    return result
 
 
 def _reserve_owner_marker(in_flight_dir: Path, order_id: str) -> Path | None:
@@ -454,33 +467,27 @@ def _process_claimed_order(
             status=DispatchStatus.FAILED,
             reason=f"invalid-order: {exc}",
         )
-        _write_result_atomic(results_dir, result)
         destination = invalid_dir or processed_dir.parent / "invalid"
-        destination.mkdir(parents=True, exist_ok=True)
-        with contextlib.suppress(OSError):
-            claimed_path.replace(destination / claimed_path.name)
-        return result
+        return _finalize_claimed_order(
+            claimed_path,
+            results_dir=results_dir,
+            destination_dir=destination,
+            result=result,
+            suppress_move_errors=True,
+        )
 
-    routing_hint_source = "explicit" if order.routing_hint is not None else "unset"
-    resolved_model: str | None = None
-    resolved_harness: str | None = None
     resolved_zdr = False
     if order.routing_hint is None and order.task_type is not None:
         # A structured ``routes`` entry wins over a flat ``defaults`` hint:
-        # chitra RESOLVES model+harness (+zdr) and records the resolved
-        # selection + "route" provenance, closing the ROADMAP line-97 gap.
+        # chitra resolves model+harness (+zdr) into an opaque routing hint.
         route = resolve_route(order.task_type, routing_config)
         if route is not None:
             order.routing_hint = route.routing_hint
-            resolved_model = route.model
-            resolved_harness = route.harness
             resolved_zdr = route.zdr
-            routing_hint_source = "route"
         else:
             resolved_hint = resolve_routing_hint(order.task_type, routing_config)
             if resolved_hint is not None:
                 order.routing_hint = resolved_hint
-                routing_hint_source = "config"
 
     existing_result = results_dir / f"{order.order_id}.json"
     if existing_result.exists():
@@ -508,10 +515,12 @@ def _process_claimed_order(
                 reason=f"attestation-log-failed: {exc}",
                 decision_attestation_id=attestation_id,
             )
-            _write_result_atomic(results_dir, result)
-            processed_dir.mkdir(parents=True, exist_ok=True)
-            claimed_path.replace(processed_dir / claimed_path.name)
-            return result
+            return _finalize_claimed_order(
+                claimed_path,
+                results_dir=results_dir,
+                destination_dir=processed_dir,
+                result=result,
+            )
 
     scope_violation = session_scope_violation(
         order.session_ref,
@@ -532,16 +541,15 @@ def _process_claimed_order(
             reason=scope_violation,
             routing_hint=order.routing_hint,
             task_type=order.task_type,
-            routing_hint_source=routing_hint_source,
-            resolved_model=resolved_model,
-            resolved_harness=resolved_harness,
             resolved_zdr=resolved_zdr,
             decision_attestation_id=attestation_id,
         )
-        _write_result_atomic(results_dir, result)
-        processed_dir.mkdir(parents=True, exist_ok=True)
-        claimed_path.replace(processed_dir / claimed_path.name)
-        return result
+        return _finalize_claimed_order(
+            claimed_path,
+            results_dir=results_dir,
+            destination_dir=processed_dir,
+            result=result,
+        )
 
     # Completion claims are recognized at this boundary even when a caller
     # omitted todo metadata. A disputed claim is never delivered as an
@@ -558,7 +566,6 @@ def _process_claimed_order(
             order.completion_todo_items or [],
             order.nudge,
             order.completion_evidence,
-            load_taxonomy(policy.completion_gate.taxonomy_path),
             policy=policy.completion_gate,
             open_asks=order.completion_open_asks,
             blockers=order.completion_blockers,
@@ -577,16 +584,15 @@ def _process_claimed_order(
                 reason=audit.summary,
                 routing_hint=order.routing_hint,
                 task_type=order.task_type,
-                routing_hint_source=routing_hint_source,
-                resolved_model=resolved_model,
-                resolved_harness=resolved_harness,
                 resolved_zdr=resolved_zdr,
                 decision_attestation_id=attestation_id,
             )
-            _write_result_atomic(results_dir, result)
-            processed_dir.mkdir(parents=True, exist_ok=True)
-            claimed_path.replace(processed_dir / claimed_path.name)
-            return result
+            return _finalize_claimed_order(
+                claimed_path,
+                results_dir=results_dir,
+                destination_dir=processed_dir,
+                result=result,
+            )
         logger.info(
             "dispatchd_completion_clean",
             order_id=order.order_id,
@@ -604,17 +610,17 @@ def _process_claimed_order(
             session_ref=order.session_ref,
             routing_hint=order.routing_hint,
             task_type=order.task_type,
-            routing_hint_source=routing_hint_source,
-            resolved_model=resolved_model,
-            resolved_harness=resolved_harness,
             resolved_zdr=resolved_zdr,
             status=DispatchStatus.BLOCKED,
             reason=f"lane lock unavailable: {exc}",
             decision_attestation_id=attestation_id,
         )
-        _write_result_atomic(results_dir, result)
-        claimed_path.replace(processed_dir / claimed_path.name)
-        return result
+        return _finalize_claimed_order(
+            claimed_path,
+            results_dir=results_dir,
+            destination_dir=processed_dir,
+            result=result,
+        )
 
     try:
         # Lane-lock recheck: a concurrent order for the same session could
@@ -656,9 +662,6 @@ def _process_claimed_order(
                 ),
                 routing_hint=order.routing_hint,
                 task_type=order.task_type,
-                routing_hint_source=routing_hint_source,
-                resolved_model=resolved_model,
-                resolved_harness=resolved_harness,
                 resolved_zdr=resolved_zdr,
             )
 
@@ -702,10 +705,7 @@ def _process_claimed_order(
         lock.release()
 
     result.task_type = order.task_type
-    result.routing_hint_source = routing_hint_source
     result.routing_hint = order.routing_hint
-    result.resolved_model = resolved_model
-    result.resolved_harness = resolved_harness
     result.resolved_zdr = resolved_zdr
     result.decision_attestation_id = attestation_id
     logger.info(
@@ -735,9 +735,6 @@ def _process_claimed_order(
                 tag=order.tag,
                 routing_hint=order.routing_hint,
                 task_type=order.task_type,
-                routing_hint_source=routing_hint_source,
-                resolved_model=resolved_model,
-                resolved_harness=resolved_harness,
                 resolved_zdr=resolved_zdr,
                 nudge=order.nudge,
                 key=key,
@@ -748,8 +745,12 @@ def _process_claimed_order(
             # that a fully-completed dispatch is never redelivered. This is the one place in the
             # package where fail-loud is overridden, and only for this one documented reason.
             logger.warning("dispatchd_ledger_write_failed", order_id=order.order_id, session_ref=order.session_ref, error=str(exc))
-    _write_result_atomic(results_dir, result)
-    claimed_path.replace(processed_dir / claimed_path.name)
+    _finalize_claimed_order(
+        claimed_path,
+        results_dir=results_dir,
+        destination_dir=processed_dir,
+        result=result,
+    )
     with contextlib.suppress(OSError):
         (in_flight_dir / f".{order.order_id}.nonce").unlink()
     return result

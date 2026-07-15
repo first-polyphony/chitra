@@ -20,16 +20,16 @@ from chitra.completion_gate import (
 from chitra.dispatch import DispatchOrder, DispatchStatus
 from chitra.dispatchd import process_one_order
 from chitra.policy_config import GatePolicy
-from chitra.taxonomy import Disposition, TaxonomyEntry, load_taxonomy
+from chitra.taxonomy import TaxonomyEntry, load_taxonomy
 
 # ---------------------------------------------------------------------------
 # taxonomy loading
 # ---------------------------------------------------------------------------
 
 
-def test_load_taxonomy_has_exactly_24_entries() -> None:
+def test_load_taxonomy_has_exactly_the_operationalized_entries() -> None:
     taxonomy = load_taxonomy()
-    assert len(taxonomy) == 24
+    assert {entry.code for entry in taxonomy} == {"DEFERRAL_STUB", "FAKE_DONE"}
 
 
 def test_load_taxonomy_entries_are_typed_and_have_required_fields() -> None:
@@ -38,7 +38,6 @@ def test_load_taxonomy_entries_are_typed_and_have_required_fields() -> None:
         assert isinstance(entry, TaxonomyEntry)
         assert entry.code
         assert entry.cue
-        assert isinstance(entry.disposition, Disposition)
 
 
 def test_load_taxonomy_contains_deferral_stub_and_fake_done() -> None:
@@ -54,7 +53,7 @@ def test_load_taxonomy_codes_are_unique() -> None:
 
 def test_load_taxonomy_can_validate_a_configured_replacement(tmp_path: Path) -> None:
     path = tmp_path / "taxonomy.json"
-    path.write_text(json.dumps({"entries": [{"code": "DEFERRAL_STUB", "cue": "custom", "disposition": "DECISION"}]}), encoding="utf-8")
+    path.write_text(json.dumps({"entries": [{"code": "DEFERRAL_STUB", "cue": "custom"}]}), encoding="utf-8")
     taxonomy = load_taxonomy(path)
     assert taxonomy[0].cue == "custom"
 
@@ -90,19 +89,13 @@ def test_check_todo_residue_empty_when_all_done() -> None:
     ],
 )
 def test_scan_deferral_language_matches_real_cue_derived_phrases(text: str) -> None:
-    matches = scan_deferral_language(text, load_taxonomy())
+    matches = scan_deferral_language(text)
     assert matches
     assert all(m["code"] == "DEFERRAL_STUB" for m in matches)
 
 
 def test_scan_deferral_language_no_match_on_clean_text() -> None:
-    matches = scan_deferral_language("All tests pass, deployed and verified live.", load_taxonomy())
-    assert matches == []
-
-
-def test_scan_deferral_language_returns_empty_list_when_taxonomy_lacks_operationalized_codes() -> None:
-    unrelated = [TaxonomyEntry(code="SOMETHING_ELSE", cue="n/a", disposition=Disposition.NUDGE)]
-    matches = scan_deferral_language("TODO: finish this", unrelated)
+    matches = scan_deferral_language("All tests pass, deployed and verified live.")
     assert matches == []
 
 
@@ -119,7 +112,7 @@ GOOD_EVIDENCE = [
 
 
 def test_completion_claim_without_labeled_brief_and_with_real_evidence_is_clean() -> None:
-    audit = evaluate_completion_claim([], GOOD_CLAIM, GOOD_EVIDENCE, load_taxonomy())
+    audit = evaluate_completion_claim([], GOOD_CLAIM, GOOD_EVIDENCE)
     assert audit.verdict == "CLEAN"
     assert audit.todo_residue == []
     assert audit.deferral_matches == []
@@ -129,7 +122,7 @@ def test_completion_claim_without_labeled_brief_and_with_real_evidence_is_clean(
 
 
 def test_done_claim_with_no_evidence_is_flagged_fake_done() -> None:
-    audit = evaluate_completion_claim([], "the feature is done", [], load_taxonomy())
+    audit = evaluate_completion_claim([], "the feature is done", [])
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.evidence_gap is True
     assert "deploy evidence" in audit.summary
@@ -141,7 +134,6 @@ def test_done_claim_with_only_deploy_evidence_still_disputes_missing_live_verify
         [],
         GOOD_CLAIM,
         [CompletionEvidence(kind="deploy", citation="deployed SHA abc1234")],
-        load_taxonomy(),
     )
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.evidence_gap is True
@@ -151,14 +143,14 @@ def test_done_claim_with_only_deploy_evidence_still_disputes_missing_live_verify
 
 def test_open_todo_residue_disputes_even_with_full_evidence() -> None:
     items = [TodoItem(text="finish the migration", status="open")]
-    audit = evaluate_completion_claim(items, GOOD_CLAIM, GOOD_EVIDENCE, load_taxonomy())
+    audit = evaluate_completion_claim(items, GOOD_CLAIM, GOOD_EVIDENCE)
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.todo_residue == ["finish the migration"]
     assert "finish the migration" in audit.summary
 
 
 def test_deferral_language_disputes_even_with_full_evidence_and_no_todos() -> None:
-    audit = evaluate_completion_claim([], GOOD_CLAIM + "\nDone -- you'll need to wire the rest", GOOD_EVIDENCE, load_taxonomy())
+    audit = evaluate_completion_claim([], GOOD_CLAIM + "\nDone -- you'll need to wire the rest", GOOD_EVIDENCE)
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.deferral_matches
 
@@ -168,7 +160,6 @@ def test_deferral_and_evidence_checks_remain_enforcing_without_brief_gate() -> N
         [],
         "Completed, but TODO: deploy and verify this later.",
         [],
-        load_taxonomy(),
     )
 
     assert audit.verdict == "COMPLETION_DISPUTE"
@@ -182,7 +173,6 @@ def test_configured_completion_policy_controls_statuses_phrases_and_evidence() -
         [TodoItem(text="release", status="closed")],
         GOOD_CLAIM,
         [CompletionEvidence(kind="artifact", citation="proof /tmp/release.json", todo_item="release")],
-        load_taxonomy(),
         policy=policy,
     )
     assert audit.verdict == "CLEAN"
@@ -209,7 +199,7 @@ Honest history: the earlier live probe returned HTTP 503 before the fix; see /va
         CompletionEvidence(kind="failure", citation="earlier live probe returned HTTP 503; /var/log/chitra/earlier-503.log"),
     ]
 
-    audit = evaluate_completion_claim(todos, claim, evidence, load_taxonomy())
+    audit = evaluate_completion_claim(todos, claim, evidence)
 
     assert audit.verdict == "CLEAN"
     assert any(item.kind == "failure" and "503" in item.citation for item in evidence)
@@ -224,7 +214,6 @@ It is repaired and covered by tests and protected-CI evidence; no human signed."
         [TodoItem(text="publish the runnable service", status="blocked")],
         claim,
         [CompletionEvidence(kind="live_verify", citation="CI evidence")],
-        load_taxonomy(),
         open_asks=[],
         blockers=[],
     )
@@ -247,7 +236,6 @@ def test_turn_end_without_completion_claim_is_distinct_and_never_clean() -> None
         "I need the exact deployment target before continuing.",
         todo_items=[],
         evidence=[],
-        taxonomy=load_taxonomy(),
     )
     assert audit.condition == "turn_end_without_completion_claim"
     assert audit.completion is None

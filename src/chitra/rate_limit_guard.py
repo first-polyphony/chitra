@@ -103,12 +103,13 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import structlog
 
+from ._fsio import parse_iso8601, write_json_atomic
 from .account_registry import load_registry, update_registry
-from .dispatch import DispatchOrder, DispatchResult, DispatchStatus, transcript_mtime
+from .dispatch import transcript_mtime
 from .dispatchd import requeue_deferred_for_session
 from .goals import (
     LOAD_SHED_HOLD_REASON_PREFIX,
@@ -133,6 +134,7 @@ from .load_shed import (
     rank_shed_candidates,
     sample_pressure,
 )
+from .orders import DispatchOrder, DispatchResult, DispatchStatus
 from .policy_config import PausePolicy, PolicyConfig, UsagePolicy, load_policy_config
 from .rate_limit_state import (
     LoadHostState,
@@ -250,10 +252,6 @@ def _resume_at_iso(resume_at_epoch: int) -> str:
     return datetime.fromtimestamp(resume_at_epoch, UTC).isoformat()
 
 
-def _parse_iso(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
 def _session_ref_for(verdict: AccountedVerdict, *, host: str) -> str | None:
     """Resolve a session_ref from one account-grouped verdict, or None.
 
@@ -274,10 +272,39 @@ def _enqueue(queue_dir: Path, order: DispatchOrder) -> Path:
     orders_dir = queue_dir / "orders"
     orders_dir.mkdir(parents=True, exist_ok=True)
     path = orders_dir / f"{order.order_id}.json"
-    tmp = orders_dir / f".{order.order_id}.json.tmp"
-    tmp.write_text(order.model_dump_json(indent=2), encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(
+        path,
+        order.model_dump(mode="json"),
+        temporary_path=orders_dir / f".{order.order_id}.json.tmp",
+        trailing_newline=False,
+        sort_keys=False,
+        cleanup_on_error=False,
+    )
     return path
+
+
+def _enqueue_guard_order(
+    queue_dir: Path,
+    *,
+    session_ref: str,
+    task_type: str,
+    nudge: str,
+    now: datetime,
+) -> str:
+    """Enqueue one sealed freeze-bypass order and return its fresh id."""
+    order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
+    _enqueue(
+        queue_dir,
+        DispatchOrder(
+            order_id=order_id,
+            session_ref=session_ref,
+            nudge=nudge,
+            task_type=task_type,
+            bypass_rate_limit_freeze=True,
+            created_at=now.isoformat(),
+        ),
+    )
+    return order_id
 
 
 def _read_result(queue_dir: Path, order_id: str) -> DispatchResult | None:
@@ -352,7 +379,7 @@ def _bounded_wait(txn: Transaction, *, deadline_seconds: int, max_attempts: int,
     """No evidence yet: wait quietly until the phase's own deadline, then
     hand off to ``_escalate_or_retry``. Never strands: bounded by
     ``max_attempts``, see that function."""
-    deadline = _parse_iso(txn.deadline_at) if txn.deadline_at else now
+    deadline = parse_iso8601(txn.deadline_at) if txn.deadline_at else now
     if now < deadline:
         return _Advance(txn)
     return _escalate_or_retry(txn, deadline_seconds=deadline_seconds, max_attempts=max_attempts, now=now, waiting_for=waiting_for)
@@ -480,17 +507,12 @@ def _progress_pause_transaction(
     strategy = _pause_strategy(txn.backend)
     if txn.phase == "pause_requested":
         task_type, nudge = strategy.checkpoint(txn)
-        order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
-        _enqueue(
+        order_id = _enqueue_guard_order(
             queue_dir,
-            DispatchOrder(
-                order_id=order_id,
-                session_ref=txn.session_ref,
-                nudge=nudge,
-                task_type=task_type,
-                bypass_rate_limit_freeze=True,
-                created_at=now.isoformat(),
-            ),
+            session_ref=txn.session_ref,
+            task_type=task_type,
+            nudge=nudge,
+            now=now,
         )
         advanced = replace(
             txn,
@@ -521,7 +543,14 @@ def _progress_pause_transaction(
                 now=now,
                 waiting_for=f"checkpoint delivery (last result: {result.status.value})",
             )
-            return _retry_with_fresh_checkpoint(advance, txn, queue_dir=queue_dir, now=now)
+            return _retry_with_fresh_order(
+                advance,
+                txn,
+                order=strategy.checkpoint(txn),
+                order_id_field="checkpoint_order_id",
+                queue_dir=queue_dir,
+                now=now,
+            )
         stop = strategy.stop(txn)
         if stop is None:
             advanced = replace(
@@ -538,17 +567,12 @@ def _progress_pause_transaction(
             )
             return _Advance(advanced, note=f"{txn.session_ref}: Codex checkpoint confirmed sent; verifying pane quiescence")
         stop_task_type, stop_nudge = stop
-        order_id = f"{stop_task_type}-{uuid.uuid4().hex[:12]}"
-        _enqueue(
+        order_id = _enqueue_guard_order(
             queue_dir,
-            DispatchOrder(
-                order_id=order_id,
-                session_ref=txn.session_ref,
-                nudge=stop_nudge,
-                task_type=stop_task_type,
-                bypass_rate_limit_freeze=True,
-                created_at=now.isoformat(),
-            ),
+            session_ref=txn.session_ref,
+            task_type=stop_task_type,
+            nudge=stop_nudge,
+            now=now,
         )
         advanced = replace(
             txn,
@@ -580,7 +604,14 @@ def _progress_pause_transaction(
                 now=now,
                 waiting_for=f"stop-clear delivery (last result: {result.status.value})",
             )
-            return _retry_with_fresh_stop(advance, txn, queue_dir=queue_dir, now=now)
+            return _retry_with_fresh_order(
+                advance,
+                txn,
+                order=strategy.stop(txn),
+                order_id_field="stop_order_id",
+                queue_dir=queue_dir,
+                now=now,
+            )
         transcript_path = result.transcript_path or txn.transcript_path
         advanced = replace(
             txn,
@@ -605,51 +636,35 @@ def _progress_pause_transaction(
     return _Advance(txn)  # "held": nothing left for the pause side to do
 
 
-def _retry_with_fresh_checkpoint(advance: _Advance, original: Transaction, *, queue_dir: Path, now: datetime) -> _Advance:
-    """If ``_escalate_or_retry`` decided to retry (not escalate), the prior
-    checkpoint attempt is presumed genuinely failed (a terminal non-SENT
-    result already proved it) -- re-enqueue a fresh checkpoint order under a
-    new order id so the retry is a real new delivery attempt, not a replay
-    of a dead one."""
+def _retry_with_fresh_order(
+    advance: _Advance,
+    original: Transaction,
+    *,
+    order: tuple[str, str] | None,
+    order_id_field: Literal["checkpoint_order_id", "stop_order_id", "resume_order_id"],
+    queue_dir: Path,
+    now: datetime,
+) -> _Advance:
+    """Re-enqueue a genuinely failed terminal delivery under a fresh id."""
     if advance.txn.escalated or advance.txn.attempts == original.attempts:
         return advance
-    task_type, nudge = _pause_strategy(original.backend).checkpoint(original)
-    order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
-    _enqueue(
-        queue_dir,
-        DispatchOrder(
-            order_id=order_id,
-            session_ref=original.session_ref,
-            nudge=nudge,
-            task_type=task_type,
-            bypass_rate_limit_freeze=True,
-            created_at=now.isoformat(),
-        ),
-    )
-    return _Advance(replace(advance.txn, checkpoint_order_id=order_id), note=advance.note, escalation=advance.escalation)
-
-
-def _retry_with_fresh_stop(advance: _Advance, original: Transaction, *, queue_dir: Path, now: datetime) -> _Advance:
-    """The stop-side counterpart of ``_retry_with_fresh_checkpoint``."""
-    if advance.txn.escalated or advance.txn.attempts == original.attempts:
+    if order is None:
         return advance
-    stop = _pause_strategy(original.backend).stop(original)
-    if stop is None:
-        return advance
-    task_type, nudge = stop
-    order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
-    _enqueue(
+    task_type, nudge = order
+    order_id = _enqueue_guard_order(
         queue_dir,
-        DispatchOrder(
-            order_id=order_id,
-            session_ref=original.session_ref,
-            nudge=nudge,
-            task_type=task_type,
-            bypass_rate_limit_freeze=True,
-            created_at=now.isoformat(),
-        ),
+        session_ref=original.session_ref,
+        task_type=task_type,
+        nudge=nudge,
+        now=now,
     )
-    return _Advance(replace(advance.txn, stop_order_id=order_id), note=advance.note, escalation=advance.escalation)
+    if order_id_field == "checkpoint_order_id":
+        retried = replace(advance.txn, checkpoint_order_id=order_id)
+    elif order_id_field == "stop_order_id":
+        retried = replace(advance.txn, stop_order_id=order_id)
+    else:
+        retried = replace(advance.txn, resume_order_id=order_id)
+    return _Advance(retried, note=advance.note, escalation=advance.escalation)
 
 
 def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, activity_root: Path | None, now: datetime) -> _Advance:
@@ -671,11 +686,11 @@ def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, activity
         token = activity.last_change_at
         if not txn.last_activity_token or token != txn.last_activity_token:
             return _Advance(replace(txn, last_activity_token=token, quiescent_since=now.isoformat(), updated_at=now.isoformat()))
-        quiescent_since = _parse_iso(txn.quiescent_since) if txn.quiescent_since else now
+        quiescent_since = parse_iso8601(txn.quiescent_since) if txn.quiescent_since else now
         if (now - quiescent_since).total_seconds() >= pause_policy.quiescence_quiet_seconds:
             held = replace(txn, phase="held", updated_at=now.isoformat())
             return _Advance(held, note=f"{txn.session_ref}: pane confirmed quiet -- hold verified")
-        deadline = _parse_iso(txn.deadline_at) if txn.deadline_at else now
+        deadline = parse_iso8601(txn.deadline_at) if txn.deadline_at else now
         if now < deadline:
             return _Advance(txn)
         return _escalate_or_retry(
@@ -709,11 +724,11 @@ def _advance_quiescence(txn: Transaction, *, pause_policy: PausePolicy, activity
         # Still active (or this is the first observation) -- keep watching.
         # No note emitted every sweep to avoid log spam for ordinary waiting.
         return _Advance(replace(txn, last_transcript_mtime=mtime, quiescent_since=now.isoformat(), updated_at=now.isoformat()))
-    quiescent_since = _parse_iso(txn.quiescent_since) if txn.quiescent_since else now
+    quiescent_since = parse_iso8601(txn.quiescent_since) if txn.quiescent_since else now
     if (now - quiescent_since).total_seconds() >= pause_policy.quiescence_quiet_seconds:
         held = replace(txn, phase="held", updated_at=now.isoformat())
         return _Advance(held, note=f"{txn.session_ref}: turn confirmed stopped -- hold verified")
-    deadline = _parse_iso(txn.deadline_at) if txn.deadline_at else now
+    deadline = parse_iso8601(txn.deadline_at) if txn.deadline_at else now
     if now < deadline:
         return _Advance(txn)
     return _escalate_or_retry(
@@ -802,17 +817,12 @@ def _progress_resume_transaction(
     """Advance a resume-side transaction by at most one phase this sweep."""
     if txn.phase == "resume_requested":
         task_type = _resume_task_type(record)
-        order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
-        _enqueue(
+        order_id = _enqueue_guard_order(
             queue_dir,
-            DispatchOrder(
-                order_id=order_id,
-                session_ref=txn.session_ref,
-                nudge=_resume_nudge(record),
-                task_type=task_type,
-                bypass_rate_limit_freeze=True,
-                created_at=now.isoformat(),
-            ),
+            session_ref=txn.session_ref,
+            task_type=task_type,
+            nudge=_resume_nudge(record),
+            now=now,
         )
         advanced = replace(
             txn,
@@ -843,22 +853,15 @@ def _progress_resume_transaction(
                 now=now,
                 waiting_for=f"resume delivery (last result: {result.status.value})",
             )
-            if not advance.txn.escalated and advance.txn.attempts != txn.attempts:
-                task_type = _resume_task_type(record)
-                order_id = f"{task_type}-{uuid.uuid4().hex[:12]}"
-                _enqueue(
-                    queue_dir,
-                    DispatchOrder(
-                        order_id=order_id,
-                        session_ref=txn.session_ref,
-                        nudge=_resume_nudge(record),
-                        task_type=task_type,
-                        bypass_rate_limit_freeze=True,
-                        created_at=now.isoformat(),
-                    ),
-                )
-                advance = _Advance(replace(advance.txn, resume_order_id=order_id), note=advance.note, escalation=advance.escalation)
-            return advance
+            task_type = _resume_task_type(record)
+            return _retry_with_fresh_order(
+                advance,
+                txn,
+                order=(task_type, _resume_nudge(record)),
+                order_id_field="resume_order_id",
+                queue_dir=queue_dir,
+                now=now,
+            )
         return _Advance(txn, finished=True)
 
     return _Advance(txn)

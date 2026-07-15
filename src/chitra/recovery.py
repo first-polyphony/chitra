@@ -7,7 +7,6 @@ import fcntl
 import hashlib
 import json
 import os
-import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +14,7 @@ from typing import Any
 
 import structlog
 
+from ._fsio import write_json_atomic
 from .goals import LOAD_SHED_HOLD_REASON_PREFIX, GoalRecord, done_when_with_delta, get_goal
 from .rate_limit_state import Transaction
 from .state_paths import state_dir
@@ -102,23 +102,8 @@ def load_recovery_records(root: Path | None = None) -> list[RecoveryRecord]:
 
 def _write_recovery_records(root: Path | None, records: list[RecoveryRecord]) -> None:
     path = recovery_records_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema": SCHEMA, "records": [record.to_dict() for record in records]}
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
-        ) as tmp:
-            tmp_name = tmp.name
-            json.dump(payload, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(tmp_name, path)
-        tmp_name = None
-    finally:
-        if tmp_name is not None and os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    write_json_atomic(path, payload, fsync=True)
 
 
 def _resume_note(goal: GoalRecord) -> str:

@@ -29,10 +29,10 @@ from typing import Literal, Self
 import structlog
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from chitra.merge_queue import queue_hygiene_log_path
+from chitra._fsio import parse_iso8601
 from chitra.rate_limit_state import load_transactions
 from chitra.recovery import load_recovery_records
-from chitra.state_paths import default_attestation_ledger_path, default_ledger_path, state_dir
+from chitra.state_paths import default_attestation_ledger_path, default_ledger_path, default_queue_hygiene_log_path, state_dir
 
 logger = structlog.get_logger(__name__)
 
@@ -209,6 +209,10 @@ def _completion_reviews_path(root: Path | None) -> Path:
     return (state_dir() if root is None else root) / _COMPLETION_REVIEWS_FILENAME
 
 
+def _queue_hygiene_log_path(root: Path | None) -> Path:
+    return default_queue_hygiene_log_path() if root is None else root / "queue_hygiene.jsonl"
+
+
 def _load_jsonl[RecordT: BaseModel](path: Path, record_type: type[RecordT]) -> list[RecordT]:
     """Load a JSONL file strictly; only absence and blank content are cold starts."""
     try:
@@ -232,13 +236,14 @@ def _load_jsonl[RecordT: BaseModel](path: Path, record_type: type[RecordT]) -> l
 def _timestamp(value: str | None, *, source: str) -> datetime | None:
     if value is None:
         return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise OutcomesDataError(f"{source} must be an ISO8601 datetime") from exc
-    if parsed.tzinfo is None:
-        raise OutcomesDataError(f"{source} must include a timezone")
-    return parsed.astimezone(UTC)
+    return parse_iso8601(
+        value,
+        invalid_message=f"{source} must be an ISO8601 datetime",
+        timezone_message=f"{source} must include a timezone",
+        require_timezone=True,
+        normalize_utc=True,
+        error_type=OutcomesDataError,
+    )
 
 
 def _family(task_type: str | None) -> str:
@@ -518,7 +523,7 @@ def compute_outcomes(root: Path | None = None, *, now: datetime | None = None) -
             if interventions is not None:
                 interventions.add(dispatch.order_id)
 
-    hygiene_path = queue_hygiene_log_path(root)
+    hygiene_path = _queue_hygiene_log_path(root)
     for event in _load_jsonl(hygiene_path, _QueueHygieneRecord):
         if _DEFECT_ACTION_RE.search(event.action.lower()) is None:
             continue

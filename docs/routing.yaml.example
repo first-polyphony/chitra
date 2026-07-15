@@ -20,12 +20,11 @@
 # Two shapes, both keyed by task_type, both operator-populated:
 #
 #   defaults -- flat task_type -> routing_hint. Chitra fills in the opaque
-#               routing_hint string but never acts on it (provenance
-#               "config"). This is the original, unchanged shape.
+#               routing_hint string but never acts on it. This is the
+#               original, unchanged shape.
 #   routes   -- structured task_type -> {model, harness, zdr?}. Chitra
-#               RESOLVES the model+harness at dispatch, records the resolved
-#               selection (resolved_model/resolved_harness/resolved_zdr) plus
-#               a model@harness[+zdr] routing_hint, with provenance "route".
+#               RESOLVES the model+harness at dispatch into a
+#               model@harness[+zdr] routing_hint and records the ZDR setting.
 #               A routes entry wins over a defaults entry for the same
 #               task_type.
 defaults:

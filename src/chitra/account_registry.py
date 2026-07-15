@@ -24,19 +24,17 @@ same atomic-write-then-``os.replace`` and exclusive-``flock`` pattern as
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
-import os
-import tempfile
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
+from pydantic import ConfigDict, TypeAdapter, ValidationInfo, model_validator
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
+from chitra._fsio import locked_json_store, parse_iso8601, write_json_atomic
 from chitra.state_paths import state_dir
 from chitra.usage import AccountedVerdict
 
@@ -46,7 +44,7 @@ SCHEMA = "chitra.account_registry.v1"
 DEFAULT_FRESHNESS_SECONDS = 3600  # 1 hour: long enough to survive one missed sweep, short enough to not act on ancient data
 
 
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=ConfigDict(strict=True))
 class RegistryEntry:
     """The last-observed account identity for one tracked lane."""
 
@@ -57,26 +55,27 @@ class RegistryEntry:
     updated_at: str
 
     def to_dict(self) -> dict[str, str]:
-        return {
-            "tmux_session": self.tmux_session,
-            "session_id": self.session_id,
-            "kind": self.kind,
-            "account": self.account,
-            "updated_at": self.updated_at,
-        }
+        return cast(dict[str, str], _REGISTRY_ENTRY_ADAPTER.dump_python(self, mode="json"))
 
     @classmethod
     def from_dict(cls, payload: object) -> RegistryEntry:
+        return _REGISTRY_ENTRY_ADAPTER.validate_python(payload, strict=False, context={"persisted": True})
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_persisted(cls, payload: object, info: ValidationInfo) -> object:
+        """Retain the v1 store's strict required-string boundary."""
+        if not info.context or not info.context.get("persisted"):
+            return payload
         if not isinstance(payload, dict):
             raise ValueError("account registry entry must be an object")
-        fields = ("tmux_session", "session_id", "kind", "account", "updated_at")
-        values: dict[str, str] = {}
-        for name in fields:
-            value = payload.get(name)
-            if not isinstance(value, str):
+        for name in ("tmux_session", "session_id", "kind", "account", "updated_at"):
+            if not isinstance(payload.get(name), str):
                 raise ValueError(f"account registry entry {name} must be a string")
-            values[name] = value
-        return cls(**values)
+        return payload
+
+
+_REGISTRY_ENTRY_ADAPTER = TypeAdapter(RegistryEntry)
 
 
 @dataclass(slots=True)
@@ -90,25 +89,6 @@ class RegistryUpdate:
 def registry_path(root: Path | None = None) -> Path:
     """Return the persistent account-registry document path for ``root``."""
     return (state_dir() if root is None else root) / "account_registry.json"
-
-
-@contextlib.contextmanager
-def _registry_lock(root: Path | None) -> Iterator[None]:
-    """Serialize one full read-modify-write transaction, mirroring
-    ``chitra.goals._goal_store_lock`` (see that function's docstring for the
-    lost-update rationale)."""
-    path = registry_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.parent / f".{path.name}.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
 
 
 def load_registry(root: Path | None = None) -> list[RegistryEntry]:
@@ -128,22 +108,8 @@ def load_registry(root: Path | None = None) -> list[RegistryEntry]:
 
 def _write_registry(root: Path | None, entries: list[RegistryEntry]) -> None:
     path = registry_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema": SCHEMA, "entries": [entry.to_dict() for entry in entries]}
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-        ) as tmp:
-            tmp_name = tmp.name
-            json.dump(payload, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-            tmp.flush()
-            os.replace(tmp.name, path)
-            tmp_name = None
-    finally:
-        if tmp_name is not None and os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    write_json_atomic(path, payload)
 
 
 def get_entry(root: Path | None, tmux_session: str) -> RegistryEntry | None:
@@ -172,7 +138,7 @@ def update_registry(
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     update = RegistryUpdate()
-    with _registry_lock(root):
+    with locked_json_store(registry_path(root)):
         existing_by_session = {entry.tmux_session: entry for entry in load_registry(root)}
         seen_this_sweep: set[str] = set()
         merged: dict[str, RegistryEntry] = {}
@@ -193,7 +159,7 @@ def update_registry(
         for tmux_session, prior in existing_by_session.items():
             if tmux_session in seen_this_sweep:
                 continue
-            age_seconds = (now - datetime.fromisoformat(prior.updated_at.replace("Z", "+00:00"))).total_seconds()
+            age_seconds = (now - parse_iso8601(prior.updated_at)).total_seconds()
             if age_seconds <= freshness_seconds:
                 update.disappeared.append(prior)
                 merged[tmux_session] = prior  # retained, not yet stale enough to prune

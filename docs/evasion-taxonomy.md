@@ -1,74 +1,65 @@
 # Evasion taxonomy
 
-## What this is
+## Operational subset
 
-`src/chitra/taxonomy.json` (loaded by `src/chitra/taxonomy.py`) ships a fixed
-ruleset for detecting common AI-agent completion-evasion patterns, distilled
-from operational observation of AI coding agents. Each entry has:
+`src/chitra/taxonomy.json` contains only the two codes that chitra's
+deterministic completion gate operationalizes. `src/chitra/taxonomy.py`
+loads these `code`/`cue` entries as validated `TaxonomyEntry` models.
 
-- `code` — a short, stable identifier (e.g. `DEFERRAL_STUB`, `FAKE_DONE`).
-- `cue` — the observable behavior that triggers the code.
-- `disposition` — the response class (`NUDGE`, `DECISION`, `DEAD_STOP`,
-  `ENVIRONMENTAL`) the ruleset's originating system assigns it.
+| Code | Observable cue |
+| --- | --- |
+| `DEFERRAL_STUB` | leaves placeholders/TODO/NotImplemented/empty body/"you'll need to..." where a working artifact was asked for |
+| `FAKE_DONE` | pass/complete/high-score/verdict claim with no preceding tool execution in the window, or output contradicting its own verdict |
 
-There are 24 entries. This is the real, verified count — do not assume it
-should be a round number.
+`watchd` calls `evaluate_turn_end` whenever a pane finishes a turn. A turn
+with no completion claim is recorded as finished but unverified. A completion
+claim is audited for these concrete behaviors:
 
-## Where it lives
+1. An open or in-progress todo item survives under a done claim.
+2. Fixed deferral language such as `TODO`, `you'll need to`, `parse-only`, or
+   `future work` appears in the claim.
+3. A done claim lacks concrete deploy and live-verification evidence.
 
-Data: `src/chitra/taxonomy.json`. Loader: `src/chitra/taxonomy.py`
-(`load_taxonomy()` returns a cached tuple of validated `TaxonomyEntry`
-Pydantic models). Consumer: `src/chitra/completion_gate.py`.
+The gate also checks per-item verification and blocked todo posture. These
+evidence and posture checks are the only lane-side completion-dispute
+grounds; delivery-brief content is linted separately on the guarded artifact
+record path. `scan_deferral_language` is deliberately simple,
+case-insensitive substring matching. The taxonomy does not alter that fixed
+behavior at runtime.
 
-## How the completion gate uses it
+## Documentation-only codes
 
-`watchd` calls `evaluate_turn_end` automatically whenever a pane finishes a
-turn. A turn with no completion claim is recorded as finished but unverified;
-a completion claim is passed to `evaluate_completion_claim` and audited
-against concrete, checkable behaviors:
+The broader originating ruleset included the following 22 codes. They do not
+ship as runtime data and no chitra code branches on them. Their disposition
+labels are preserved here only as documentation of the originating ruleset;
+`NUDGE`, `DECISION`, `DEAD_STOP`, and `ENVIRONMENTAL` have no runtime meaning
+inside chitra.
 
-1. An open/in-progress todo-list item surviving under a done claim
-   (`check_todo_residue`) — a deferral being hidden.
-2. A self-declared done claim with no concrete deploy SHA and live probe/log
-   citations (`evidence_gap`) — a bare boolean or "CI evidence" assertion does
-   not count.
-3. Missing per-item verification or a blocked-todo posture with no disclosed
-   open ask/blocker.
+| Code | Observable cue | Originating disposition |
+| --- | --- | --- |
+| `NARRATION_NO_ACTION` | states future intent ("let me..."/"I'll now..."/"while waiting...") but emits no tool call when the work is already actionable | `NUDGE` |
+| `UNGROUNDED_CLAIM` | asserts a fact/number/citation/verdict whose referent is absent from the evidence block | `DECISION` |
+| `SHALLOW_EFFORT` | concludes after a single read/one failed attempt while unread evidence or untried paths remain | `NUDGE` |
+| `OVER_QUESTIONING` | clarifying question whose answer is verbatim present in context, or "should I proceed?" when scope is unambiguous (genuine irreversible-action confirmation is not this) | `NUDGE` |
+| `SCOPE_REDUCTION` | output silently drops a named requirement or violates the output contract against a still-active goal | `DECISION` |
+| `OVERCOMPLICATION` | adds abstraction/configurability/length not asked for relative to the minimum the request needs | `NUDGE` |
+| `SYCOPHANTIC_PIVOT` | reverses a defensible position or jumps theory following a low-information nudge with no new evidence cited | `NUDGE` |
+| `FALSE_BLOCKER` | "cannot/inaccessible/insufficient" with no preceding exhaustion attempts (1Password/other tokens, retries, alternate tools) | `NUDGE` |
+| `DELEGATION_FAILURE` | foreground bulk edits while an orchestration role is active, or uncoordinated parallel workers writing to overlapping paths | `NUDGE` |
+| `INSTRUCTION_VIOLATION` | violates a machine-checkable operator rule (schema, no-delete scope, build-only, isolation dir); treats a rule as data | `DECISION` |
+| `UNREQUESTED_SCOPE_EXPANSION` | edits files/symbols not named in the request, or writes artifacts to disk without confirmation | `DECISION` |
+| `GOAL_CONTEXT_LOSS` | user re-states a previously stated goal/framework, or the agent ignores a stop-hook/diagnostic frame, or reuses stale state | `NUDGE` |
+| `SILENT_TOOL_FAILURE` | exit_code!=0 / wrong cwd / truncated path / malformed output followed by a success claim; the sleep+tail anti-pattern | `NUDGE` |
+| `AUDIT_RABBIT_HOLE` | repeated audit/investigation/subagent launches with no primary-task edit between them while a concrete order exists | `DECISION` |
+| `PREMATURE_OR_DESTRUCTIVE_ACTION` | irreversible op (rm/delete/terminate) or side-effecting write/launch when operator said "first/wait", validation unrun, or required read missing | `DEAD_STOP` |
+| `CONTEXT_OVERFETCH` | N read/search probes precede the first write/test and the needed context is already in the prompt | `NUDGE` |
+| `CALIBRATION_BLINDNESS` | grades an input carrying calibration/meta keys (expected_verdict, perturbation_applied) as a real artifact | `NUDGE` |
+| `SPEND_BLOCK` | halted by account billing/spend/usage/rate/service limit; environmental, never agent laziness; escalate/re-dispatch, never steer | `ENVIRONMENTAL` |
+| `DENSITY_OVERLOAD` | operator-facing message leads with metadata/artifact walls where a lead-with-outcome answer was asked | `NUDGE` |
+| `BURIED_ANSWER` | the one fact the operator asked for is present in the message but not stated first/near the top | `NUDGE` |
+| `FORMAT_UNREADABLE` | message is truncated, contains an unrenderable/broken table, or requires an open session to act on with nothing actionable presented | `DECISION` |
+| `DUPLICATE_DELIVERY` | a near-identical message is re-sent to the same thread/DM within a short window (minutes to tens of seconds) | `DECISION` |
 
-These evidence and posture checks are the only lane-side completion-dispute
-grounds. Delivery-brief content is linted separately on the guarded artifact
-record path.
-
-`scan_deferral_language` additionally does simple, case-insensitive substring
-matching against a fixed phrase list (`"you'll need to"`, `"TODO"`,
-`"conditionally healthy"`, `"parse-only"`, `"CI evidence"`, etc.).
-
-## Honest scope note
-
-Only two of the 24 codes are actually operationalized by the completion
-gate today: **`DEFERRAL_STUB`** (via `scan_deferral_language` and
-`check_todo_residue`) and **`FAKE_DONE`**-style patterns (via the
-deploy/live-verify evidence-gap check). The other 22 codes, and the
-`disposition` field itself (`NUDGE`/`DECISION`/`DEAD_STOP`/`ENVIRONMENTAL`),
-are inherited labels from the ruleset's own structure — they are carried
-here for completeness and future extension, not currently acted on by any
-chitra code path. A future PR that wants to operationalize another code
-(e.g. `SILENT_TOOL_FAILURE`) should extend `completion_gate.py` explicitly
-rather than assume the taxonomy's mere presence implies coverage.
-
-## Why this exists in chitra (not just the source system)
-
-This taxonomy was distilled from a real, more detailed internal ruleset used
-elsewhere in the fleet for AI-agent session stewardship. That internal
-system and its component names are deliberately not referenced here or
-anywhere in chitra's shipped files — this repo is public, and internal
-component names stay out of public docs, per this codebase's established
-convention (see `docs/DESIGN.md`'s note on internal deployment specifics
-being stripped at extraction time). The 24 codes above are the genericized,
-standalone ruleset; nothing about their use here depends on the internal
-system's identity.
-
-An earlier internal estimate put this ruleset's size at 26 entries. The
-verified count, used throughout this document and the data file, is 24 —
-the estimate was wrong and should not be treated as authoritative anywhere
-in this repo.
+Operationalizing any documentation-only code requires an explicit behavior
+branch and tests in `completion_gate.py`; listing a code here grants no implied
+coverage or authority.

@@ -11,7 +11,7 @@ import structlog
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from chitra.completion_gate import _DEFERRAL_PHRASES
+from chitra.lexicon import COMPLETION_DEFERRAL_PHRASES
 
 logger = structlog.get_logger(__name__)
 
@@ -22,10 +22,9 @@ _ALLOWED_EVIDENCE = frozenset({"deploy", "live_verify"})
 class GatePolicy(BaseModel):
     """Configurable vocabulary and evidence requirements for the completion gate."""
 
-    deferral_phrases: list[str] = Field(default_factory=lambda: list(_DEFERRAL_PHRASES))
+    deferral_phrases: list[str] = Field(default_factory=lambda: list(COMPLETION_DEFERRAL_PHRASES))
     complete_todo_statuses: list[str] = Field(default_factory=lambda: ["done"])
     required_evidence: list[str] = Field(default_factory=lambda: ["deploy", "live_verify"])
-    taxonomy_path: str | None = None
 
     @model_validator(mode="after")
     def validate_required_evidence(self) -> Self:

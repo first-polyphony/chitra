@@ -48,7 +48,6 @@ from chitra.policy_config import load_policy_config
 from chitra.reasoned_dispatch import abstaining_oracle, build_reasoned_dispatch
 from chitra.reasoning import Oracle, PrinciplesIndex
 from chitra.state_paths import state_dir as default_state_dir
-from chitra.taxonomy import load_taxonomy
 
 logger = structlog.get_logger(__name__)
 
@@ -447,7 +446,6 @@ class Watchd:
             text,
             todo_items=[],
             evidence=extract_completion_evidence(text),
-            taxonomy=load_taxonomy(policy.taxonomy_path),
             policy=policy,
             open_asks=goal.open_asks,
             blockers=(goal.needs,) if goal.needs else (),

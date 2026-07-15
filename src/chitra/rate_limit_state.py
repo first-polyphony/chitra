@@ -24,18 +24,16 @@ the same atomic-write-then-``os.replace`` and exclusive-``flock`` pattern as
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
-import os
-import tempfile
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import structlog
+from pydantic import ConfigDict, TypeAdapter, ValidationInfo, model_validator
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
+from chitra._fsio import locked_json_store, write_json_atomic
 from chitra.state_paths import state_dir
 
 logger = structlog.get_logger(__name__)
@@ -63,7 +61,7 @@ TRANSACTION_PHASES: tuple[TransactionPhase, ...] = (
 )
 
 
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=ConfigDict(strict=True))
 class Transaction:
     """One session's in-flight pause/resume transaction record."""
 
@@ -86,28 +84,18 @@ class Transaction:
     updated_at: str = ""
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "session_ref": self.session_ref,
-            "phase": self.phase,
-            "backend": self.backend,
-            "hold_reason": self.hold_reason,
-            "resume_at": self.resume_at,
-            "checkpoint_order_id": self.checkpoint_order_id,
-            "stop_order_id": self.stop_order_id,
-            "resume_order_id": self.resume_order_id,
-            "transcript_path": self.transcript_path,
-            "last_transcript_mtime": self.last_transcript_mtime,
-            "last_activity_token": self.last_activity_token,
-            "quiescent_since": self.quiescent_since,
-            "attempts": self.attempts,
-            "escalated": self.escalated,
-            "deadline_at": self.deadline_at,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
+        return cast(dict[str, object], _TRANSACTION_ADAPTER.dump_python(self, mode="json"))
 
     @classmethod
     def from_dict(cls, payload: object) -> Transaction:
+        return _TRANSACTION_ADAPTER.validate_python(payload, strict=False, context={"persisted": True})
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_persisted(cls, payload: object, info: ValidationInfo) -> object:
+        """Validate and default the exact legacy transaction-store shape."""
+        if not info.context or not info.context.get("persisted"):
+            return payload
         if not isinstance(payload, dict):
             raise ValueError("rate-limit transaction record must be an object")
         phase = payload.get("phase")
@@ -116,6 +104,8 @@ class Transaction:
         backend = payload.get("backend", "claude")
         if backend not in ("claude", "codex"):
             raise ValueError("rate-limit transaction backend must be claude or codex")
+        normalized = dict(payload)
+        normalized["backend"] = backend
         str_fields = (
             "session_ref",
             "hold_reason",
@@ -130,40 +120,27 @@ class Transaction:
             "created_at",
             "updated_at",
         )
-        values: dict[str, str] = {}
         for name in str_fields:
             value = payload.get(name, "")
             if not isinstance(value, str):
                 raise ValueError(f"rate-limit transaction {name} must be a string")
-            values[name] = value
+            normalized[name] = value
         attempts = payload.get("attempts", 0)
         if not isinstance(attempts, int) or isinstance(attempts, bool):
             raise ValueError("rate-limit transaction attempts must be an integer")
+        normalized["attempts"] = attempts
         escalated = payload.get("escalated", False)
         if not isinstance(escalated, bool):
             raise ValueError("rate-limit transaction escalated must be a boolean")
+        normalized["escalated"] = escalated
         raw_mtime = payload.get("last_transcript_mtime")
         if raw_mtime is not None and not isinstance(raw_mtime, (int, float)):
             raise ValueError("rate-limit transaction last_transcript_mtime must be a number or null")
-        return cls(
-            session_ref=values["session_ref"],
-            phase=cast(TransactionPhase, phase),
-            backend=cast(PauseBackend, backend),
-            hold_reason=values["hold_reason"],
-            resume_at=values["resume_at"],
-            checkpoint_order_id=values["checkpoint_order_id"],
-            stop_order_id=values["stop_order_id"],
-            resume_order_id=values["resume_order_id"],
-            transcript_path=values["transcript_path"],
-            last_transcript_mtime=float(raw_mtime) if raw_mtime is not None else None,
-            last_activity_token=values["last_activity_token"],
-            quiescent_since=values["quiescent_since"],
-            attempts=attempts,
-            escalated=escalated,
-            deadline_at=values["deadline_at"],
-            created_at=values["created_at"],
-            updated_at=values["updated_at"],
-        )
+        normalized["last_transcript_mtime"] = float(raw_mtime) if raw_mtime is not None else None
+        return normalized
+
+
+_TRANSACTION_ADAPTER = TypeAdapter(Transaction)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,24 +228,6 @@ def transactions_path(root: Path | None = None) -> Path:
     return (state_dir() if root is None else root) / "rate_limit_state.json"
 
 
-@contextlib.contextmanager
-def _transaction_lock(root: Path | None) -> Iterator[None]:
-    """Serialize one full read-modify-write transaction, mirroring
-    ``chitra.goals._goal_store_lock`` (see that function's docstring)."""
-    path = transactions_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.parent / f".{path.name}.lock"
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
 def load_transactions(root: Path | None = None) -> list[Transaction]:
     """Load stored transactions; a missing store has none in flight."""
     path = transactions_path(root)
@@ -301,26 +260,12 @@ def load_load_states(root: Path | None = None) -> list[LoadHostState]:
 
 def _write_state(root: Path | None, transactions: list[Transaction], load_states: list[LoadHostState]) -> None:
     path = transactions_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": SCHEMA,
         "transactions": [txn.to_dict() for txn in transactions],
         "load_hosts": [state.to_dict() for state in load_states],
     }
-    tmp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-        ) as tmp:
-            tmp_name = tmp.name
-            json.dump(payload, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-            tmp.flush()
-            os.replace(tmp.name, path)
-            tmp_name = None
-    finally:
-        if tmp_name is not None and os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    write_json_atomic(path, payload)
 
 
 def get_transaction(root: Path | None, session_ref: str) -> Transaction | None:
@@ -330,7 +275,7 @@ def get_transaction(root: Path | None, session_ref: str) -> Transaction | None:
 
 def upsert_transaction(root: Path | None, txn: Transaction) -> Transaction:
     """Atomically insert or replace one transaction by ``session_ref``."""
-    with _transaction_lock(root):
+    with locked_json_store(transactions_path(root)):
         records = [t for t in load_transactions(root) if t.session_ref != txn.session_ref]
         records.append(txn)
         _write_state(root, records, load_load_states(root))
@@ -342,7 +287,7 @@ def upsert_transaction(root: Path | None, txn: Transaction) -> Transaction:
 
 def remove_transaction(root: Path | None, session_ref: str) -> None:
     """Remove a completed (or abandoned) transaction. A no-op if absent."""
-    with _transaction_lock(root):
+    with locked_json_store(transactions_path(root)):
         records = [t for t in load_transactions(root) if t.session_ref != session_ref]
         _write_state(root, records, load_load_states(root))
     logger.info("rate_limit_transaction_removed", session_ref=session_ref)
@@ -355,7 +300,7 @@ def get_load_state(root: Path | None, host: str) -> LoadHostState | None:
 
 def upsert_load_state(root: Path | None, state: LoadHostState) -> LoadHostState:
     """Atomically insert or replace one host's load state without losing transactions."""
-    with _transaction_lock(root):
+    with locked_json_store(transactions_path(root)):
         states = [item for item in load_load_states(root) if item.host != state.host]
         states.append(state)
         _write_state(root, load_transactions(root), sorted(states, key=lambda item: item.host))

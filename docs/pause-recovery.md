@@ -28,5 +28,5 @@ goal-derived re-arm nudge, clear the hold, and requeue deferred work.
 
 An attached tmux client does not change pause eligibility; attachment is only
 a delivery-method liveness signal. The sole never-pause refs are Chitra's own
-Trailhead monitor/harness sessions, `trailhead:monitor:*` and
-`trailhead:boomtown:*`.
+Hub-host monitor/harness sessions, `hub-host:monitor:*` and
+`hub-host:boomtown:*`.

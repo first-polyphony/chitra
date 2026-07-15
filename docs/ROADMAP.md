@@ -8,7 +8,7 @@ This document was previously titled "v1.1" and framed as a wishlist. It's retitl
 
 Fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](https://github.com/first-polyphony/chitra/pull/24)), the CodeQL-nightly fixes on both this repo ([PR #25](https://github.com/first-polyphony/chitra/pull/25)) and the monorepo ([PR #1975](https://github.com/first-polyphony/polyphony/pull/1975)), the Temporal-workflow-manager decision above ([PR #26](https://github.com/first-polyphony/chitra/pull/26)), the internal adapter — internal loop self-tuning loop, predecessor monitor reconciliation feed, internal pipeline promotion pipeline — on the monorepo ([PR #1965](https://github.com/first-polyphony/polyphony/pull/1965)), the mirror-sync porting the new config surface into the flat-layout monorepo mirror ([first-polyphony/polyphony#1984](https://github.com/first-polyphony/polyphony/pull/1984)), and two systemd-unit path fixes caught while bringing the service up for the first time ([#1995](https://github.com/first-polyphony/polyphony/pull/1995), [#1998](https://github.com/first-polyphony/polyphony/pull/1998)).
 
-`polyphony-chitra-dispatchd` and `polyphony-chitra-triaged` are now installed, enabled, and running live on trailhead for the first time, reading the new self-tuning `policy.yaml`, verified via clean startup logs.
+`polyphony-chitra-dispatchd` and `polyphony-chitra-triaged` are now installed, enabled, and running live on hub-host for the first time, reading the new self-tuning `policy.yaml`, verified via clean startup logs.
 
 **Two items remain, both deliberately deferred, not forgotten:**
 - **Run `/simplify` on this repo** now that it's fully complete — not yet scheduled.
@@ -120,7 +120,6 @@ What's already fixed and confirmed live (via direct `gh api` queries against `fi
 These fixes were already designed and coded this program; they are not new roadmap work, just tracked here so the roadmap reflects what's already been decided:
 
 - **`CHITRA_*` env var naming** — genericized per PR #5 (chitra) / #1917 (monorepo mirror).
-- **`liveness_check` test coverage** — added in the same PRs (#5 / #1917).
 - **Historical LLM-scope statement** — PR #8 / #1918 originally documented a zero-call boundary. v0.8.2 narrows that statement to deterministic relay/storage plus the explicit isolated watched-session review boundary described above.
 
 ---
@@ -129,14 +128,14 @@ These fixes were already designed and coded this program; they are not new roadm
 
 This is no longer a proposal: `DispatchOrder` carries an optional `routing_hint: str | None = None` field plus an optional `task_type` string that drives config lookup (see the README's "Routing config" subsection for the full mechanics). The config now supports two shapes; summary of what's actually in the repo:
 
-- **`defaults` — opaque hint (unchanged).** A flat `task_type -> routing_hint` map. Chitra fills in the opaque `routing_hint` string but never interprets or acts on it — carried through to `DispatchResult` and the signed ledger entry exactly the way `tag` passes through, for audit/observability only. `resolve_routing_hint` is a pure dictionary lookup (provenance `"config"`).
-- **`routes` — active model/harness routing (built for #29).** A structured `task_type -> {model, harness, zdr?}` map. `chitra.routing_config.resolve_route` resolves the concrete model+harness (+zdr) at dispatch; `dispatchd` records the **resolved** selection structurally (`resolved_model` / `resolved_harness` / `resolved_zdr`) plus a `model@harness[+zdr]` `routing_hint`, with provenance `"route"`. This is still config-driven substitution, not a smart router — chitra does not decide what a task type IS or classify content; the operator states, per task_type, which concrete model+harness that type routes to. A `routes` entry wins over a `defaults` entry for the same `task_type`.
+- **`defaults` — opaque hint (unchanged).** A flat `task_type -> routing_hint` map. Chitra fills in the opaque `routing_hint` string but never interprets or acts on it — carried through to `DispatchResult` and the signed ledger entry exactly the way `tag` passes through, for audit/observability only. `resolve_routing_hint` is a pure dictionary lookup.
+- **`routes` — active model/harness routing (built for #29).** A structured `task_type -> {model, harness, zdr?}` map. `chitra.routing_config.resolve_route` resolves the concrete model+harness (+zdr) at dispatch into a `model@harness[+zdr]` `routing_hint` and records the ZDR setting. This is still config-driven substitution, not a smart router — chitra does not decide what a task type IS or classify content; the operator states, per task_type, which concrete model+harness that type routes to. A `routes` entry wins over a `defaults` entry for the same `task_type`.
 - **Explicit caller hint always wins.** `dispatchd` only consults the config when the order's `routing_hint` is unset AND a `task_type` is present; an explicit `routing_hint` from the caller is never overridden.
 - **Missing config is a no-op, not an error.** If neither the env var nor the flag is set, `dispatchd` runs with no routing config at all. If a path IS configured but the file is missing or fails to parse, that's a real configuration error and `load_routing_config` raises rather than silently ignoring it.
 
 For real-world naming precedent on what a deployment's `task_type` values might look like — not a prescription chitra enforces — see [`docs/workflow-pattern-catalog.md`](workflow-pattern-catalog.md), a catalog of named orchestration loop patterns.
 
-**Ledger provenance gap — closed.** The ledger now records `task_type` and a `routing_hint_source` provenance flag (`explicit` / `config` / `route` / `unset`) alongside `routing_hint`, and — for resolved `routes` selections — the concrete `resolved_model` / `resolved_harness` / `resolved_zdr`. All are part of the HMAC-signed payload (ledger `sig_v` bumped to 3; older v1/v2 entries still verify). An auditor reading `ledger.jsonl` can now distinguish a caller-chosen hint from a config default from an actively-resolved route, and see the exact model+harness chitra selected.
+**Ledger routing audit.** The ledger records `task_type`, `routing_hint`, and `resolved_zdr` in the current HMAC-signed v4 payload. The verifier retains the historical v1/v2/v3 field sets so previously written entries continue to verify.
 
 **Explicitly out of scope for chitra — a named scope boundary, not a quiet omission.** Chitra does not suggest how a receiving session should organize its own sub-agent hierarchy. That general task-aware advice belongs in a separate higher-level system that reads chitra's order and ledger data and feeds approved text back as an attested nudge. The isolated goal reviewers do not widen into this role.
 
@@ -181,7 +180,7 @@ A related project maintains an internal taxonomy of AI-agent deviance patterns (
 
 Honest caveat: no external paper currently treats "false blockers claiming human intervention is needed" as its own named, benchmarked category — it's an unlabeled subset scattered across the sources above. Any future work here should synthesize across them rather than expect one canonical citation.
 
-chitra's own shipped taxonomy (`docs/evasion-taxonomy.md`) operationalizes a subset of these patterns — todo-residue-under-a-done-claim and evidence-gap-under-a-done-claim — as a concrete, deterministic ruleset (the completion gate, `src/chitra/completion_gate.py`), rather than leaving deviance-pattern awareness as research-only. That shipped taxonomy is a genericized 24-entry ruleset with only two codes actually operationalized today; it is not the internal taxonomy referenced above, and it does not expose anything proprietary about that internal system.
+chitra's own shipped taxonomy (`docs/evasion-taxonomy.md`) operationalizes two patterns — todo-residue-under-a-done-claim and evidence-gap-under-a-done-claim — as a concrete, deterministic ruleset (the completion gate, `src/chitra/completion_gate.py`), rather than leaving deviance-pattern awareness as research-only. The packaged data contains only those two operational codes; the other 22 genericized codes are retained as documentation, not runtime behavior. This is not the internal taxonomy referenced above, and it does not expose anything proprietary about that internal system.
 
 ### Goal discipline (tracking, not generation)
 

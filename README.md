@@ -110,7 +110,7 @@ Delivery into a **live** tmux session follows one path:
 4. `tmux send-keys -t <target> Enter`
 5. Confirm delivery by grepping the target session's own transcript file for the delivered text. A pane screenshot or "looks sent" heuristic is not evidence that delivery happened.
 
-Every step above runs against the **actual target host** — a plain local `tmux`/filesystem call for a local target, or the identical command ssh-wrapped for a remote one (chitra's real deployment shape: it typically runs from one host, e.g. trailhead, and dispatches over ssh into another, e.g. tophand). This matters for steps 1 and 5 in particular: checking the *local* tmux server's copy-mode state, or grepping the *local* filesystem's transcripts, when the target is remote reports on the wrong host entirely and can never confirm a genuine remote delivery.
+Every step above runs against the **actual target host** — a plain local `tmux`/filesystem call for a local target, or the identical command ssh-wrapped for a remote one (chitra's real deployment shape: it typically runs from one host, e.g. hub-host, and dispatches over ssh into another, e.g. worker-host). This matters for steps 1 and 5 in particular: checking the *local* tmux server's copy-mode state, or grepping the *local* filesystem's transcripts, when the target is remote reports on the wrong host entirely and can never confirm a genuine remote delivery.
 
 ## Single-writer rule
 
@@ -126,7 +126,7 @@ Before a paste attempt, `dispatchd` writes a send-nonce beside the claimed order
 
 Every dispatched message carries a `tag` (default `"[C]"`) marking it as a chitra relay delivery. An operator typing directly into a pane needs no tag and no authentication; the pane is that operator's own channel. `DispatchOrder`/`DispatchResult` also carry an optional `routing_hint` (default `None`) — an opaque string recording a routing/model-preference decision the calling system already made; chitra never reads, validates, or acts on its contents, only passes it through unchanged into the result and the signed ledger entry for audit purposes.
 
-Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` appends a signed record to an append-only JSON Lines (JSONL) ledger. The current `sig_v3` HMAC-SHA256 payload covers `(timestamp, session_ref, tag, message_hash, routing_hint, task_type, routing_hint_source, resolved_model, resolved_harness, resolved_zdr)`; the verifier retains the versioned v1/v2 field sets for older entries. The signing key lives in the state directory and is generated on first use. This adds no extra step to a normal send.
+Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` appends a signed record to an append-only JSON Lines (JSONL) ledger. The current `sig_v4` HMAC-SHA256 payload covers `(timestamp, session_ref, tag, message_hash, routing_hint, task_type, resolved_zdr)`; the verifier retains the versioned v1/v2/v3 field sets for older entries. The signing key lives in the state directory and is generated on first use. This adds no extra step to a normal send.
 
 This is a trusted-host threat model: the ledger assumes whoever can write to the state directory is trusted (systemd-supervised `dispatchd`, plus the host's own root/admin). It is not designed to resist a malicious actor with filesystem write access to `ledger.jsonl`.
 
@@ -138,12 +138,12 @@ See `chitra.ledger.verify_delivery` for the check as a function call, or read `l
 
 ## Routing config (`task_type` -> default `routing_hint`)
 
-`DispatchOrder` also carries an optional `task_type` — a separate, caller-supplied classification string (e.g. `"code-review"`, `"design-judgment"`). Chitra does not decide what a task type IS or evaluate any content to classify one; the caller states it. `task_type`, the resolved routing selection, and a provenance flag (`routing_hint_source`) are carried through onto `DispatchResult` and the signed ledger entry for audit.
+`DispatchOrder` also carries an optional `task_type` — a separate, caller-supplied classification string (e.g. `"code-review"`, `"design-judgment"`). Chitra does not decide what a task type IS or evaluate any content to classify one; the caller states it. `task_type` is carried through onto `DispatchResult` and the signed ledger entry for audit.
 
 If a caller sets `task_type` but leaves `routing_hint` unset, `dispatchd` consults an operator-populated YAML config keyed by `task_type`. This is still config-driven substitution — like a `.gitattributes` or `nginx.conf` mapping file, not a smart router — and it is skipped entirely whenever the caller already supplied an explicit `routing_hint` (**explicit `routing_hint` always wins**). The config supports two shapes:
 
-- **`defaults` (opaque hint)** — a flat `task_type -> routing_hint` map. Chitra fills in the opaque `routing_hint` string but never acts on it (`routing_hint_source: "config"`). Unchanged; existing configs keep working.
-- **`routes` (active model/harness selection)** — a structured `task_type -> {model, harness, zdr?}` map. Chitra **resolves** the model+harness at dispatch, records the resolved selection structurally (`resolved_model` / `resolved_harness` / `resolved_zdr`) plus a `model@harness[+zdr]` `routing_hint`, and stamps `routing_hint_source: "route"`. When both a `routes` and a `defaults` entry exist for the same `task_type`, the structured route wins.
+- **`defaults` (opaque hint)** — a flat `task_type -> routing_hint` map. Chitra fills in the opaque `routing_hint` string but never acts on it. Unchanged; existing configs keep working.
+- **`routes` (active model/harness selection)** — a structured `task_type -> {model, harness, zdr?}` map. Chitra **resolves** the model+harness at dispatch into a `model@harness[+zdr]` `routing_hint` and records the ZDR setting. When both a `routes` and a `defaults` entry exist for the same `task_type`, the structured route wins.
 
 Point `dispatchd` at a config file via the `CHITRA_ROUTING_CONFIG` env var (or its `--routing-config-path` flag). If unset, `dispatchd` runs with no routing config — a normal no-op, not an error. If the env var/flag IS set but the file is missing or fails to parse, that's a real configuration error and `dispatchd` raises rather than silently ignoring it. An example template ships at `docs/routing.yaml.example`:
 
@@ -187,7 +187,7 @@ pytest
 
 ## Running the daemons
 
-Thirteen command-line interface (CLI) entrypoints are installed. `dispatchd` and `triaged` are the always-on daemons. Periodic or ad-hoc tools are `draft-scanner`, `chitra-board`, `chitra-goals`, `chitra-artifacts`, `chitra-usage`, `chitra-rate-limit-guard`, `chitra-ownership`, `chitra-sweepd`, `chitra-convo`, `chitra-capabilities`, and `chitra-queue`. The board renderer also runs as `python -m chitra.board`. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`.
+Twelve command-line interface (CLI) entrypoints are installed. `dispatchd` and `triaged` are the always-on daemons. Periodic or ad-hoc tools are `draft-scanner`, `chitra-board`, `chitra-goals`, `chitra-artifacts`, `chitra-usage`, `chitra-rate-limit-guard`, `chitra-ownership`, `chitra-sweepd`, `chitra-convo`, and `chitra-capabilities`. The board renderer also runs as `python -m chitra.board`. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`.
 
 The guard remains a one-shot CLI. To schedule its two-minute sweep, copy the example service and timer, edit every placeholder for the target host, then enable the timer:
 
@@ -202,9 +202,9 @@ sudo systemctl enable --now chitra-rate-limit-guard.timer
 Watchtower's read-only ownership check uses its already-resolved session references:
 
 ```bash
-chitra-ownership --host tophand \
-  --session-ref tophand:lane-a:0.0 \
-  --session-ref tophand:lane-b:0.0
+chitra-ownership --host worker-host \
+  --session-ref worker-host:lane-a:0.0 \
+  --session-ref worker-host:lane-b:0.0
 ```
 
 ## Configuration

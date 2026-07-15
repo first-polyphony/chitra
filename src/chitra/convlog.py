@@ -30,6 +30,7 @@ from typing import Any, Literal
 import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
+from chitra._fsio import parse_iso8601
 from chitra.state_paths import default_convlog_path
 
 logger = structlog.get_logger(__name__)
@@ -182,10 +183,11 @@ def _utc_now() -> str:
 
 
 def _parse_at(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("conversation entry timestamp must be timezone-aware")
-    return parsed
+    return parse_iso8601(
+        value,
+        timezone_message="conversation entry timestamp must be timezone-aware",
+        require_timezone=True,
+    )
 
 
 def validate_brief(payload: object) -> OperatorBrief:

@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from chitra.dispatch import DispatchOrder
 from chitra.goal_enforcement import FindingCode, SessionReviewSignal
 from chitra.goals import GoalRecord, done_when_with_delta
+from chitra.orders import DispatchOrder
 from chitra.reasoning import (
     DecisionQuestion,
     DecisionReasoner,

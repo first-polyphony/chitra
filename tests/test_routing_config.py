@@ -99,7 +99,7 @@ def test_load_routing_config_parses_routes_alongside_defaults(tmp_path: Path) ->
     assert config.routes["code-fix"] == RouteEntry(model="gpt-5.6-sol", harness="codex-cli", zdr=False)
 
 
-def test_resolve_route_returns_resolved_model_and_harness() -> None:
+def test_resolve_route_returns_configured_selection() -> None:
     config = RoutingConfig(routes={"design-judgment": RouteEntry(model="opus-4.8", harness="claude-code", zdr=True)})
     resolved = resolve_route("design-judgment", config)
     assert resolved is not None

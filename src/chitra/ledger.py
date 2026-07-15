@@ -42,12 +42,20 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
 from .reasoning import DecisionAttestation
 from .state_paths import default_ledger_key_path
 
 _KEY_BYTES = 32
+
+
+class _LegacySignatureFields(BaseModel):
+    """Retired fields retained only while verifying v2/v3 ledger rows."""
+
+    routing_hint_source: str = "unset"
+    resolved_model: str | None = None
+    resolved_harness: str | None = None
 
 
 class LedgerEntry(BaseModel):
@@ -58,19 +66,29 @@ class LedgerEntry(BaseModel):
     it for audit purposes only, never interprets it, exactly like ``tag``.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     order_id: str
     session_ref: str
     tag: str
     routing_hint: str | None = None
     task_type: str | None = None
-    routing_hint_source: str = "unset"
-    resolved_model: str | None = None
-    resolved_harness: str | None = None
     resolved_zdr: bool = False
     sig_v: int = 1
     message_hash: str
     sent_at: str
     signature: str
+
+    _legacy_signature_fields: _LegacySignatureFields = PrivateAttr(default_factory=_LegacySignatureFields)
+
+    @model_validator(mode="after")
+    def capture_legacy_signature_fields(self) -> LedgerEntry:
+        """Retain retired signed fields privately when reading old rows."""
+        extras = self.__pydantic_extra__ or {}
+        payload = {name: extras[name] for name in _LegacySignatureFields.model_fields if name in extras}
+        self._legacy_signature_fields = _LegacySignatureFields.model_validate(payload)
+        self.__pydantic_extra__ = {}
+        return self
 
 
 class AttestationLedgerEntry(BaseModel):
@@ -138,6 +156,36 @@ def load_or_create_signing_key(key_path: Path | None = None) -> bytes:
     return key
 
 
+def _sign_versioned(
+    key: bytes,
+    *,
+    session_ref: str,
+    tag: str,
+    digest: str,
+    sent_at: str,
+    routing_hint: str | None = None,
+    task_type: str | None = None,
+    resolved_zdr: bool = False,
+    sig_v: int,
+    legacy_fields: _LegacySignatureFields | None = None,
+) -> str:
+    """Sign one current or historical canonical ledger field set."""
+    if sig_v not in (1, 2, 3, 4):
+        raise ValueError(f"unsupported signature version: {sig_v}")
+    fields = [sent_at, session_ref, tag, digest, routing_hint or ""]
+    if sig_v in (2, 3):
+        legacy = legacy_fields or _LegacySignatureFields()
+        fields.extend([task_type or "", legacy.routing_hint_source])
+        if sig_v == 3:
+            fields.extend(
+                [legacy.resolved_model or "", legacy.resolved_harness or "", "1" if resolved_zdr else "0"]
+            )
+    elif sig_v == 4:
+        fields.extend([task_type or "", "1" if resolved_zdr else "0"])
+    canonical = "|".join(fields).encode("utf-8")
+    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+
+
 def sign(
     key: bytes,
     *,
@@ -147,30 +195,21 @@ def sign(
     sent_at: str,
     routing_hint: str | None = None,
     task_type: str | None = None,
-    routing_hint_source: str = "unset",
-    resolved_model: str | None = None,
-    resolved_harness: str | None = None,
     resolved_zdr: bool = False,
-    sig_v: int = 3,
+    sig_v: int = 4,
 ) -> str:
-    """HMAC-SHA256 signature over the record's canonical field order,
-    hex-encoded. Changing any signed field changes the signature.
-
-    Fields are appended by version so older entries keep verifying: v1 signs
-    ``(sent_at, session_ref, tag, message_hash, routing_hint)``; v2 adds
-    ``(task_type, routing_hint_source)``; v3 adds the resolved structured
-    selection ``(resolved_model, resolved_harness, resolved_zdr)``. Absent
-    values sign as an empty placeholder (``resolved_zdr`` as ``"1"``/``"0"``)
-    since they are part of the record being attested to."""
-    if sig_v not in (1, 2, 3):
-        raise ValueError(f"unsupported signature version: {sig_v}")
-    fields = [sent_at, session_ref, tag, digest, routing_hint or ""]
-    if sig_v >= 2:
-        fields.extend([task_type or "", routing_hint_source])
-    if sig_v >= 3:
-        fields.extend([resolved_model or "", resolved_harness or "", "1" if resolved_zdr else "0"])
-    canonical = "|".join(fields).encode("utf-8")
-    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+    """HMAC-SHA256 signature over the current canonical ledger fields."""
+    return _sign_versioned(
+        key,
+        session_ref=session_ref,
+        tag=tag,
+        digest=digest,
+        sent_at=sent_at,
+        routing_hint=routing_hint,
+        task_type=task_type,
+        resolved_zdr=resolved_zdr,
+        sig_v=sig_v,
+    )
 
 
 def append_entry(
@@ -183,9 +222,6 @@ def append_entry(
     key: bytes,
     routing_hint: str | None = None,
     task_type: str | None = None,
-    routing_hint_source: str = "unset",
-    resolved_model: str | None = None,
-    resolved_harness: str | None = None,
     resolved_zdr: bool = False,
     sent_at: str | None = None,
 ) -> LedgerEntry:
@@ -201,9 +237,6 @@ def append_entry(
         sent_at=stamp,
         routing_hint=routing_hint,
         task_type=task_type,
-        routing_hint_source=routing_hint_source,
-        resolved_model=resolved_model,
-        resolved_harness=resolved_harness,
         resolved_zdr=resolved_zdr,
     )
     entry = LedgerEntry(
@@ -212,11 +245,8 @@ def append_entry(
         tag=tag,
         routing_hint=routing_hint,
         task_type=task_type,
-        routing_hint_source=routing_hint_source,
-        resolved_model=resolved_model,
-        resolved_harness=resolved_harness,
         resolved_zdr=resolved_zdr,
-        sig_v=3,
+        sig_v=4,
         message_hash=digest,
         sent_at=stamp,
         signature=signature,
@@ -230,7 +260,7 @@ def append_entry(
 def verify_entry(entry: LedgerEntry, *, key: bytes) -> bool:
     """Recompute the signature and compare (constant-time) against the
     entry's recorded signature."""
-    expected = sign(
+    expected = _sign_versioned(
         key,
         session_ref=entry.session_ref,
         tag=entry.tag,
@@ -238,11 +268,9 @@ def verify_entry(entry: LedgerEntry, *, key: bytes) -> bool:
         sent_at=entry.sent_at,
         routing_hint=entry.routing_hint,
         task_type=entry.task_type,
-        routing_hint_source=entry.routing_hint_source,
-        resolved_model=entry.resolved_model,
-        resolved_harness=entry.resolved_harness,
         resolved_zdr=entry.resolved_zdr,
         sig_v=entry.sig_v,
+        legacy_fields=entry._legacy_signature_fields,
     )
     return hmac.compare_digest(expected, entry.signature)
 

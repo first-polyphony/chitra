@@ -10,50 +10,22 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from chitra.taxonomy import TaxonomyEntry
-
-if TYPE_CHECKING:
-    from chitra.policy_config import GatePolicy
-
-_DEFERRAL_PHRASES: tuple[str, ...] = (
-    "you'll need to",
-    "you will need to",
-    "todo",
-    "not implemented",
-    "notimplemented",
-    "out of scope",
-    "leaving for",
-    "leave for",
-    "deferred",
-    "deferring",
-    "close follow-up",
-    "close follow-ups",
-    "follow-up items",
-    "left as an exercise",
-    "in a future pr",
-    "future work",
-    "conditionally healthy",
-    "correctly blocked",
-    "parse-only",
-    "not publication-ready",
-    "repaired and covered by tests",
-    "CI evidence",
+from chitra.lexicon import (
+    COMPLETION_CLAIM_RE,
+    COMPLETION_DEFERRAL_PHRASES,
+    COMPLETION_EVIDENCE_FAILURE_RE,
+    COMPLETION_EVIDENCE_LIVE_RESULT_RE,
+    COMPLETION_EVIDENCE_PATH_RE,
+    COMPLETION_EVIDENCE_PR_RE,
+    COMPLETION_EVIDENCE_SHA_RE,
 )
+from chitra.policy_config import GatePolicy
 
-_OPERATIONALIZED_CODES: frozenset[str] = frozenset({"DEFERRAL_STUB", "FAKE_DONE"})
-_COMPLETION_CLAIM_RE = re.compile(
-    r"\b(done|complete(?:d)?|finished|fixed|repaired|shipped|deployed|publication-ready|ready for (?:merge|release))\b",
-    re.I,
-)
-_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.I)
-_PATH_RE = re.compile(r"(?:^|\s)(?:/|\./)[^\s,;]+|\b[^\s]+\.(?:json|jsonl|log|png|jpg|jpeg|webp|txt)\b", re.I)
-_PR_RE = re.compile(r"\b(?:merged\s+)?pr\s*#\d+\b", re.I)
-_LIVE_RESULT_RE = re.compile(r"\b(?:health|probe|curl|http|status|requests?|latency|exit)\b[^\n]*\b\d+(?:\.\d+)?\b", re.I)
-_FAILURE_RE = re.compile(r"\b(?:error|failed|failure|http)\b[^\n]*\b(?:[45]\d\d|\d+)\b", re.I)
+_DEFERRAL_PHRASES = COMPLETION_DEFERRAL_PHRASES
 
 
 class CompletionClaimEvent(enum.StrEnum):
@@ -120,7 +92,7 @@ class CompletionReviewRecord(BaseModel):
 
 def is_completion_claim(text: str) -> bool:
     """Return whether a completed turn adopts a literal completion posture."""
-    return _COMPLETION_CLAIM_RE.search(text) is not None
+    return COMPLETION_CLAIM_RE.search(text) is not None
 
 
 def check_todo_residue(todo_items: list[TodoItem], *, complete_statuses: Sequence[str] = ("done",)) -> list[str]:
@@ -129,19 +101,14 @@ def check_todo_residue(todo_items: list[TodoItem], *, complete_statuses: Sequenc
 
 def scan_deferral_language(
     text: str,
-    taxonomy: Sequence[TaxonomyEntry],
     *,
     phrases: Sequence[str] | None = None,
 ) -> list[dict[str, str]]:
-    available_codes = {entry.code for entry in taxonomy} & _OPERATIONALIZED_CODES
-    if not available_codes:
-        return []
     lowered = text.lower()
     matches: list[dict[str, str]] = []
     for phrase in phrases if phrases is not None else _DEFERRAL_PHRASES:
         if phrase.lower() in lowered:
-            code = "DEFERRAL_STUB" if "DEFERRAL_STUB" in available_codes else next(iter(available_codes))
-            matches.append({"phrase": phrase, "code": code})
+            matches.append({"phrase": phrase, "code": "DEFERRAL_STUB"})
     return matches
 
 
@@ -149,14 +116,14 @@ def evidence_is_concrete(evidence: CompletionEvidence) -> bool:
     """Reject labels/assertions that contain no independently locatable fact."""
     citation = evidence.citation
     if evidence.kind == "deploy":
-        return _SHA_RE.search(citation) is not None
+        return COMPLETION_EVIDENCE_SHA_RE.search(citation) is not None
     if evidence.kind == "live_verify":
-        return _PATH_RE.search(citation) is not None or _LIVE_RESULT_RE.search(citation) is not None
+        return COMPLETION_EVIDENCE_PATH_RE.search(citation) is not None or COMPLETION_EVIDENCE_LIVE_RESULT_RE.search(citation) is not None
     if evidence.kind == "artifact":
-        return _PATH_RE.search(citation) is not None
+        return COMPLETION_EVIDENCE_PATH_RE.search(citation) is not None
     if evidence.kind == "merged_pr":
-        return _PR_RE.search(citation) is not None
-    return _PATH_RE.search(citation) is not None or _FAILURE_RE.search(citation) is not None
+        return COMPLETION_EVIDENCE_PR_RE.search(citation) is not None
+    return COMPLETION_EVIDENCE_PATH_RE.search(citation) is not None or COMPLETION_EVIDENCE_FAILURE_RE.search(citation) is not None
 
 
 def extract_completion_evidence(text: str) -> list[CompletionEvidence]:
@@ -168,15 +135,19 @@ def extract_completion_evidence(text: str) -> list[CompletionEvidence]:
         if not line:
             continue
         kinds: list[EvidenceKind] = []
-        if _PR_RE.search(line):
+        if COMPLETION_EVIDENCE_PR_RE.search(line):
             kinds.append("merged_pr")
-        if _SHA_RE.search(line) and re.search(r"\b(deploy|release|sha|commit)\b", line, re.I):
+        if COMPLETION_EVIDENCE_SHA_RE.search(line) and re.search(r"\b(deploy|release|sha|commit)\b", line, re.I):
             kinds.append("deploy")
-        if _LIVE_RESULT_RE.search(line) or (re.search(r"\blive[- ]?verif", line, re.I) and _PATH_RE.search(line)):
+        if COMPLETION_EVIDENCE_LIVE_RESULT_RE.search(line) or (
+            re.search(r"\blive[- ]?verif", line, re.I) and COMPLETION_EVIDENCE_PATH_RE.search(line)
+        ):
             kinds.append("live_verify")
-        if _PATH_RE.search(line) and re.search(r"\b(proof|artifact|screenshot|record|log|report)\b", line, re.I):
+        if COMPLETION_EVIDENCE_PATH_RE.search(line) and re.search(
+            r"\b(proof|artifact|screenshot|record|log|report)\b", line, re.I
+        ):
             kinds.append("artifact")
-        if _FAILURE_RE.search(line):
+        if COMPLETION_EVIDENCE_FAILURE_RE.search(line):
             kinds.append("failure")
         for kind in kinds:
             key = (kind, line)
@@ -190,7 +161,6 @@ def evaluate_completion_claim(
     todo_items: list[TodoItem],
     transcript_text: str,
     evidence: Sequence[CompletionEvidence],
-    taxonomy: Sequence[TaxonomyEntry],
     *,
     policy: GatePolicy | None = None,
     open_asks: Sequence[str] = (),
@@ -198,11 +168,9 @@ def evaluate_completion_claim(
 ) -> CompletionAudit:
     """Require cited deploy/live proof and an honest completion posture."""
     if policy is None:
-        from chitra.policy_config import GatePolicy
-
         policy = GatePolicy()
     todo_residue = check_todo_residue(todo_items, complete_statuses=policy.complete_todo_statuses)
-    deferral_matches = scan_deferral_language(transcript_text, taxonomy, phrases=policy.deferral_phrases)
+    deferral_matches = scan_deferral_language(transcript_text, phrases=policy.deferral_phrases)
     invalid_evidence = [item.citation for item in evidence if not evidence_is_concrete(item)]
     valid = [item for item in evidence if evidence_is_concrete(item)]
     valid_kinds = {item.kind for item in valid}
@@ -263,7 +231,6 @@ def evaluate_turn_end(
     *,
     todo_items: list[TodoItem],
     evidence: Sequence[CompletionEvidence],
-    taxonomy: Sequence[TaxonomyEntry],
     policy: GatePolicy | None = None,
     open_asks: Sequence[str] = (),
     blockers: Sequence[str] = (),
@@ -278,7 +245,6 @@ def evaluate_turn_end(
         todo_items,
         transcript_text,
         evidence,
-        taxonomy,
         policy=policy,
         open_asks=open_asks,
         blockers=blockers,
