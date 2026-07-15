@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import chitra.usage as usage
 from chitra.policy_config import UsagePolicy
 from chitra.usage import (
     CodexSnapshotError,
@@ -225,8 +226,8 @@ def test_codex_snapshot_missing_auth_file_uses_empty_account(tmp_path: Path) -> 
 def test_codex_snapshot_errors_for_deadline_missing_binary_missing_result_and_nonzero_exit(tmp_path: Path) -> None:
     auth_path = tmp_path / "missing.json"
     deadline_process = _FakeCodexProcess(None, respond=False)
-    clock_values = iter((0.0, 0.0, 0.0, 15.0))
-    with pytest.raises(CodexSnapshotError, match="within 15 seconds"):
+    clock_values = iter((0.0, 0.0, 0.0, usage.CODEX_SNAPSHOT_TIMEOUT_SECS))
+    with pytest.raises(CodexSnapshotError, match="within 45 seconds"):
         codex_snapshot(process_factory=_process_factory(deadline_process), clock=lambda: next(clock_values), auth_path=auth_path)
 
     def missing_factory(command: object) -> _FakeCodexProcess:
@@ -242,6 +243,17 @@ def test_codex_snapshot_errors_for_deadline_missing_binary_missing_result_and_no
     nonzero_process = _FakeCodexProcess(None, returncode=7)
     with pytest.raises(CodexSnapshotError, match=r"failed \(7\)"):
         codex_snapshot(process_factory=_process_factory(nonzero_process), auth_path=auth_path)
+
+
+def test_codex_snapshot_timeout_is_env_configurable_and_reports_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_CODEX_SNAPSHOT_TIMEOUT_SECS", "90")
+    assert usage._codex_snapshot_timeout_secs() == 90.0
+    monkeypatch.setenv("CHITRA_CODEX_SNAPSHOT_TIMEOUT_SECS", "not-a-number")
+    assert usage._codex_snapshot_timeout_secs() == 45.0
+    monkeypatch.delenv("CHITRA_CODEX_SNAPSHOT_TIMEOUT_SECS")
+    assert usage._codex_snapshot_timeout_secs() == 45.0
+    # Timeout errors are self-diagnosing: they carry the host load average.
+    assert "loadavg" in usage._codex_timeout_message()
 
 
 def test_evaluate_grouped_attributes_fresh_account_verdicts_to_stale_siblings() -> None:
