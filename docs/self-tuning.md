@@ -2,7 +2,7 @@
 
 `policy.yaml` is the single mutable vocabulary surface for completion-gate and dispatch matching. The shipped defaults are used when no policy file is configured; see [policy.yaml.example](policy.yaml.example) for every field.
 
-Build a labeled JSONL corpus from your own deployment history. Each completion case records todo items, the three-question transcript brief, citation-bearing evidence items (`kind`, exact `citation`, and optional `todo_item`), and an expected `CLEAN` or `COMPLETION_DISPUTE` verdict. Each voice case records a nudge and whether it should be blocked. Keep a separate holdout corpus that the policy editor never sees.
+Build a labeled JSONL corpus from your own deployment history. Each completion case records todo items, the completion-claim transcript text, citation-bearing evidence items (`kind`, exact `citation`, and optional `todo_item`), and an expected `CLEAN` or `COMPLETION_DISPUTE` verdict. Each voice case records a nudge and whether it should be blocked. Keep a separate holdout corpus that the policy editor never sees.
 
 Run the immutable evaluator against a candidate policy:
 

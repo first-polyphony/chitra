@@ -1343,9 +1343,9 @@ def test_policy_file_is_wired_to_completion_gate(tmp_path: Path, monkeypatch: py
             order_id="policy-gate",
             session_ref="localhost:s:0.0",
             nudge=(
-                "What was built: The configured policy gate was completed.\n"
-                "What it does: It exercises the configured evidence requirements.\n"
-                "Does it actually work: Local probe status=200 with 1 check; /tmp/policy-proof.json."
+                "The configured policy gate was completed.\n"
+                "It exercises the configured evidence requirements.\n"
+                "Local probe status=200 with 1 check; /tmp/policy-proof.json."
             ),
             completion_todo_items=[],
         ),

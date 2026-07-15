@@ -28,8 +28,9 @@ All notable changes to this project are documented here, in the [Keep a Changelo
   Reversible informational and in-scope technical answers may release after
   unanimous acceptance, while spend, credentials, irreversible actions, and
   strategy redirects always require operator confirmation.
-- Required delivery briefs for `chitra-artifacts record`, covering what was
-  built, what it does, and whether it actually works with concrete evidence.
+- Required sidecar-authored delivery briefs for `chitra-artifacts record`,
+  covering what was built, what it does, and whether it actually works with
+  concrete evidence.
 - Example systemd service/timer units for the two-minute capacity sweep, plus
   a read-only `chitra-ownership` query for Watchtower to check resolved session
   references against currently tracked working lanes.
@@ -40,9 +41,9 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 ### Changed
 - Moved isolated completion review onto a bounded two-worker pool so
   `poll_once` never waits on `claude -p`; in-flight lanes remain yellow and
-  later polls apply the completed verdict. Delivery-brief validation now
-  defaults to visible warn mode and can be restored to disputing enforcement
-  with `completion_gate.brief_gate_mode: enforce`.
+  later polls apply the completed verdict. Delivery-brief validation now lives
+  only on the guarded artifact record path; lane completion disputes stay on
+  cited-evidence and posture grounds.
 - Defaulted `watchd`'s isolated reviewer to the ambient monitor model (ruling
   3A: same model as the monitor, different context), exposed its model,
   normal-round count, and command through environment and CLI configuration

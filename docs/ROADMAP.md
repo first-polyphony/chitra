@@ -19,11 +19,10 @@ Fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](ht
 ### Completion gate
 
 A forced audit of every watched turn-end. Completion claims require concrete
-deploy and live-verification citations, per-item todo proof, and a valid
-three-question delivery brief; a turn without a completion claim is recorded
-separately as finished but unverified. `dispatchd` also recognizes outgoing
-completion claims without relying on a caller to opt in. The gate never
-auto-closes a lane.
+deploy and live-verification citations and per-item todo proof; a turn without
+a completion claim is recorded separately as finished but unverified.
+`dispatchd` also recognizes outgoing completion claims without relying on a
+caller to opt in. The gate never auto-closes a lane.
 
 ## v1.1
 

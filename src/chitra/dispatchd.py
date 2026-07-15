@@ -560,7 +560,6 @@ def _process_claimed_order(
             order.completion_evidence,
             load_taxonomy(policy.completion_gate.taxonomy_path),
             policy=policy.completion_gate,
-            delivery_brief=order.completion_brief,
             open_asks=order.completion_open_asks,
             blockers=order.completion_blockers,
         )

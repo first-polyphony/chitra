@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from chitra.artifacts import ArtifactValidationError, validate_delivery_brief
 from chitra.taxonomy import TaxonomyEntry
 
 if TYPE_CHECKING:
@@ -94,7 +93,6 @@ class CompletionAudit(BaseModel):
     evidence_gap: bool
     invalid_evidence: list[str]
     per_item_evidence_gap: list[str]
-    brief_issues: list[str]
     posture_mismatch: bool
     summary: str
 
@@ -195,11 +193,10 @@ def evaluate_completion_claim(
     taxonomy: Sequence[TaxonomyEntry],
     *,
     policy: GatePolicy | None = None,
-    delivery_brief: str | None = None,
     open_asks: Sequence[str] = (),
     blockers: Sequence[str] = (),
 ) -> CompletionAudit:
-    """Require cited deploy/live proof, honest posture, and an outcome brief."""
+    """Require cited deploy/live proof and an honest completion posture."""
     if policy is None:
         from chitra.policy_config import GatePolicy
 
@@ -220,27 +217,11 @@ def evaluate_completion_claim(
         for item in todo_items
         if item.status in policy.complete_todo_statuses and not any(proof.todo_item == item.text for proof in valid)
     ]
-    brief_issues: list[str] = []
-    try:
-        validate_delivery_brief(delivery_brief if delivery_brief is not None else transcript_text)
-    except ArtifactValidationError as exc:
-        brief_issues.append(str(exc))
     blocked_todos = [item.text for item in todo_items if item.status.lower() in {"blocked", "stalled"}]
     posture_mismatch = bool(blocked_todos and not open_asks and not blockers)
 
-    brief_disputes = policy.brief_gate_mode == "enforce" and bool(brief_issues)
-    clean = not (
-        todo_residue
-        or deferral_matches
-        or evidence_gap
-        or per_item_evidence_gap
-        or brief_disputes
-        or posture_mismatch
-    )
+    clean = not (todo_residue or deferral_matches or evidence_gap or per_item_evidence_gap or posture_mismatch)
     if clean:
-        summary = "clean: cited deploy and live verification evidence, per-item proof, and delivery brief all validate"
-        if brief_issues:
-            summary = f"clean: all enforcing completion checks validate; brief (warn): {brief_issues[0]}"
         return CompletionAudit(
             verdict="CLEAN",
             todo_residue=[],
@@ -248,9 +229,8 @@ def evaluate_completion_claim(
             evidence_gap=False,
             invalid_evidence=[],
             per_item_evidence_gap=[],
-            brief_issues=brief_issues,
             posture_mismatch=False,
-            summary=summary,
+            summary="clean: cited deploy and live verification evidence and per-item proof validate",
         )
 
     gaps: list[str] = []
@@ -264,9 +244,6 @@ def evaluate_completion_claim(
         gaps.append(f"bare or non-concrete evidence assertions: {invalid_evidence!r}")
     if per_item_evidence_gap:
         gaps.append(f"missing per-item verification: {per_item_evidence_gap!r}")
-    if brief_issues:
-        prefix = "delivery brief invalid" if brief_disputes else "brief (warn)"
-        gaps.append(f"{prefix}: {brief_issues[0]}")
     if posture_mismatch:
         gaps.append(f"blocked todo posture has no open ask or blocker: {blocked_todos!r}")
     return CompletionAudit(
@@ -276,7 +253,6 @@ def evaluate_completion_claim(
         evidence_gap=evidence_gap,
         invalid_evidence=invalid_evidence,
         per_item_evidence_gap=per_item_evidence_gap,
-        brief_issues=brief_issues,
         posture_mismatch=posture_mismatch,
         summary="completion dispute: " + "; ".join(gaps),
     )
@@ -304,7 +280,6 @@ def evaluate_turn_end(
         evidence,
         taxonomy,
         policy=policy,
-        delivery_brief=transcript_text,
         open_asks=open_asks,
         blockers=blockers,
     )
