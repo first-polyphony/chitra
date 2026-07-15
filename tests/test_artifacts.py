@@ -14,6 +14,7 @@ from chitra.artifacts import (
     ArtifactNotFoundError,
     ArtifactRecord,
     ArtifactValidationError,
+    brief_is_conforming,
     get_artifact,
     list_artifacts,
     main,
@@ -187,3 +188,52 @@ def test_missing_url_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert "artifact not found" in capsys.readouterr().err
     assert main(["mark-reviewed", "--root", str(tmp_path), "--url", missing]) == 1
     assert "artifact not found" in capsys.readouterr().err
+
+
+def _write_raw_ledger(tmp_path: Path, records: list[dict[str, str]]) -> None:
+    """Write records straight to artifacts.json, bypassing the guarded CLI (the F8 path)."""
+    payload = {"schema": "chitra.artifacts.v1", "updated_at": "2026-07-14T00:00:00+00:00", "artifacts": records}
+    (tmp_path / "artifacts.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _bypassed_record(brief: str, *, review_status: str = "reviewed") -> dict[str, str]:
+    reviewed_at = "2026-07-14T01:00:00+00:00" if review_status == "reviewed" else ""
+    return {
+        "url": f"{ARTIFACT_URL_PREFIX}bypass-001",
+        "title": "Directly-written record",
+        "kind": "page",
+        "source": "tophand:/tmp/direct.md",
+        "brief": brief,
+        "published_at": "2026-07-14T00:30:00+00:00",
+        "updated_at": "2026-07-14T00:30:00+00:00",
+        "review_status": review_status,
+        "reviewed_at": reviewed_at,
+        "response": "",
+    }
+
+
+def test_load_flags_bypassed_nonconforming_brief_without_failing(tmp_path: Path) -> None:
+    # A direct JSON write with an empty brief must still load, but be flagged.
+    _write_raw_ledger(tmp_path, [_bypassed_record("")])
+    loaded = list_artifacts(tmp_path)
+    assert len(loaded) == 1
+    assert loaded[0].brief_conforming is False
+
+    # A CLI-written record with a valid brief loads as conforming.
+    conforming = upsert_artifact(tmp_path, _record(url=f"{ARTIFACT_URL_PREFIX}ok-001"))
+    assert get_artifact(tmp_path, conforming.url).brief_conforming is True
+
+
+def test_nonconforming_command_surfaces_reviewed_bypass(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_raw_ledger(tmp_path, [_bypassed_record("", review_status="reviewed")])
+    capsys.readouterr()
+    assert main(["nonconforming", "--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "NON-CONFORMING ARTIFACT BRIEFS" in out
+    assert f"{ARTIFACT_URL_PREFIX}bypass-001" in out
+
+
+def test_brief_is_conforming_predicate() -> None:
+    assert brief_is_conforming(VALID_BRIEF) is True
+    assert brief_is_conforming("") is False
+    assert brief_is_conforming("What was built: x\nWhat it does: y\nDoes it actually work: z") is False
