@@ -59,7 +59,7 @@ class DeliveryBrief:
 
 
 def validate_delivery_brief(brief: str) -> DeliveryBrief:
-    """Require outcome content and concrete work evidence, not narration."""
+    """Lint the sidecar-authored brief supplied to the guarded record CLI."""
     text = brief.strip()
     matches = list(_BRIEF_LABEL_RE.finditer(text))
     sections: dict[str, str] = {}

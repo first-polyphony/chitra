@@ -6,11 +6,11 @@
 first classifies the turn deterministically. Only a completion claim runs
 isolated watched-session reviewers against the frozen goal; a non-claim is
 recorded as `turn-finished-unverified` without launching a subprocess.
-Completion claims require citation-bearing deploy/live proof. Delivery-brief
-issues are recorded as `brief (warn)` by default without causing a dispute;
-set `completion_gate.brief_gate_mode: enforce` in the policy file to make them
-disputing. All other completion checks enforce in both modes. Outgoing
-completion claims are also recognized in `dispatchd` without caller opt-in.
+Completion claims require citation-bearing deploy/live proof, and lane-side
+disputes stay on evidence and posture grounds only. Delivery-brief content is
+validated separately at `chitra-artifacts record --brief`, where it lints the
+sidecar-authored brief rather than lane pane text. Outgoing completion claims
+are also recognized in `dispatchd` without caller opt-in.
 The isolated review runs on a bounded two-worker pool, so `poll_once` never
 waits on `claude -p`; it marks the lane `turn-finished-unverified` while the
 review is in flight and collects completed verdicts on later polls. The

@@ -153,9 +153,9 @@ class _BlockingReviewer:
         )
 
 
-_CITED_CLAIM_CAPTURE = """What was built: The forced completion review was completed and deployed at SHA abc1234.
-What it does: It reviews every finished lane turn before any done state is trusted.
-Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-review.log.
+_CITED_CLAIM_CAPTURE = """The forced completion review was completed and deployed at SHA abc1234.
+It reviews every finished lane turn before any done state is trusted.
+Live health probe status=200 with 24 requests; /tmp/live-review.log.
 \u276f
 """
 
@@ -219,9 +219,9 @@ def test_turn_end_automatically_runs_review_and_marks_cited_completion_pending_c
     captures = iter(
         [
             "working on the implementation\nesc to interrupt\n❯\n",
-            """What was built: The forced completion review was completed and deployed at SHA abc1234.
-What it does: It reviews every finished lane turn before any done state is trusted.
-Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-review.log.
+            """The forced completion review was completed and deployed at SHA abc1234.
+It reviews every finished lane turn before any done state is trusted.
+Live health probe status=200 with 24 requests; /tmp/live-review.log.
 ❯
 """,
         ]

@@ -110,21 +110,22 @@ def test_scan_deferral_language_returns_empty_list_when_taxonomy_lacks_operation
 # evaluate_completion_claim
 # ---------------------------------------------------------------------------
 
-GOOD_BRIEF = """What was built: The requested parser gate was implemented.
-What it does: It rejects unsupported completion claims before delivery.
-Does it actually work: Live health probe status=200 with 12 requests; deploy SHA abc1234."""
+GOOD_CLAIM = """The requested parser gate was completed and deployed at SHA abc1234.
+It rejects unsupported completion claims before delivery. Live health probe status=200 with 12 requests."""
 GOOD_EVIDENCE = [
     CompletionEvidence(kind="deploy", citation="deployed SHA abc1234"),
     CompletionEvidence(kind="live_verify", citation="live health probe status=200 with 12 requests"),
 ]
 
 
-def test_clean_completion_claim_with_no_todos_and_real_evidence_is_clean() -> None:
-    audit = evaluate_completion_claim([], GOOD_BRIEF, GOOD_EVIDENCE, load_taxonomy())
+def test_completion_claim_without_labeled_brief_and_with_real_evidence_is_clean() -> None:
+    audit = evaluate_completion_claim([], GOOD_CLAIM, GOOD_EVIDENCE, load_taxonomy())
     assert audit.verdict == "CLEAN"
     assert audit.todo_residue == []
     assert audit.deferral_matches == []
     assert audit.evidence_gap is False
+    assert "brief_issues" not in audit.model_dump()
+    assert "brief" not in audit.summary
 
 
 def test_done_claim_with_no_evidence_is_flagged_fake_done() -> None:
@@ -138,7 +139,7 @@ def test_done_claim_with_no_evidence_is_flagged_fake_done() -> None:
 def test_done_claim_with_only_deploy_evidence_still_disputes_missing_live_verify() -> None:
     audit = evaluate_completion_claim(
         [],
-        GOOD_BRIEF,
+        GOOD_CLAIM,
         [CompletionEvidence(kind="deploy", citation="deployed SHA abc1234")],
         load_taxonomy(),
     )
@@ -150,71 +151,36 @@ def test_done_claim_with_only_deploy_evidence_still_disputes_missing_live_verify
 
 def test_open_todo_residue_disputes_even_with_full_evidence() -> None:
     items = [TodoItem(text="finish the migration", status="open")]
-    audit = evaluate_completion_claim(items, GOOD_BRIEF, GOOD_EVIDENCE, load_taxonomy())
+    audit = evaluate_completion_claim(items, GOOD_CLAIM, GOOD_EVIDENCE, load_taxonomy())
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.todo_residue == ["finish the migration"]
     assert "finish the migration" in audit.summary
 
 
 def test_deferral_language_disputes_even_with_full_evidence_and_no_todos() -> None:
-    audit = evaluate_completion_claim([], GOOD_BRIEF + "\nDone -- you'll need to wire the rest", GOOD_EVIDENCE, load_taxonomy())
+    audit = evaluate_completion_claim([], GOOD_CLAIM + "\nDone -- you'll need to wire the rest", GOOD_EVIDENCE, load_taxonomy())
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.deferral_matches
 
 
-def test_brief_gate_warn_records_issue_without_disputing_otherwise_clean_claim() -> None:
-    claim = "Completed and deployed at SHA abc1234. Live health probe status=200 with 12 requests."
-
-    audit = evaluate_completion_claim(
-        [],
-        claim,
-        GOOD_EVIDENCE,
-        load_taxonomy(),
-        policy=GatePolicy(brief_gate_mode="warn"),
-    )
-
-    assert audit.verdict == "CLEAN"
-    assert audit.brief_issues
-    assert "brief (warn)" in audit.summary
-
-
-def test_brief_gate_enforce_disputes_otherwise_clean_claim() -> None:
-    claim = "Completed and deployed at SHA abc1234. Live health probe status=200 with 12 requests."
-
-    audit = evaluate_completion_claim(
-        [],
-        claim,
-        GOOD_EVIDENCE,
-        load_taxonomy(),
-        policy=GatePolicy(brief_gate_mode="enforce"),
-    )
-
-    assert audit.verdict == "COMPLETION_DISPUTE"
-    assert audit.brief_issues
-    assert "delivery brief invalid" in audit.summary
-
-
-def test_brief_warn_mode_keeps_deferral_and_evidence_checks_enforcing() -> None:
+def test_deferral_and_evidence_checks_remain_enforcing_without_brief_gate() -> None:
     audit = evaluate_completion_claim(
         [],
         "Completed, but TODO: deploy and verify this later.",
         [],
         load_taxonomy(),
-        policy=GatePolicy(brief_gate_mode="warn"),
     )
 
     assert audit.verdict == "COMPLETION_DISPUTE"
     assert audit.deferral_matches
     assert audit.evidence_gap is True
-    assert audit.brief_issues
-    assert "brief (warn)" in audit.summary
 
 
 def test_configured_completion_policy_controls_statuses_phrases_and_evidence() -> None:
     policy = GatePolicy(complete_todo_statuses=["closed"], deferral_phrases=["later phrase"], required_evidence=[])
     audit = evaluate_completion_claim(
         [TodoItem(text="release", status="closed")],
-        GOOD_BRIEF,
+        GOOD_CLAIM,
         [CompletionEvidence(kind="artifact", citation="proof /tmp/release.json", todo_item="release")],
         load_taxonomy(),
         policy=policy,
@@ -224,9 +190,9 @@ def test_configured_completion_policy_controls_statuses_phrases_and_evidence() -
 
 def test_literal_pass_exemplar_clears_with_honest_cited_per_item_evidence() -> None:
     todos = [TodoItem(text="deploy service", status="done"), TodoItem(text="verify live traffic", status="done")]
-    claim = """What was built: The forced completion gate and roster state shipped with proof artifacts.
-What it does: It forces every lane turn-end through cited completion review and preserves earlier failure evidence.
-Does it actually work: Live health probe status=200, healthy=24, failed=0; record /var/log/chitra/live-verify.log.
+    claim = """The forced completion gate and roster state shipped with proof artifacts.
+It forces every lane turn-end through cited completion review and preserves earlier failure evidence.
+Live health probe status=200, healthy=24, failed=0; record /var/log/chitra/live-verify.log.
 Artifacts: proof JSON /srv/proof/completion.json and screenshot /srv/proof/board.png.
 Merged PR #56 and PR #65. Deploy SHA 1a2b3c4d.
 Honest history: the earlier live probe returned HTTP 503 before the fix; see /var/log/chitra/earlier-503.log."""
@@ -251,9 +217,9 @@ Honest history: the earlier live probe returned HTTP 503 before the fix; see /va
 
 
 def test_literal_fail_exemplar_is_rejected_for_hedges_ci_substitution_parse_only_and_posture_mismatch() -> None:
-    claim = """What was built: The executable is parse-only and not publication-ready.
-What it does: It is conditionally healthy and correctly blocked.
-Does it actually work: Repaired and covered by tests and protected-CI evidence; no human signed."""
+    claim = """The executable is parse-only and not publication-ready.
+It is conditionally healthy and correctly blocked.
+It is repaired and covered by tests and protected-CI evidence; no human signed."""
     audit = evaluate_completion_claim(
         [TodoItem(text="publish the runnable service", status="blocked")],
         claim,
@@ -355,7 +321,7 @@ def test_legacy_true_evidence_booleans_cannot_auto_pass_without_citations(
     payload = {
         "order_id": "legacy-bool",
         "session_ref": "localhost:s:0.0",
-        "nudge": GOOD_BRIEF,
+        "nudge": GOOD_CLAIM,
         "completion_todo_items": [],
         "completion_has_deploy_evidence": True,
         "completion_has_live_verify_evidence": True,
@@ -394,10 +360,9 @@ def test_dispatchd_proceeds_to_dispatch_on_clean_completion_claim(tmp_path: Path
     order = DispatchOrder(
         order_id="ord-audit-2",
         session_ref="localhost:s:0.0",
-        nudge=GOOD_BRIEF,
+        nudge=GOOD_CLAIM,
         completion_todo_items=[],
         completion_evidence=GOOD_EVIDENCE,
-        completion_brief=GOOD_BRIEF,
     )
     order_path = orders_dir / "ord-audit-2.json"
     order_path.write_text(order.model_dump_json(), encoding="utf-8")

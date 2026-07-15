@@ -2,9 +2,6 @@
 # --policy-config-path at a copy of this file. With no policy file, these
 # shipped defaults are used unchanged.
 completion_gate:
-  # "warn" records missing/invalid labeled delivery briefs without disputing
-  # an otherwise clean claim. Set to "enforce" once lanes emit the brief.
-  brief_gate_mode: warn
   # Case-insensitive literal phrases that dispute a completion claim.
   deferral_phrases:
     - "you'll need to"

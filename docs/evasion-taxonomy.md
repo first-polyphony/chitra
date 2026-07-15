@@ -32,8 +32,12 @@ against concrete, checkable behaviors:
 2. A self-declared done claim with no concrete deploy SHA and live probe/log
    citations (`evidence_gap`) — a bare boolean or "CI evidence" assertion does
    not count.
-3. Missing per-item verification, an invalid three-question delivery brief,
-   or a blocked-todo posture with no disclosed open ask/blocker.
+3. Missing per-item verification or a blocked-todo posture with no disclosed
+   open ask/blocker.
+
+These evidence and posture checks are the only lane-side completion-dispute
+grounds. Delivery-brief content is linted separately on the guarded artifact
+record path.
 
 `scan_deferral_language` additionally does simple, case-insensitive substring
 matching against a fixed phrase list (`"you'll need to"`, `"TODO"`,

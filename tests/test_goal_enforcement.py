@@ -59,7 +59,7 @@ class AcceptingReviewer:
 
 def test_initial_round_requires_unanimous_isolated_acceptance(tmp_path: Path) -> None:
     goal = _goal(tmp_path)
-    behavior = WatchedSessionBehavior.from_turn(goal.session_ref, "What was built: gate code\nWhat it does: blocks drift")
+    behavior = WatchedSessionBehavior.from_turn(goal.session_ref, "The gate code is complete and blocks drift with cited proof.")
     reviewer = AcceptingReviewer()
 
     signal = review_watched_session(tmp_path, goal.session_ref, behavior, reviewer=reviewer)

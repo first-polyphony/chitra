@@ -29,7 +29,7 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.goal_enforcement`** — freezes the watched session's current goal, launches each adversarial reviewer in a separate process, requires unanimous acceptance, rejects stale or tampered bindings, and automatically restarts a redirected review with one reviewer while recording the restart in goal history. Spend, credentials, irreversible actions, and strategy redirects remain operator-gated even after unanimous acceptance.
 - **`chitra.reasoning`** — goal-first decision triangulation whose public dispatch record is the immutable `DecisionAttestation`. The attestation binds exact approved text, frozen-goal and corpus lineage, the watched-session review signal, and the operator-gate outcome. `dispatchd` logs it to Chitra's private `attestations.jsonl`; only the approved text is pasted.
 - **`chitra.close_gate`** — pure close-time inventory parsing and diffing over immutable `enrolled_done_when`, the current condition, explicit delivered-item/evidence bindings, close notes, recorded goal revisions, and explicit operator acknowledgements. It never infers delivery from close prose.
-- **`chitra.completion_gate`** — citation-bearing completion review. Deploy and live-verification claims must retain concrete SHA, path, or probe citations, and completed todo items need per-item proof. Labeled delivery-brief issues are recorded in the default `warn` mode and become disputing when `brief_gate_mode` is set to `enforce`.
+- **`chitra.completion_gate`** — citation-bearing completion review. Deploy and live-verification claims must retain concrete SHA, path, or probe citations, completed todo items need per-item proof, and completion disputes stay on evidence and posture grounds only.
 - **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs the deterministic completion audit, while only a completion claim launches isolated watched-session reviewers on a bounded worker pool. In-flight review is `turn-finished-unverified` (yellow), a turn without a completion claim stays unverified, and a disputed claim becomes `completion-disputed`, so none can render idle-green.
 - **`chitra.account_registry`** — a freshness-bounded fact table of which account each tracked lane was last observed under. Used by `chitra.rate_limit_guard` to surface a missing usage snapshot or a mid-session account change as an operator escalation, instead of silently ignoring it or silently merging it with an unrelated lane.
 - **`chitra.rate_limit_state`** — the durable transaction outbox behind `chitra.rate_limit_guard`'s pause/resume state machine (see below). A crash between sweeps, or between any two phases, is never a data-loss event: the next sweep re-reads the transaction and continues from wherever it stopped.
@@ -68,18 +68,11 @@ reviews in `poll_once`; later polls collect completed verdicts and apply final
 lane status. Daemon shutdown waits for running reviews and collects their
 results so reviewer threads and subprocesses are not abandoned.
 
-Delivery-brief validation starts in activation-safe warning mode. Missing or
-invalid labeled `What was built`, `What it does`, and `Does it actually work`
-sections remain visible as `brief (warn)` audit issues but do not dispute an
-otherwise clean completion. To enforce briefs, set this in the policy file:
-
-```yaml
-completion_gate:
-  brief_gate_mode: enforce
-```
-
-Todo residue, deferral language, evidence gaps, invalid or missing per-item
-evidence, and posture mismatches remain enforcing in both modes.
+Lane completion claims are audited on evidence grounds only: todo residue,
+deferral language, evidence gaps, invalid or missing per-item evidence, and
+posture mismatches remain disputing. Delivery-brief content is validated only
+at `chitra-artifacts record --brief`, where it lints the sidecar-authored brief
+instead of lane pane text.
 
 ## Operator brief conversation log
 

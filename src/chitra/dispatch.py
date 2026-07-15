@@ -220,7 +220,6 @@ class DispatchOrder(BaseModel):
     completion_evidence: list[CompletionEvidence] = Field(default_factory=list)
     completion_open_asks: list[str] = Field(default_factory=list)
     completion_blockers: list[str] = Field(default_factory=list)
-    completion_brief: str | None = None
 
     # Opt-in exemption from dispatchd's guard freeze check (see
     # dispatchd.process_one_order). False for every ordinary order -- the
