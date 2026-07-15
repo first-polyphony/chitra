@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from chitra.goal_enforcement import ReviewerVerdict
+from chitra.dispatch import DispatchOrder
+from chitra.goal_enforcement import ReviewerVerdict, ReviewFinding
 from chitra.goals import GoalRecord, get_goal, upsert_goal
 from chitra.lane_activity import load_lane_activity
 from chitra.triaged import parse_event_line
@@ -89,6 +90,27 @@ class _AcceptingReviewer:
             goal_contract_id=goal.contract_id,
             behavior_sha256=behavior.behavior_sha256,
             verdict="accept",
+        )
+
+
+class _RejectingReviewer:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def review(self, goal, behavior, reviewer_id: str) -> ReviewerVerdict:
+        self.calls.append(reviewer_id)
+        return ReviewerVerdict(
+            reviewer_id=reviewer_id,
+            goal_contract_id=goal.contract_id,
+            behavior_sha256=behavior.behavior_sha256,
+            verdict="reject",
+            findings=(
+                ReviewFinding(
+                    code="unsupported_completion",
+                    detail="The completion claim lacks the required proof.",
+                    citation="The forced completion review was completed and deployed.",
+                ),
+            ),
         )
 
 
@@ -228,6 +250,47 @@ Does it actually work: Live health probe status=200 with 24 requests; /tmp/live-
     assert review["completion_verdict"] == "CLEAN"
 
 
+def test_rejected_turn_review_enqueues_reasoned_dispatch(tmp_path: Path) -> None:
+    goal = _tracked_goal(tmp_path)
+    reviewer = _RejectingReviewer()
+    state = {"finished": False}
+
+    def runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if command[1] == "list-panes":
+            return _completed(command, "%1\tfleet:0.0\n")
+        if command[1] == "capture-pane":
+            content = _CITED_CLAIM_CAPTURE if state["finished"] else "working on the implementation\nesc to interrupt\n❯\n"
+            return _completed(command, content)
+        raise AssertionError(f"unexpected command: {command}")
+
+    watcher = Watchd(
+        WatchdConfig(state_dir=tmp_path, events_log=tmp_path / "events.log"),
+        runner=runner,
+        reviewer=reviewer,
+    )
+    try:
+        watcher.poll_once()
+        state["finished"] = True
+        watcher.poll_once()
+        for _ in range(50):
+            orders = list((tmp_path / "queue" / "orders").glob("*.json"))
+            if orders:
+                break
+            threading.Event().wait(0.05)
+            watcher.poll_once()
+
+        assert len(orders) == 1
+        order = DispatchOrder.model_validate_json(orders[0].read_text(encoding="utf-8"))
+        assert order.session_ref == goal.session_ref
+        assert order.message_kind == "reasoned_action"
+        assert order.decision_attestation is not None
+        assert order.decision_attestation.review_verdict == "reject"
+        assert order.decision_attestation.operator_confirmed is True
+        assert reviewer.calls == ["reviewer-1-1", "reviewer-1-2"]
+    finally:
+        watcher.shutdown()
+
+
 def test_turn_end_without_claim_is_finished_unverified_not_idle_green(tmp_path: Path) -> None:
     goal = _tracked_goal(tmp_path)
     reviewer = _AcceptingReviewer()
@@ -341,6 +404,7 @@ def test_resolve_config_uses_chitra_state_and_watchd_environment(monkeypatch: py
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COUNT", "1")
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COMMAND", "/opt/chitra/bin/review-with-monitor-credentials")
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_MODEL", "operator-cheap-model")
+    monkeypatch.setenv("CHITRA_WATCHD_REASONED_DISPATCH_ENABLED", "false")
 
     config = resolve_config()
 
@@ -352,15 +416,15 @@ def test_resolve_config_uses_chitra_state_and_watchd_environment(monkeypatch: py
     assert config.reviewer_count == 1
     assert config.reviewer_command == "/opt/chitra/bin/review-with-monitor-credentials"
     assert config.reviewer_model == "operator-cheap-model"
+    assert config.reasoned_dispatch_enabled is False
 
 
-def test_reviewer_config_precedence_is_cli_then_env_then_pinned_defaults(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_reviewer_config_precedence_is_cli_then_env_then_pinned_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     defaults = resolve_config(state_dir=tmp_path / "defaults")
     assert defaults.reviewer_count == 2
     assert defaults.reviewer_command == "claude"
     assert defaults.reviewer_model is None
+    assert defaults.reasoned_dispatch_enabled is True
 
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COUNT", "1")
     monkeypatch.setenv("CHITRA_WATCHD_REVIEWER_COMMAND", "env-claude")
@@ -370,9 +434,7 @@ def test_reviewer_config_precedence_is_cli_then_env_then_pinned_defaults(
     assert environment.reviewer_command == "env-claude"
     assert environment.reviewer_model == "env-model"
 
-    args = build_arg_parser().parse_args(
-        ["--reviewer-count", "3", "--reviewer-command", "cli-claude", "--reviewer-model", "cli-model"]
-    )
+    args = build_arg_parser().parse_args(["--reviewer-count", "3", "--reviewer-command", "cli-claude", "--reviewer-model", "cli-model"])
     cli = resolve_config(
         state_dir=tmp_path / "cli",
         reviewer_count=args.reviewer_count,

@@ -34,6 +34,7 @@ from chitra.completion_gate import (
     extract_completion_evidence,
     is_completion_claim,
 )
+from chitra.dispatch import enqueue_dispatch_order
 from chitra.goal_enforcement import (
     BehaviorReviewer,
     ClaudeProcessReviewer,
@@ -41,9 +42,11 @@ from chitra.goal_enforcement import (
     WatchedSessionBehavior,
     review_watched_session,
 )
-from chitra.goals import GoalStatus, add_ask, list_goals, update_now
+from chitra.goals import GoalStatus, add_ask, get_goal, list_goals, update_now
 from chitra.lane_activity import LaneActivity, LaneBackend, load_lane_activity, upsert_lane_activity
 from chitra.policy_config import load_policy_config
+from chitra.reasoned_dispatch import abstaining_oracle, build_reasoned_dispatch
+from chitra.reasoning import Oracle, PrinciplesIndex
 from chitra.state_paths import state_dir as default_state_dir
 from chitra.taxonomy import load_taxonomy
 
@@ -58,6 +61,7 @@ MAX_LOG_BYTES_ENV_VAR = "CHITRA_WATCHD_MAX_LOG_BYTES"
 REVIEWER_COUNT_ENV_VAR = "CHITRA_WATCHD_REVIEWER_COUNT"
 REVIEWER_COMMAND_ENV_VAR = "CHITRA_WATCHD_REVIEWER_COMMAND"
 REVIEWER_MODEL_ENV_VAR = "CHITRA_WATCHD_REVIEWER_MODEL"
+REASONED_DISPATCH_ENV_VAR = "CHITRA_WATCHD_REASONED_DISPATCH_ENABLED"
 DEFAULT_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_LOG_BYTES = 5 * 1024 * 1024
 DEFAULT_REVIEWER_COUNT = 2
@@ -67,6 +71,7 @@ DEFAULT_REVIEWER_COMMAND = "claude"
 # cheaper model via --reviewer-model / CHITRA_WATCHD_REVIEWER_MODEL.
 DEFAULT_REVIEWER_MODEL: str | None = None
 DEFAULT_REVIEW_MAX_WORKERS = 2
+DEFAULT_REASONED_DISPATCH_ENABLED = True
 CAPTURE_LINES = 60
 NORMALIZED_TAIL_LINES = 25
 
@@ -104,6 +109,8 @@ class WatchdConfig:
     reviewer_count: int = DEFAULT_REVIEWER_COUNT
     reviewer_command: str = DEFAULT_REVIEWER_COMMAND
     reviewer_model: str | None = DEFAULT_REVIEWER_MODEL
+    queue_dir: Path | None = None
+    reasoned_dispatch_enabled: bool = DEFAULT_REASONED_DISPATCH_ENABLED
 
     def __post_init__(self) -> None:
         if self.reviewer_count < 1:
@@ -268,6 +275,8 @@ class Watchd:
     config: WatchdConfig
     runner: CommandRunner = _run_command
     reviewer: BehaviorReviewer | None = None
+    principles: PrinciplesIndex = field(default_factory=PrinciplesIndex)
+    reasoning_oracle: Oracle = abstaining_oracle
     baselines: dict[str, str] = field(default_factory=dict)
     reviewed_turns: set[ReviewKey] = field(default_factory=set)
     pending_reviews: dict[ReviewKey, PendingCompletionReview] = field(default_factory=dict)
@@ -362,6 +371,27 @@ class Watchd:
                 summary=summary,
             ),
         )
+        if self.config.reasoned_dispatch_enabled and review_signal is not None and review_signal.verdict == "reject":
+            goal = get_goal(root, pending.session_ref)
+            if goal is None:
+                raise RuntimeError(f"reviewed goal disappeared before reasoned dispatch: {pending.session_ref}")
+            order = build_reasoned_dispatch(
+                goal,
+                review_signal,
+                principles=self.principles,
+                oracle=self.reasoning_oracle,
+                review_rejection_confirmed=True,
+            )
+            if order is not None:
+                queue_dir = self.config.queue_dir or self.config.state_dir / "queue"
+                order_path = enqueue_dispatch_order(queue_dir, order)
+                logger.info(
+                    "watchd_reasoned_dispatch_enqueued",
+                    session_ref=order.session_ref,
+                    order_id=order.order_id,
+                    message_kind=order.message_kind,
+                    path=str(order_path),
+                )
 
     def _drain_completed_reviews(self) -> None:
         """Collect ready futures without waiting; all shared-state writes stay here."""
@@ -550,6 +580,15 @@ def _positive_int(value: str, *, name: str) -> int:
     return parsed
 
 
+def _boolean(value: str, *, name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 def _split_prefixes(value: str | None) -> tuple[str, ...]:
     """Normalize a comma-separated namespace filter without inventing values."""
     if not value:
@@ -569,6 +608,7 @@ def resolve_config(
     reviewer_count: int | None = None,
     reviewer_command: str | None = None,
     reviewer_model: str | None = None,
+    reasoned_dispatch_enabled: bool | None = None,
 ) -> WatchdConfig:
     """Resolve CLI values, then ``CHITRA_*`` overrides, then generic defaults."""
     configured_state_dir = state_dir or default_state_dir()
@@ -605,16 +645,12 @@ def resolve_config(
     if configured_reviewer_count is None:
         raw_reviewer_count = _env_value(REVIEWER_COUNT_ENV_VAR)
         configured_reviewer_count = (
-            _positive_int(raw_reviewer_count, name=REVIEWER_COUNT_ENV_VAR)
-            if raw_reviewer_count
-            else DEFAULT_REVIEWER_COUNT
+            _positive_int(raw_reviewer_count, name=REVIEWER_COUNT_ENV_VAR) if raw_reviewer_count else DEFAULT_REVIEWER_COUNT
         )
     if configured_reviewer_count < 1:
         raise ValueError("reviewer_count must be a positive integer")
     configured_reviewer_command = (
-        _env_value(REVIEWER_COMMAND_ENV_VAR) or DEFAULT_REVIEWER_COMMAND
-        if reviewer_command is None
-        else reviewer_command.strip()
+        _env_value(REVIEWER_COMMAND_ENV_VAR) or DEFAULT_REVIEWER_COMMAND if reviewer_command is None else reviewer_command.strip()
     )
     if not configured_reviewer_command:
         raise ValueError("reviewer_command must be non-empty")
@@ -625,6 +661,14 @@ def resolve_config(
         configured_reviewer_model = reviewer_model.strip() or None
     else:
         configured_reviewer_model = _env_value(REVIEWER_MODEL_ENV_VAR) or DEFAULT_REVIEWER_MODEL
+    configured_reasoned_dispatch = reasoned_dispatch_enabled
+    if configured_reasoned_dispatch is None:
+        raw_reasoned_dispatch = _env_value(REASONED_DISPATCH_ENV_VAR)
+        configured_reasoned_dispatch = (
+            _boolean(raw_reasoned_dispatch, name=REASONED_DISPATCH_ENV_VAR)
+            if raw_reasoned_dispatch is not None
+            else DEFAULT_REASONED_DISPATCH_ENABLED
+        )
     return WatchdConfig(
         state_dir=configured_state_dir,
         events_log=configured_events_log,
@@ -636,6 +680,7 @@ def resolve_config(
         reviewer_count=configured_reviewer_count,
         reviewer_command=configured_reviewer_command,
         reviewer_model=configured_reviewer_model,
+        reasoned_dispatch_enabled=configured_reasoned_dispatch,
     )
 
 
@@ -692,6 +737,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Pinned isolated reviewer model (default: CHITRA_WATCHD_REVIEWER_MODEL, else the ambient monitor model).",
     )
+    parser.add_argument(
+        "--reasoned-dispatch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enqueue reasoned corrections for rejected reviews (default: enabled; env CHITRA_WATCHD_REASONED_DISPATCH_ENABLED).",
+    )
     parser.add_argument("--once", action="store_true", help="Capture and compare once, then exit.")
     return parser
 
@@ -710,11 +761,12 @@ def main(argv: list[str] | None = None) -> int:
         reviewer_count=args.reviewer_count,
         reviewer_command=args.reviewer_command,
         reviewer_model=args.reviewer_model,
+        reasoned_dispatch_enabled=args.reasoned_dispatch,
     )
     watcher = Watchd(config)
     if args.once:
         try:
-            print(f"{{\"emitted\": {watcher.poll_once()}}}")
+            print(f'{{"emitted": {watcher.poll_once()}}}')
         finally:
             watcher.shutdown()
         return 0
