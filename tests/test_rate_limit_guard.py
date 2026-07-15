@@ -29,7 +29,7 @@ from chitra.rate_limit_guard import (
     sweep,
 )
 from chitra.rate_limit_state import LoadHostState, Transaction, get_load_state, get_transaction, upsert_load_state, upsert_transaction
-from chitra.recovery import load_recovery_records, recovery_records_path
+from chitra.recovery import load_recovery_records, record_pause_recovery, recovery_records_path
 from chitra.usage import AccountedVerdict, UsageSnapshot, UsageWindow
 
 FAST_POLICY = PolicyConfig(
@@ -997,3 +997,64 @@ def test_load_resume_waits_for_two_clear_sweeps_then_uses_last_shed_first(tmp_pa
     assert state is not None and state.load_level == 0
     assert get_transaction(tmp_path, refs[1]).phase == "resume_requested"
     assert get_transaction(tmp_path, refs[0]).phase == "held"
+
+
+def test_record_pause_recovery_allows_load_shed_hold_without_resume_at(tmp_path: Path) -> None:
+    """A load-shed hold resumes when host pressure clears, not at a wall-clock
+    time, so it carries an empty ``resume_at`` by design. Recording (and reading
+    back) its pause recovery must not raise -- otherwise the guard sweep crashes
+    every run the moment a load-shed lane reaches ``held`` (observed live on
+    trailhead: ``held transaction is missing required pause recovery data``)."""
+    session_ref = "trailhead:F5-docs:0.0"
+    upsert_goal(
+        tmp_path,
+        dataclasses.replace(
+            _goal(session_ref),
+            status="held",
+            hold_reason=f"{LOAD_SHED_HOLD_REASON_PREFIX}trailhead:3",
+        ),
+    )
+    held = Transaction(
+        session_ref=session_ref,
+        phase="held",
+        hold_reason=f"{LOAD_SHED_HOLD_REASON_PREFIX}trailhead:3",
+        transcript_path="/home/ubuntu/.claude/projects/-/abc.jsonl",
+        resume_at="",
+        created_at=_now().isoformat(),
+        updated_at=_now().isoformat(),
+    )
+
+    record = record_pause_recovery(tmp_path, held, paused_at=_now(minutes=1).isoformat())
+
+    assert record.resume_at == ""
+    assert record.session_ref == session_ref
+    # Reads back cleanly -- the read-side validator also tolerates empty resume_at.
+    persisted = load_recovery_records(tmp_path)
+    assert [r.pause_id for r in persisted] == [record.pause_id]
+
+
+def test_record_pause_recovery_still_requires_resume_at_for_rate_limit_hold(tmp_path: Path) -> None:
+    """Rate-limit holds carry a real wall-clock resume time; an empty one is a
+    genuine data defect and must still fail loud (regression guard for the
+    load-shed carve-out above)."""
+    session_ref = "trailhead:F9-codex:0.0"
+    upsert_goal(
+        tmp_path,
+        dataclasses.replace(
+            _goal(session_ref),
+            status="held",
+            hold_reason=f"{RATE_LIMIT_HOLD_REASON_PREFIX}anthropic",
+        ),
+    )
+    held = Transaction(
+        session_ref=session_ref,
+        phase="held",
+        hold_reason=f"{RATE_LIMIT_HOLD_REASON_PREFIX}anthropic",
+        transcript_path="/home/ubuntu/.claude/projects/-/def.jsonl",
+        resume_at="",
+        created_at=_now().isoformat(),
+        updated_at=_now().isoformat(),
+    )
+
+    with pytest.raises(ValueError, match="missing required pause recovery data"):
+        record_pause_recovery(tmp_path, held, paused_at=_now(minutes=1).isoformat())

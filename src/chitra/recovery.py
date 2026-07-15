@@ -15,7 +15,7 @@ from typing import Any
 
 import structlog
 
-from .goals import GoalRecord, get_goal
+from .goals import LOAD_SHED_HOLD_REASON_PREFIX, GoalRecord, get_goal
 from .rate_limit_state import Transaction
 from .state_paths import state_dir
 
@@ -52,10 +52,14 @@ class RecoveryRecord:
         if not isinstance(payload, dict):
             raise ValueError("pause recovery record must be an object")
         fields = ("pause_id", "session_ref", "hold_reason", "transcript_path", "resume_note", "resume_at", "paused_at")
+        # ``resume_at`` is a wall-clock resume time only rate-limit holds carry;
+        # load-shed holds resume when host pressure clears and persist it empty by
+        # design, so it must be allowed empty while every other field stays required.
+        optional_empty = {"resume_at"}
         values: dict[str, str] = {}
         for field in fields:
             value = payload.get(field)
-            if not isinstance(value, str) or not value.strip():
+            if not isinstance(value, str) or (not value.strip() and field not in optional_empty):
                 raise ValueError(f"pause recovery record {field} must be a non-empty string")
             values[field] = value
         return cls(**values)
@@ -129,7 +133,13 @@ def record_pause_recovery(root: Path | None, txn: Transaction, *, paused_at: str
     goal = get_goal(root, txn.session_ref)
     if goal is None:
         raise ValueError(f"cannot record pause recovery without a goal for {txn.session_ref}")
-    required = (txn.session_ref, txn.hold_reason, txn.transcript_path, txn.resume_at, txn.created_at, paused_at)
+    # ``resume_at`` is a wall-clock resume time that only rate-limit holds carry;
+    # load-shed holds resume when host pressure clears (load-driven, not timed) and
+    # are created with an empty ``resume_at`` by design, so requiring it here would
+    # crash the guard sweep every time a load-shed lane reaches ``held``.
+    required = [txn.session_ref, txn.hold_reason, txn.transcript_path, txn.created_at, paused_at]
+    if not txn.hold_reason.startswith(LOAD_SHED_HOLD_REASON_PREFIX):
+        required.append(txn.resume_at)
     if not all(value.strip() for value in required):
         raise ValueError("held transaction is missing required pause recovery data")
     pause_key = "\0".join((txn.session_ref, txn.hold_reason, txn.resume_at, txn.created_at))
