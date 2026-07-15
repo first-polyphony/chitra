@@ -4,6 +4,14 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.8.2.5] - 2026-07-15
+
+### Removed
+- Removed the local HTML-file board output path and the `chitra-board`
+  entrypoint. The roster renderer and validated board-facts plumbing are
+  unchanged; downstream now renders the operator board as a claude.ai
+  artifact.
+
 ## [0.8.2.3] - 2026-07-15
 
 ### Added

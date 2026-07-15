@@ -79,25 +79,6 @@ capabilities:
         params: []
         mutates: false
 
-  - name: board
-    kind: tool
-    purpose: Render the deterministic operator board from validated state facts.
-    when_to_use: Use when an operator needs a current, local status board rather than a free-text summary.
-    authority:
-      level: observe
-      grants:
-        - Read validated board facts and render a local view.
-      excludes:
-        - Decide work priorities.
-        - Merge, approve, or modify pull requests.
-    default_enabled: true
-    commands:
-      - name: chitra-board
-        description: Render the local chitra board.
-        argv: [chitra-board]
-        params: []
-        mutates: false
-
   - name: usage
     kind: tool
     purpose: Read provider usage snapshots and evaluate deterministic thresholds.

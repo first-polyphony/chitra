@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chitra"
-version = "0.8.2.4"
+version = "0.8.2.5"
 description = "Deterministic tmux relay/dedup daemons for AI-agent fleet monitoring"
 readme = "README.md"
 license = "MIT"
@@ -31,7 +31,6 @@ test = [
 dispatchd = "chitra.dispatchd:main"
 triaged = "chitra.triaged:main"
 draft-scanner = "chitra.draft_scanner:main"
-chitra-board = "chitra.board:main"
 chitra-goals = "chitra.goals_cli:main"
 chitra-artifacts = "chitra.artifacts:main"
 chitra-usage = "chitra.usage:main"

@@ -42,7 +42,7 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.triaged`** — a daemon that tails an events log and emits a triage event only when a session's state signature changes, not on every repeated poll. Its receiving compatibility artifacts are `queue.tsv`, deduplicated critical `flags.log`, and `stats.json`.
 - **`chitra.draft_scanner`** — a periodic scan of `host:session:pane` targets for an unsubmitted draft sitting in the tmux input box. Flags only; never submits or discards anything.
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
-- **`chitra.board`** — the deterministic, operator-facing board renderer. It strictly validates the full facts schema, renders the bundled interactive HTML to `index.html` atomically, and records result freshness in `health.json`.
+- **`chitra.board`** — the deterministic, operator-facing terminal roster renderer. It renders stored goals and artifact records as cards, a box table, or Markdown while surfacing every open operator ask.
 - **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so a reader with the signing key can verify an exact recorded delivery. Absence is only conventional evidence; see "Message tag and delivery authentication" below.
 - **`chitra.convlog`** — a deterministic operator-brief validator, BLUF renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
 
@@ -187,7 +187,7 @@ pytest
 
 ## Running the daemons
 
-Twelve command-line interface (CLI) entrypoints are installed. `dispatchd` and `triaged` are the always-on daemons. Periodic or ad-hoc tools are `draft-scanner`, `chitra-board`, `chitra-goals`, `chitra-artifacts`, `chitra-usage`, `chitra-rate-limit-guard`, `chitra-ownership`, `chitra-sweepd`, `chitra-convo`, and `chitra-capabilities`. The board renderer also runs as `python -m chitra.board`. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`.
+Eleven command-line interface (CLI) entrypoints are installed. `dispatchd` and `triaged` are the always-on daemons. Periodic or ad-hoc tools are `draft-scanner`, `chitra-goals`, `chitra-artifacts`, `chitra-usage`, `chitra-rate-limit-guard`, `chitra-ownership`, `chitra-sweepd`, `chitra-convo`, and `chitra-capabilities`. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`.
 
 The guard remains a one-shot CLI. To schedule its two-minute sweep, copy the example service and timer, edit every placeholder for the target host, then enable the timer:
 
@@ -231,12 +231,6 @@ All configuration is via CLI flags (see `--help` on each entrypoint) or a small 
 | `CHITRA_TRIAGE_LOG` | `/var/lib/chitra/triaged.log` | `chitra.triaged` | JSONL transition log |
 | `CHITRA_TRIAGE_QUEUE_FILE` / `CHITRA_TRIAGE_FLAGS_FILE` / `CHITRA_TRIAGE_STATS_FILE` | alongside the state file | `chitra.triaged` | Receiving compatibility artifacts: queue, interrupt-only flags, and counters |
 | `CHITRA_TRIAGE_ALERT_STATE_FILE` | alongside the state file | `chitra.triaged` | Persistent 15-minute `(lane, rule, statement)` critical-flag dedup state |
-| `CHITRA_BOARD_DIR` | `$CHITRA_STATE_DIR/board` | `chitra.board` | Directory containing `facts.json` and generated `index.html` / `health.json` |
-| `CHITRA_BOARD_TEMPLATE` | bundled template | `chitra.board` | Optional replacement HTML template |
-| `CHITRA_BOARD_LOCAL_HOST` | local hostname | `chitra.board` | Facts host treated as local for tmux tail capture |
-| `CHITRA_BOARD_REMOTE_HOSTS` / `CHITRA_BOARD_SSH_USER` | *(none)* / `ubuntu` | `chitra.board` | Opt-in remote tail capture allowlist and SSH user |
-| `CHITRA_BOARD_SNAPSHOT_OWNER` / `CHITRA_BOARD_VALID_HOSTS` | *(none)* | `chitra.board` | Optional deployment-specific owner and tmux-host schema constraints |
-| `CHITRA_BOARD_CAPACITY_FILE` | *(none)* | `chitra.board` | Optional external capacity snapshot rendered in the lower board strip |
 
 `dispatchd` also accepts `--policy-config-path`, `--invalid-orders-dir`, `--capture-lines`, `--post-paste-wait-seconds`, `--transcript-recency-seconds`, `--lane-lock-timeout-seconds`, and `--goals-root` (the state root consulted for the guard freeze/defer check; default: `CHITRA_STATE_DIR`); see `dispatchd --help`. `chitra-rate-limit-guard` accepts `--usage-dir`, `--host` (required), `--codex`, `--goals-root`, `--queue-dir`, and `--policy-config`; see `chitra-rate-limit-guard --help`. `chitra-ownership` accepts `--host`, repeatable `--session-ref`, and `--state-dir`. The generic replay evaluator and fixture workflow are documented in [`docs/self-tuning.md`](docs/self-tuning.md).
 
