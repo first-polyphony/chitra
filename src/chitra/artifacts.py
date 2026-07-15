@@ -83,6 +83,21 @@ def validate_delivery_brief(brief: str) -> DeliveryBrief:
     return DeliveryBrief(**sections)
 
 
+def brief_is_conforming(brief: str) -> bool:
+    """Return whether a stored brief passes the delivery-brief content gate.
+
+    The guarded CLI (``upsert_artifact``) enforces this on every write, but a
+    record written straight to ``artifacts.json`` bypasses that gate. This
+    predicate lets the load path FLAG such records instead of failing the whole
+    roster load — so a bypass becomes visible rather than silent.
+    """
+    try:
+        validate_delivery_brief(brief)
+    except ArtifactValidationError:
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactRecord:
     """The canonical persisted artifact metadata and explicit review state."""
@@ -97,6 +112,9 @@ class ArtifactRecord:
     review_status: ReviewStatus = "unreviewed"
     reviewed_at: str = ""
     response: str = ""
+    brief_conforming: bool = True
+    """Derived on load; NOT persisted. False marks a record that bypassed the
+    guarded CLI with a non-conforming brief (the F8 direct-JSON-write bypass)."""
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -177,17 +195,26 @@ def _record_from_dict(payload: object) -> ArtifactRecord:
         if not isinstance(value, str):
             raise ValueError(f"artifact record {field} must be a string")
         values[field] = value
+    brief = payload.get("brief", "") if isinstance(payload.get("brief", ""), str) else ""
+    conforming = brief_is_conforming(brief)
+    if not conforming:
+        logger.warning(
+            "artifact_brief_nonconforming",
+            url=values["url"],
+            reason="brief bypassed the guarded record CLI (F8 direct-write) or fails the delivery-brief gate",
+        )
     record = ArtifactRecord(
         url=values["url"],
         title=values["title"],
         kind=cast(ArtifactKind, values["kind"]),
         source=values["source"],
-        brief=payload.get("brief", "") if isinstance(payload.get("brief", ""), str) else "",
+        brief=brief,
         published_at=values["published_at"],
         updated_at=values["updated_at"],
         review_status=cast(ReviewStatus, values["review_status"]),
         reviewed_at=values["reviewed_at"],
         response=values["response"],
+        brief_conforming=conforming,
     )
     issues = validate_artifact(record)
     if issues:
@@ -316,6 +343,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     unreviewed_command = commands.add_parser("unreviewed", help="Render the unreviewed artifact roster block.")
     add_root(unreviewed_command)
 
+    nonconforming_command = commands.add_parser("nonconforming", help="List records whose brief bypassed the guarded CLI (F8).")
+    add_root(nonconforming_command)
+
     get_command = commands.add_parser("get", help="Print one artifact record as JSON.")
     add_root(get_command)
     get_command.add_argument("--url", required=True)
@@ -348,7 +378,14 @@ def main(argv: list[str] | None = None) -> int:
             if records:
                 print("UNREVIEWED ARTIFACTS")
                 for record in records:
-                    print(f"- {record.kind}: {record.title} — {record.url} (published {record.published_at}, source {record.source})")
+                    flag = "" if record.brief_conforming else "  ⚠ NON-CONFORMING BRIEF (bypassed the record CLI — re-record)"
+                    print(f"- {record.kind}: {record.title} — {record.url} (published {record.published_at}, source {record.source}){flag}")
+        elif args.command == "nonconforming":
+            flagged = [record for record in list_artifacts(args.root) if not record.brief_conforming]
+            if flagged:
+                print("NON-CONFORMING ARTIFACT BRIEFS (bypassed the guarded record CLI — F8)")
+                for record in flagged:
+                    print(f"- {record.kind}: {record.title} — {record.url} (review_status {record.review_status}, source {record.source})")
         else:
             found_record = get_artifact(args.root, args.url)
             if found_record is None:
