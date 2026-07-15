@@ -251,6 +251,19 @@ class DispatchOrder(BaseModel):
             if self.decision_attestation.operator_confirmation_required and not self.decision_attestation.operator_confirmed:
                 raise ValueError("operator-gated decisions require explicit confirmation before dispatch")
         return self
+
+
+def enqueue_dispatch_order(queue_dir: Path, order: DispatchOrder) -> Path:
+    """Atomically enqueue one order for the already-running ``dispatchd``."""
+    orders_dir = queue_dir / "orders"
+    orders_dir.mkdir(parents=True, exist_ok=True)
+    path = orders_dir / f"{order.order_id}.json"
+    temporary = orders_dir / f".{order.order_id}.json.tmp"
+    temporary.write_text(order.model_dump_json(indent=2), encoding="utf-8")
+    temporary.replace(path)
+    return path
+
+
 class DispatchResult(BaseModel):
     """Result of processing a dispatch order.
 
