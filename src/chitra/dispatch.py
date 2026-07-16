@@ -106,9 +106,25 @@ _IDLE_INPUT_LINE_RE = re.compile(
 )
 _CLAUDE_CODE_HORIZONTAL_RULE_RE = re.compile(r"^─+$")
 _CLAUDE_CODE_INPUT_ROW_RE = re.compile(r"^❯(?P<draft>.*)$")
+_CODEX_TUI_INPUT_ROW_RE = re.compile(r"^›(?P<draft>.*)$")
+_CODEX_TUI_PLACEHOLDER_HINTS: frozenset[str] = frozenset(
+    {
+        "Explain this codebase",
+        "Summarize recent commits",
+        "Implement {feature}",
+        "Find and fix a bug in @filename",
+        "Write tests for @filename",
+        "Improve documentation in @filename",
+        "Run /review on my current changes",
+        "Use /skills to list available skills",
+        "Check recently modified functions for compatibility",
+        "How many files have been modified?",
+        "Will this algorithm scale well?",
+    }
+)
 # SGR (Select Graphic Rendition) escape — the subset of ANSI escapes that
 # carries intensity styling. Used to tell a dim/faint placeholder hint (SGR 2)
-# apart from a normal-intensity operator draft on a Claude Code input row.
+# apart from a normal-intensity operator draft on a TUI input row.
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 # Directive-voice guard: chitra relays instructions, it never speaks AS the
@@ -330,14 +346,31 @@ def _claude_code_input_row(captured_lines: list[str]) -> tuple[str, str, str] | 
     return None
 
 
-def _input_row_draft_is_all_dim(raw_line: str) -> bool:
-    """Return True iff every visible char after the ``❯`` prompt marker is dim.
+def _codex_tui_input_row(captured_lines: list[str]) -> tuple[str, str, str] | None:
+    """Return the last Codex TUI composer row in a pane capture.
 
-    Claude Code paints its idle placeholder hint (e.g. ``Try "how does X
-    work?"``) in faint/dim text (ANSI SGR 2), whereas a real unsubmitted
-    operator draft is normal intensity. A plain ``tmux capture-pane`` (no
-    ``-e``) strips color, so the two are indistinguishable by text alone; this
-    reads the escape-aware capture instead.
+    Codex renders its composer with a ``›`` marker. Returns the same
+    ``(stripped_line, stripped_draft, raw_line)`` shape as
+    :func:`_claude_code_input_row` so the caller can distinguish dim rotating
+    suggestion text from normal-intensity operator input.
+    """
+    raw = [str(line) for line in captured_lines]
+    lines = [strip_terminal_controls(line) for line in raw]
+    for index in range(len(lines) - 1, -1, -1):
+        match = _CODEX_TUI_INPUT_ROW_RE.fullmatch(lines[index])
+        if match:
+            return lines[index], match.group("draft"), raw[index]
+    return None
+
+
+def _input_row_draft_is_all_dim(raw_line: str, *, prompt_marker: str) -> bool:
+    """Return True iff every visible char after ``prompt_marker`` is dim.
+
+    Claude Code and Codex paint idle placeholder hints in faint/dim text (ANSI
+    SGR 2), whereas a real unsubmitted operator draft is normal intensity. A
+    plain ``tmux capture-pane`` (no ``-e``) strips color, so the two are
+    indistinguishable by text alone; this reads the escape-aware capture
+    instead.
 
     Fails closed: returns False when there is no faint styling at all (a
     normal-intensity draft, or a capture with no escape sequences), so an
@@ -366,7 +399,7 @@ def _input_row_draft_is_all_dim(raw_line: str) -> bool:
         ch = raw_line[i]
         i += 1
         if not seen_prompt:
-            if ch == "❯":
+            if ch == prompt_marker:
                 seen_prompt = True
             continue
         if ch.isspace():
@@ -417,10 +450,10 @@ def pane_input_check(
     """Check whether a pane is idle and safe to dispatch into.
 
     Returns ``ok=True`` when the tail hash matches a known idle hash, the
-    last line is a bare shell prompt, or a Claude Code TUI input row is empty
-    or shows only a dim placeholder hint (a fresh session's ghost text, ANSI
-    SGR 2). Returns ``ok=False`` with a ``blocked:`` reason otherwise — never
-    silently overwrite a real, normal-intensity draft.
+    last line is a bare shell prompt, or a recognized Claude Code/Codex TUI
+    input row is empty or shows only a dim placeholder hint (a fresh session's
+    ghost text, ANSI SGR 2). Returns ``ok=False`` with a ``blocked:`` reason
+    otherwise — never silently overwrite a real, normal-intensity draft.
     """
     current_hash = pane_capture_tail_hash(captured_lines)
     if not captured_lines or not current_hash:
@@ -433,8 +466,17 @@ def pane_input_check(
         input_line, draft, raw_line = claude_code_input
         if not draft.strip():
             return PaneInputCheck(True, "idle: Claude Code TUI input row has no draft input", current_hash, input_line)
-        if _input_row_draft_is_all_dim(raw_line):
+        if _input_row_draft_is_all_dim(raw_line, prompt_marker="❯"):
             return PaneInputCheck(True, "idle: Claude Code TUI input row shows only a dim placeholder hint", current_hash, input_line)
+        return PaneInputCheck(False, "blocked: unsubmitted operator draft detected", current_hash, input_line)
+    codex_tui_input = _codex_tui_input_row(captured_lines)
+    if codex_tui_input is not None:
+        input_line, draft, raw_line = codex_tui_input
+        normalized_draft = draft.strip()
+        if not normalized_draft:
+            return PaneInputCheck(True, "idle: Codex TUI input row has no draft input", current_hash, input_line)
+        if normalized_draft in _CODEX_TUI_PLACEHOLDER_HINTS and _input_row_draft_is_all_dim(raw_line, prompt_marker="›"):
+            return PaneInputCheck(True, "idle: Codex TUI input row shows only a placeholder hint", current_hash, input_line)
         return PaneInputCheck(False, "blocked: unsubmitted operator draft detected", current_hash, input_line)
     last_line = strip_terminal_controls(str(captured_lines[-1]))
     if _IDLE_INPUT_LINE_RE.match(last_line):

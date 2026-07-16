@@ -15,6 +15,7 @@ from chitra.completion_gate import (
     check_todo_residue,
     evaluate_completion_claim,
     evaluate_turn_end,
+    is_completion_claim,
     scan_deferral_language,
 )
 from chitra.dispatch import DispatchOrder, DispatchStatus
@@ -239,6 +240,21 @@ def test_turn_end_without_completion_claim_is_distinct_and_never_clean() -> None
     )
     assert audit.condition == "turn_end_without_completion_claim"
     assert audit.completion is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("content-complete milestone", False),
+        ("The work is done.", True),
+        ("This is fixed.", True),
+        ("Task is content-complete but not deploy-complete", False),
+        ("The requested parser gate was completed and deployed at SHA abc1234.", True),
+        ("Done.", True),
+    ],
+)
+def test_completion_claim_requires_sentence_initial_claim_posture(text: str, expected: bool) -> None:
+    assert is_completion_claim(text) is expected
 
 
 # ---------------------------------------------------------------------------

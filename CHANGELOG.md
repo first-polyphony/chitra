@@ -4,6 +4,12 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+## [0.8.2.6] - 2026-07-16
+
+### Fixed
+- Fixed: dispatchd Codex-TUI placeholder detection;
+  `COMPLETION_CLAIM_RE` hyphen-compound false-positive.
+
 ## [0.8.2.5] - 2026-07-15
 
 ### Removed
