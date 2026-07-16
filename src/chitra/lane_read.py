@@ -2,6 +2,9 @@
 
 No LLM calls in this module — it reads the complete final assistant message
 and extracts literal operator asks only.
+
+Fleet operator names are not package defaults. Operators may supply their own
+comma-separated names or aliases through ``CHITRA_OPERATOR_ALIASES``.
 """
 
 from __future__ import annotations
@@ -13,15 +16,24 @@ from typing import Any
 
 import structlog
 
+from chitra._fsio import env_csv
+
 logger = structlog.get_logger(__name__)
 
 _NUMBERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s+")
-_OPEN_ASK_HEADING_RE = re.compile(
-    r"awaiting ruling|open (?:question|ask|decision)s?|decisions? (?:needed|for you)|"
-    r"need(?:s)? (?:you|operator|trey)|for (?:you|trey) to (?:decide|rule)",
-    re.IGNORECASE,
-)
+OPERATOR_ALIASES_ENV_VAR = "CHITRA_OPERATOR_ALIASES"
 _NON_LIST_HEADING_RE = re.compile(r"^(?:#{1,6}\s+|(?:\*\*|__).*?(?:\*\*|__)\s*$|[^.!?]+:\s*$)")
+
+
+def _open_ask_heading_re() -> re.Pattern[str]:
+    aliases = env_csv(OPERATOR_ALIASES_ENV_VAR)
+    needs_targets = "|".join(re.escape(value) for value in ("you", "operator", *aliases))
+    decision_targets = "|".join(re.escape(value) for value in ("you", *aliases))
+    return re.compile(
+        rf"awaiting ruling|open (?:question|ask|decision)s?|decisions? (?:needed|for you)|"
+        rf"need(?:s)? (?:{needs_targets})|for (?:{decision_targets}) to (?:decide|rule)",
+        re.IGNORECASE,
+    )
 
 
 def _assistant_message_text(payload: object) -> str | None:
@@ -78,6 +90,7 @@ def extract_open_asks(message_text: str) -> list[str]:
     asks: list[str] = []
     seen: set[str] = set()
     in_open_ask_block = False
+    open_ask_heading_re = _open_ask_heading_re()
     for raw_line in message_text.splitlines():
         line = raw_line.strip()
         is_numbered = bool(_NUMBERED_ITEM_RE.match(raw_line))
@@ -86,7 +99,7 @@ def extract_open_asks(message_text: str) -> list[str]:
                 asks.append(line)
                 seen.add(line)
             continue
-        if _OPEN_ASK_HEADING_RE.search(line):
+        if open_ask_heading_re.search(line):
             in_open_ask_block = True
         elif in_open_ask_block and (not line or _is_non_list_heading(line)):
             in_open_ask_block = False

@@ -5,11 +5,33 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from chitra.lane_read import extract_open_asks, read_last_assistant_message
 
 
 def _assistant(text: str) -> dict[str, object]:
     return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+def test_operator_aliases_default_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CHITRA_OPERATOR_ALIASES", raising=False)
+
+    assert extract_open_asks("Needs trey:\n1. Approve the release.") == []
+    assert extract_open_asks("Needs operator:\n1. Approve the release.") == ["1. Approve the release."]
+
+
+def test_operator_aliases_accept_one_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_OPERATOR_ALIASES", "trey")
+
+    assert extract_open_asks("Needs trey:\n1. Approve the release.") == ["1. Approve the release."]
+
+
+def test_operator_aliases_accept_comma_separated_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_OPERATOR_ALIASES", " alex, robin ")
+
+    assert extract_open_asks("For alex to decide:\n1. Pick the release window.") == ["1. Pick the release window."]
+    assert extract_open_asks("Needs robin:\n1. Confirm the rollback.") == ["1. Confirm the rollback."]
 
 
 def test_read_last_assistant_message_returns_the_full_final_message_and_skips_bad_json(tmp_path: Path) -> None:
@@ -38,10 +60,7 @@ def test_read_last_assistant_message_handles_string_content_and_no_assistant(tmp
     assert read_last_assistant_message(transcript) == "complete text"
 
     transcript.write_text(
-        json.dumps(
-            {"role": "assistant", "content": [{"type": "text", "text": "first "}, {"type": "text", "text": "second"}]}
-        )
-        + "\n",
+        json.dumps({"role": "assistant", "content": [{"type": "text", "text": "first "}, {"type": "text", "text": "second"}]}) + "\n",
         encoding="utf-8",
     )
     assert read_last_assistant_message(transcript) == "first second"

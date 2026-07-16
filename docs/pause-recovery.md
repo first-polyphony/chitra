@@ -27,7 +27,6 @@ sweeps advance `held → resume_requested → resume_sent`, confirm delivery of 
 goal-derived re-arm nudge, clear the hold, and requeue deferred work.
 
 An attached tmux client does not change pause eligibility; attachment is only
-a delivery-method liveness signal. The sole never-pause refs are Chitra's own
-Hub-host monitor/harness sessions, `hub-host:monitor:*` and
-`hub-host:harness:*` (the exact prefixes live in `NEVER_PAUSE_SESSION_PREFIXES`
-in `chitra.rate_limit_guard`).
+a delivery-method liveness signal. Chitra has no package-default never-pause
+refs. Fleet operators configure their own comma-separated prefixes through
+`CHITRA_NEVER_PAUSE_SESSION_PREFIXES`.

@@ -95,3 +95,8 @@ def parse_iso8601(
 def env_path(name: str, default: Path) -> Path:
     """Resolve an optional environment path override and expand ``~``."""
     return Path(os.environ.get(name, str(default))).expanduser()
+
+
+def env_csv(name: str) -> tuple[str, ...]:
+    """Resolve a comma-separated environment variable to unique, non-empty values."""
+    return tuple(dict.fromkeys(value.strip() for value in os.environ.get(name, "").split(",") if value.strip()))

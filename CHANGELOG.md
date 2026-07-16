@@ -10,6 +10,11 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 - Fixed: dispatchd Codex-TUI placeholder detection;
   `COMPLETION_CLAIM_RE` hyphen-compound false-positive.
 
+### Removed
+- Removed hardcoded fleet-operator name and pause-prefix literals; both now
+  config-driven via `CHITRA_NEVER_PAUSE_SESSION_PREFIXES` and
+  `CHITRA_OPERATOR_ALIASES`.
+
 ## [0.8.2.5] - 2026-07-15
 
 ### Removed

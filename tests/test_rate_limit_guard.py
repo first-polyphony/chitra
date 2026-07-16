@@ -147,7 +147,50 @@ def test_plan_pauses_selects_a_non_chitra_session(tmp_path: Path) -> None:
     assert skipped == []
 
 
-def test_plan_pauses_never_selects_chitra_monitor_or_boomtown(tmp_path: Path) -> None:
+def test_plan_pauses_has_no_never_pause_prefixes_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CHITRA_NEVER_PAUSE_SESSION_PREFIXES", raising=False)
+    upsert_goal(tmp_path, _goal("trailhead:monitor:0.0"))
+    verdict = AccountedVerdict(
+        session_id="chitra-monitor",
+        tmux_session="monitor",
+        kind="claude",
+        account="a",
+        level="pause",
+        binding_window="5h",
+        resume_at_epoch=1_700_000_000,
+        self_fresh=True,
+        account_attributed=False,
+    )
+
+    to_pause, skipped = plan_pauses([verdict], host="trailhead", goals_root=tmp_path)
+
+    assert to_pause == [verdict]
+    assert skipped == []
+
+
+def test_plan_pauses_honors_one_configured_never_pause_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_NEVER_PAUSE_SESSION_PREFIXES", "host-a:protected:")
+    upsert_goal(tmp_path, _goal("host-a:protected:0.0"))
+    verdict = AccountedVerdict(
+        session_id="protected",
+        tmux_session="protected",
+        kind="claude",
+        account="a",
+        level="pause",
+        binding_window="5h",
+        resume_at_epoch=1_700_000_000,
+        self_fresh=True,
+        account_attributed=False,
+    )
+
+    to_pause, skipped = plan_pauses([verdict], host="host-a", goals_root=tmp_path)
+
+    assert to_pause == []
+    assert skipped == ["host-a:protected:0.0: matches a configured never-pause session prefix"]
+
+
+def test_plan_pauses_honors_comma_separated_never_pause_prefixes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_NEVER_PAUSE_SESSION_PREFIXES", " trailhead:monitor:, trailhead:boomtown: ")
     upsert_goal(tmp_path, _goal("trailhead:monitor:0.0"))
     upsert_goal(tmp_path, _goal("trailhead:boomtown:0.0"))
     verdicts = [
@@ -169,7 +212,7 @@ def test_plan_pauses_never_selects_chitra_monitor_or_boomtown(tmp_path: Path) ->
 
     assert to_pause == []
     assert len(skipped) == 2
-    assert all("Chitra's own monitor/harness session is never paused" in reason for reason in skipped)
+    assert all("matches a configured never-pause session prefix" in reason for reason in skipped)
 
 
 def test_apply_pause_freezes_immediately_and_starts_pause_requested(tmp_path: Path) -> None:

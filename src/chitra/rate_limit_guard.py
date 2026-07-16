@@ -85,6 +85,10 @@ lets the transaction state machine make forward progress and is what makes
 "resume it automatically after reset" work, with no long-lived process of
 its own. Example two-minute systemd units ship under ``packaging/systemd``.
 
+Fleet-specific never-pause session prefixes are not package defaults. Fleet
+operators supply their own comma-separated prefixes through
+``CHITRA_NEVER_PAUSE_SESSION_PREFIXES``.
+
 The same sweep also samples local MemAvailable and Linux memory/CPU PSI. Its
 per-host two-sweep anti-flap state and last-shed-first stack live beside the
 transaction ledger. Load holds use ``load-shed:<host>:<level>`` and reuse this
@@ -107,7 +111,7 @@ from typing import Literal, Protocol
 
 import structlog
 
-from ._fsio import parse_iso8601, write_json_atomic
+from ._fsio import env_csv, parse_iso8601, write_json_atomic
 from .account_registry import load_registry, update_registry
 from .dispatch import transcript_mtime
 from .dispatchd import requeue_deferred_for_session
@@ -229,7 +233,7 @@ def _pause_strategy(backend: PauseBackend) -> LanePauseStrategy:
     return CodexLanePauseStrategy() if backend == "codex" else ClaudeLanePauseStrategy()
 
 
-NEVER_PAUSE_SESSION_PREFIXES = ("trailhead:monitor:", "trailhead:boomtown:")
+NEVER_PAUSE_SESSION_PREFIXES_ENV_VAR = "CHITRA_NEVER_PAUSE_SESSION_PREFIXES"
 
 
 def _resume_nudge(record: GoalRecord) -> str:
@@ -421,6 +425,7 @@ def plan_pauses(verdicts: list[AccountedVerdict], *, host: str, goals_root: Path
     """
     to_pause: list[AccountedVerdict] = []
     skipped: list[str] = []
+    never_pause_prefixes = env_csv(NEVER_PAUSE_SESSION_PREFIXES_ENV_VAR)
     for verdict in verdicts:
         if verdict.level != "pause":
             continue
@@ -428,8 +433,8 @@ def plan_pauses(verdicts: list[AccountedVerdict], *, host: str, goals_root: Path
         if session_ref is None:
             skipped.append(f"{verdict.session_id}: no tmux_session on this snapshot -- cannot resolve a dispatch target")
             continue
-        if session_ref.startswith(NEVER_PAUSE_SESSION_PREFIXES):
-            skipped.append(f"{session_ref}: Chitra's own monitor/harness session is never paused")
+        if session_ref.startswith(never_pause_prefixes):
+            skipped.append(f"{session_ref}: matches a configured never-pause session prefix")
             continue
         existing = get_goal(goals_root, session_ref)
         if existing is None:

@@ -11,6 +11,9 @@ emitter format drift without crashing.
 No LLM calls in this module's own code path — deterministic dedup only.
 It watches state emitted by LLM-driven sessions, but never invokes a model itself.
 
+Fleet operator names are not package defaults. Operators may supply their own
+comma-separated names or aliases through ``CHITRA_OPERATOR_ALIASES``.
+
 Known limitation: the lane_id -> signature state map (``load_state`` /
 ``save_state``) has no eviction -- a lane that stops emitting events (e.g. a
 retired session) leaves its entry in ``triaged-state.json`` forever. This is
@@ -36,7 +39,7 @@ from pathlib import Path
 
 import structlog
 
-from chitra._fsio import env_path, write_json_atomic
+from chitra._fsio import env_csv, env_path, write_json_atomic
 
 logger = structlog.get_logger(__name__)
 
@@ -45,12 +48,12 @@ DEFAULT_STATE_FILE = Path("/var/lib/chitra/triaged-state.json")
 DEFAULT_TRIAGE_LOG = Path("/var/lib/chitra/triaged.log")
 DEFAULT_POLL_SECONDS = 2.0
 CRITICAL_DEDUP_WINDOW_SECONDS = 900
+OPERATOR_ALIASES_ENV_VAR = "CHITRA_OPERATOR_ALIASES"
 
 # Receiving-pipeline interruption rules.  They are deterministic string
 # matches over watchd's opaque state text; triaged never decides what a worker
 # should do in response.
-CRITICAL_RULES = (
-    ("needs_operator", re.compile(r"needs (you|trey|operator|input)|waiting on (you|trey)", re.I)),
+_STATIC_CRITICAL_RULES = (
     ("merge_landed", re.compile(r'^\s*REVIEW_VERDICT: (CLEAN|ISSUES)\s*$|"state":\s*"MERGED"|\bMerged #\d|\bPR #?\d+ (was )?merged', re.I)),
     ("crash", re.compile(r"Traceback \(most recent call last\)|panic:|\bfatal(:| error)", re.I)),
     ("ci_red", re.compile(r"CI .*(failure|failed|red)|required check.*fail", re.I)),
@@ -61,6 +64,14 @@ COMMAND_ECHO = re.compile(r"^\s*[$❯>]|until \[|\$\(|do sleep|--jq|; do |&& ech
 
 # <ISO8601-ish timestamp> <LANE_ID> <rest of line>
 _LINE_RE = re.compile(r"^(?P<ts>\S+)\s+(?P<lane>\S+)\s+(?P<text>.*)$")
+
+
+def _critical_rules() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    aliases = env_csv(OPERATOR_ALIASES_ENV_VAR)
+    needs_targets = "|".join(re.escape(value) for value in ("you", "operator", "input", *aliases))
+    waiting_targets = "|".join(re.escape(value) for value in ("you", *aliases))
+    needs_operator = re.compile(rf"needs (?:{needs_targets})|waiting on (?:{waiting_targets})", re.I)
+    return (("needs_operator", needs_operator), *_STATIC_CRITICAL_RULES)
 
 
 @dataclass(slots=True)
@@ -146,7 +157,7 @@ def critical_hits(text: str) -> list[tuple[str, str]]:
     """Return every interrupting rule matched by meaningful state text."""
     statements = [statement.strip() for statement in text.split("|") if not COMMAND_ECHO.search(statement)]
     hits: list[tuple[str, str]] = []
-    for rule, pattern in CRITICAL_RULES:
+    for rule, pattern in _critical_rules():
         for statement in statements:
             if pattern.search(statement):
                 hits.append((rule, statement))

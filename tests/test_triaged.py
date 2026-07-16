@@ -5,7 +5,29 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from chitra.triaged import parse_event_line, process_lines, run_once
+import pytest
+
+from chitra.triaged import critical_hits, parse_event_line, process_lines, run_once
+
+
+def test_operator_aliases_default_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CHITRA_OPERATOR_ALIASES", raising=False)
+
+    assert critical_hits("waiting on trey") == []
+    assert critical_hits("needs operator input") == [("needs_operator", "needs operator input")]
+
+
+def test_operator_aliases_accept_one_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_OPERATOR_ALIASES", "trey")
+
+    assert critical_hits("waiting on trey") == [("needs_operator", "waiting on trey")]
+
+
+def test_operator_aliases_accept_comma_separated_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_OPERATOR_ALIASES", " alex, robin ")
+
+    assert critical_hits("waiting on alex") == [("needs_operator", "waiting on alex")]
+    assert critical_hits("needs robin") == [("needs_operator", "needs robin")]
 
 
 def test_parse_event_line_extracts_ts_lane_text() -> None:
