@@ -40,7 +40,7 @@ def _codex_snapshot_timeout_secs() -> float:
     """Wall-clock budget for one fresh ``codex app-server`` exchange.
 
     Default 45s: a cold app-server start on a heavily loaded host was observed
-    to blow the previous fixed 15s cap (trailhead load storm, 2026-07-15),
+    to blow the previous fixed 15s cap (a production load storm, 2026-07-15),
     which starved the rate-limit guard of codex capacity data. Overridable via
     CHITRA_CODEX_SNAPSHOT_TIMEOUT_SECS for sustained load storms.
     """

@@ -9,7 +9,7 @@ principles:
     keywords: [goal, intent, done, scope, source, redirect, objective, requirement]
     status: binding
     citations:
-      - tools/support/chitra_adapter/harness/CLAUDE.md
+      - internal adapter runbook (private monorepo)
   - principle_id: G02
     title: Fill gaps without inventing direction
     guidance: Choose the smallest reversible step necessary for the recorded outcome; escalate only when the missing fact changes scope, authority, spend, schema, dependency, irreversibility, or success.
@@ -29,7 +29,7 @@ principles:
     status: binding
     citations:
       - CLAUDE.md#Agent-Discipline
-      - tools/support/chitra_adapter/harness/CLAUDE.md
+      - internal adapter runbook (private monorepo)
   - principle_id: G05
     title: Escalate a decision, not uncertainty theater
     guidance: Resolve researchable facts first; escalate only a genuine strategic or authorization choice with one crisp question, a ranked recommendation, consequences, and primary-source anchors.
@@ -38,7 +38,7 @@ principles:
     keywords: [ambiguous, strategic, authorization, choose, decision, permission, ruling, escalate]
     status: binding
     citations:
-      - tools/support/chitra_adapter/harness/CLAUDE.md
+      - internal adapter runbook (private monorepo)
   - principle_id: E01
     title: Evidence before belief
     guidance: Verify claims with current files, transcripts, commands, receipts, logs, service state, or user-visible effects; repetition and tool success are not proof.
@@ -125,7 +125,7 @@ principles:
     keywords: [basis, provenance, citation, confidence, inference, unknown, answer, explain]
     status: binding
     citations:
-      - tools/support/chitra_adapter/harness/CLAUDE.md
+      - internal adapter runbook (private monorepo)
   - principle_id: H05
     title: Fail closed but answer boundedly
     guidance: Block autonomous normative answers when the binding goal or principle index is missing or stale, a binding conflict remains, or required evidence is absent; safe cited observations may still be returned.
@@ -134,4 +134,4 @@ principles:
     keywords: [missing, stale, conflict, abstain, block, autonomy, evidence, safe, factual]
     status: binding
     citations:
-      - tools/support/chitra_adapter/harness/CLAUDE.md
+      - internal adapter runbook (private monorepo)

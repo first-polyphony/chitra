@@ -23,13 +23,13 @@ from chitra.rate_limit_state import (
 ISO = "2026-07-12T00:00:00+00:00"
 
 
-def _txn(session_ref: str = "tophand:lane1:0.0", phase: str = "pause_requested") -> Transaction:
+def _txn(session_ref: str = "host-b:lane1:0.0", phase: str = "pause_requested") -> Transaction:
     return Transaction(session_ref=session_ref, phase=phase, hold_reason="rate-limit:5h", created_at=ISO, updated_at=ISO)  # type: ignore[arg-type]
 
 
 def test_upsert_and_get_round_trip(tmp_path: Path) -> None:
     stored = upsert_transaction(tmp_path, _txn())
-    assert get_transaction(tmp_path, "tophand:lane1:0.0") == stored
+    assert get_transaction(tmp_path, "host-b:lane1:0.0") == stored
     assert load_transactions(tmp_path) == [stored]
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -45,8 +45,8 @@ def test_upsert_replaces_by_session_ref(tmp_path: Path) -> None:
 def test_remove_transaction_is_a_no_op_if_absent(tmp_path: Path) -> None:
     remove_transaction(tmp_path, "no-such-lane")  # must not raise
     upsert_transaction(tmp_path, _txn())
-    remove_transaction(tmp_path, "tophand:lane1:0.0")
-    assert get_transaction(tmp_path, "tophand:lane1:0.0") is None
+    remove_transaction(tmp_path, "host-b:lane1:0.0")
+    assert get_transaction(tmp_path, "host-b:lane1:0.0") is None
 
 
 def test_get_transaction_missing_store_returns_none(tmp_path: Path) -> None:
@@ -56,7 +56,7 @@ def test_get_transaction_missing_store_returns_none(tmp_path: Path) -> None:
 
 def test_from_dict_round_trips_every_field() -> None:
     full = Transaction(
-        session_ref="tophand:lane1:0.0",
+        session_ref="host-b:lane1:0.0",
         phase="awaiting_quiescence",
         backend="codex",
         hold_reason="rate-limit:5h",
@@ -79,19 +79,19 @@ def test_from_dict_round_trips_every_field() -> None:
 
 def test_load_state_and_transactions_share_one_atomic_document_without_data_loss(tmp_path: Path) -> None:
     load_state = LoadHostState(
-        host="tophand",
+        host="host-b",
         observed_level=2,
         breach_sweeps=1,
         load_level=1,
-        shed_lanes=("tophand:lane2:0.0",),
+        shed_lanes=("host-b:lane2:0.0",),
         updated_at=ISO,
     )
     upsert_load_state(tmp_path, load_state)
     upsert_transaction(tmp_path, _txn())
 
-    assert get_load_state(tmp_path, "tophand") == load_state
-    remove_transaction(tmp_path, "tophand:lane1:0.0")
-    assert get_load_state(tmp_path, "tophand") == load_state
+    assert get_load_state(tmp_path, "host-b") == load_state
+    remove_transaction(tmp_path, "host-b:lane1:0.0")
+    assert get_load_state(tmp_path, "host-b") == load_state
 
 
 def test_from_dict_rejects_an_unknown_phase() -> None:

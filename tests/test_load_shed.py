@@ -70,16 +70,16 @@ def test_breach_and_clear_both_require_two_persistable_sweeps() -> None:
     policy = LoadPolicy()
     breach = _sample(available=14)
 
-    first = advance_load_state(None, host="tophand", sample=breach, policy=policy, now=NOW)
-    second = advance_load_state(first, host="tophand", sample=breach, policy=policy, now=NOW)
+    first = advance_load_state(None, host="host-b", sample=breach, policy=policy, now=NOW)
+    second = advance_load_state(first, host="host-b", sample=breach, policy=policy, now=NOW)
 
     assert first.load_level == 0 and first.breach_sweeps == 1
     assert second.load_level == 2 and second.breach_sweeps == 0
 
     clear = _sample(available=31, memory_some=4.9)
     assert pressure_is_clear(clear, policy) is True
-    clearing = advance_load_state(second, host="tophand", sample=clear, policy=policy, now=NOW)
-    cleared = advance_load_state(clearing, host="tophand", sample=clear, policy=policy, now=NOW)
+    clearing = advance_load_state(second, host="host-b", sample=clear, policy=policy, now=NOW)
+    cleared = advance_load_state(clearing, host="host-b", sample=clear, policy=policy, now=NOW)
     assert clearing.load_level == 2 and clearing.clear_sweeps == 1
     assert cleared.load_level == 0 and cleared.clear_sweeps == 0
 
@@ -122,5 +122,5 @@ def test_load_caps_override_usage_baseline_and_l3_uses_tighter_graceful_deadline
 
 
 def test_load_state_fixture_retains_last_shed_stack() -> None:
-    state = LoadHostState(host="tophand", load_level=2, shed_lanes=("h:a:0.0", "h:b:0.0"))
+    state = LoadHostState(host="host-b", load_level=2, shed_lanes=("h:a:0.0", "h:b:0.0"))
     assert state.shed_lanes[-1] == "h:b:0.0"
