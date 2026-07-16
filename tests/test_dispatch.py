@@ -584,6 +584,73 @@ def test_pane_input_check_blocks_a_partially_dim_draft() -> None:
     assert check.reason == "blocked: unsubmitted operator draft detected"
 
 
+@pytest.fixture(
+    params=[
+        "Explain this codebase",
+        "Summarize recent commits",
+        "Implement {feature}",
+        "Find and fix a bug in @filename",
+        "Write tests for @filename",
+        "Improve documentation in @filename",
+        "Run /review on my current changes",
+        "Use /skills to list available skills",
+        "Check recently modified functions for compatibility",
+        "How many files have been modified?",
+        "Will this algorithm scale well?",
+    ]
+)
+def codex_tui_placeholder_capture(request: pytest.FixtureRequest) -> tuple[list[str], str]:
+    """Escape-aware terminal capture matching the Codex 0.144 composer."""
+    hint = str(request.param)
+    return (
+        [
+            "• Investigating rendering code (0s • esc to interrupt)",
+            f"\x1b[1m›\x1b[0m \x1b[2m{hint}\x1b[22m",
+            "  ? for shortcuts                                       100% context left",
+        ],
+        hint,
+    )
+
+
+def test_pane_input_check_treats_codex_tui_placeholder_hints_as_idle(
+    codex_tui_placeholder_capture: tuple[list[str], str],
+) -> None:
+    captured_lines, hint = codex_tui_placeholder_capture
+
+    check = pane_input_check(captured_lines)
+
+    assert check.ok is True
+    assert check.reason == "idle: Codex TUI input row shows only a placeholder hint"
+    assert check.last_line == f"› {hint}"
+
+
+def test_pane_input_check_blocks_a_codex_tui_operator_draft() -> None:
+    check = pane_input_check(
+        [
+            "• Ready for input",
+            "\x1b[1m›\x1b[0m fix the parser bug",
+            "  ? for shortcuts                                       100% context left",
+        ]
+    )
+
+    assert check.ok is False
+    assert check.reason == "blocked: unsubmitted operator draft detected"
+    assert check.last_line == "› fix the parser bug"
+
+
+def test_pane_input_check_blocks_an_unknown_dim_codex_tui_suggestion() -> None:
+    check = pane_input_check(
+        [
+            "• Ready for input",
+            "\x1b[1m›\x1b[0m \x1b[2mRun the production migration\x1b[22m",
+            "  ? for shortcuts                                       100% context left",
+        ]
+    )
+
+    assert check.ok is False
+    assert check.reason == "blocked: unsubmitted operator draft detected"
+
+
 @pytest.mark.parametrize("prompt", ["ubuntu@host:~$ ", "(venv) user@host:~$ ", ">>> "])
 def test_pane_input_check_keeps_shell_prompt_idle_detection(prompt: str) -> None:
     check = pane_input_check(["previous output", prompt])

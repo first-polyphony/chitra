@@ -30,8 +30,12 @@ COMPLETION_DEFERRAL_PHRASES: tuple[str, ...] = (
 )
 
 COMPLETION_CLAIM_RE = re.compile(
-    r"\b(done|complete(?:d)?|finished|fixed|repaired|shipped|deployed|publication-ready|ready for (?:merge|release))\b",
-    re.I,
+    r"^\s*(?:"
+    r"(?:(?:I|we|it|this|task|work|lane)|the\s+[^\n.!?]{1,80}?)"
+    r"\s+(?:am|is|was|are|were|now|has|have)\s+"
+    r")?"
+    r"(done|complete(?:d)?|finished|fixed|repaired|shipped|deployed|publication-ready|ready for (?:merge|release))\b",
+    re.I | re.M,
 )
 COMPLETION_EVIDENCE_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.I)
 COMPLETION_EVIDENCE_PATH_RE = re.compile(
