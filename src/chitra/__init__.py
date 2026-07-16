@@ -7,4 +7,11 @@ observes those LLM-driven sessions, but no LLM calls live in its own code
 path — it is deterministic plumbing only.
 """
 
-__all__: list[str] = []
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("chitra")
+except PackageNotFoundError:  # pragma: no cover - source tree without installed dist
+    __version__ = "0.0.0.dev0"
+
+__all__: list[str] = ["__version__"]
