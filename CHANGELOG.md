@@ -17,8 +17,9 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 ### Added
 - A durable per-pause recovery ledger records the held session, reason,
   existing transcript pointer, goal-derived resume note, and reset time.
-  Attached operator sessions remain pausable; only Chitra's own Trailhead
-  `monitor` and `boomtown` monitor/harness sessions are excluded.
+  Attached operator sessions remain pausable; only Chitra's own hub-host
+  `monitor` and harness sessions are excluded (see
+  `NEVER_PAUSE_SESSION_PREFIXES`).
 - Close-time inventory diffing for `chitra-goals close`, which blocks when
   caller-stated delivered items do not satisfy the operator-stated
   `done_when` or when a required item is relabeled as follow-on/out of scope/

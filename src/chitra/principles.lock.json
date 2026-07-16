@@ -1,6 +1,6 @@
 {
   "compiler_version": "1",
-  "corpus_id": "sha256:9b789e543ac09db935aa03e90ffaff7ac7b7f1777a8b3a4c0851bdea30e6a1c9",
+  "corpus_id": "sha256:0a6d11174dc05f608b032a4d269cf589bb342deb033b88cc8830d80223adb714",
   "principles": [
     {
       "answer_categories": [
@@ -241,7 +241,7 @@
         "action"
       ],
       "citations": [
-        "tools/support/chitra_adapter/harness/CLAUDE.md"
+        "internal adapter runbook (private monorepo)"
       ],
       "guidance": "Preserve the frozen goal's intent, goal, done-when, scope, source, and version; only an explicit operator redirect may replace it.",
       "keywords": [
@@ -300,7 +300,7 @@
       ],
       "citations": [
         "CLAUDE.md#Agent-Discipline",
-        "tools/support/chitra_adapter/harness/CLAUDE.md"
+        "internal adapter runbook (private monorepo)"
       ],
       "guidance": "Keep inspect, recommend, design, build, deploy, and send distinct; do not expand the action beyond the verb authorized by the goal.",
       "keywords": [
@@ -326,7 +326,7 @@
         "answer"
       ],
       "citations": [
-        "tools/support/chitra_adapter/harness/CLAUDE.md"
+        "internal adapter runbook (private monorepo)"
       ],
       "guidance": "Resolve researchable facts first; escalate only a genuine strategic or authorization choice with one crisp question, a ranked recommendation, consequences, and primary-source anchors.",
       "keywords": [
@@ -353,7 +353,7 @@
         "nudge"
       ],
       "citations": [
-        "tools/support/chitra_adapter/harness/CLAUDE.md"
+        "internal adapter runbook (private monorepo)"
       ],
       "guidance": "Name the goal version, evidence references, principle IDs, inference, confidence basis, and unresolved unknowns for every reasoned answer.",
       "keywords": [
@@ -380,7 +380,7 @@
         "nudge"
       ],
       "citations": [
-        "tools/support/chitra_adapter/harness/CLAUDE.md"
+        "internal adapter runbook (private monorepo)"
       ],
       "guidance": "Block autonomous normative answers when the binding goal or principle index is missing or stale, a binding conflict remains, or required evidence is absent; safe cited observations may still be returned.",
       "keywords": [

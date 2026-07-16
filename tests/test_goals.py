@@ -63,7 +63,7 @@ def _mp_add_ask(root_str: str, session_ref: str, ask: str) -> None:
 
 def _record(**changes: str) -> GoalRecord:
     values: dict[str, str] = {
-        "session_ref": "tophand:f2-77:0.0",
+        "session_ref": "host-b:f2-77:0.0",
         "goal": "Ship the tested deterministic goals store safely.",
         "done_when": "The full suite and static checks pass.",
         "source": "task-file:/tmp/goal-store.md",
@@ -362,7 +362,7 @@ def test_done_status_requires_completion_gate(tmp_path: Path, status: GoalStatus
 
 
 def test_fresh_session_ref_for_open_lane_requires_redirect(tmp_path: Path) -> None:
-    stored = upsert_goal(tmp_path, _record(session_ref="tophand:folio:0.0"))
+    stored = upsert_goal(tmp_path, _record(session_ref="host-b:folio:0.0"))
     assert stored.lane_id == "folio"
 
     with pytest.raises(GoalRedirectRequiredError, match="already has an open goal"):
@@ -392,7 +392,7 @@ def test_redirect_invalidates_prior_done_state(tmp_path: Path) -> None:
 
 def test_folio_scope_laundering_paths_are_structurally_blocked_and_visible(tmp_path: Path) -> None:
     full = "both the Folio import lane and the Folio export lane pass live validation"
-    stored = upsert_goal(tmp_path, _record(session_ref="tophand:folio:0.0", done_when=full))
+    stored = upsert_goal(tmp_path, _record(session_ref="host-b:folio:0.0", done_when=full))
     narrowed = redirect_goal(
         tmp_path,
         stored.session_ref,
@@ -404,7 +404,7 @@ def test_folio_scope_laundering_paths_are_structurally_blocked_and_visible(tmp_p
         upsert_goal(
             tmp_path,
             _record(
-                session_ref="tophand:folio:1.0",
+                session_ref="host-b:folio:1.0",
                 done_when="The Folio import lane passes live validation",
             ),
         )
@@ -795,10 +795,10 @@ def test_goal_cli_set_does_not_surface_vague_flag_for_explicit_both(tmp_path: Pa
 @pytest.mark.parametrize(
     ("session_ref", "expected_host", "expected_name"),
     [
-        ("tophand:f2-77:0.0", "tophand", "f2-77"),
-        ("tophand:f2-77", "tophand", "f2-77"),
+        ("host-b:f2-77:0.0", "host-b", "f2-77"),
+        ("host-b:f2-77", "host-b", "f2-77"),
         ("lane-token", "lane-token", "lane-token"),
-        ("tophand:", "tophand", "tophand"),
+        ("host-b:", "host-b", "host-b"),
     ],
 )
 def test_session_ref_helpers_degrade_gracefully(session_ref: str, expected_host: str, expected_name: str) -> None:
@@ -828,7 +828,7 @@ def test_roster_command_reads_unreviewed_artifacts_from_the_shared_store(tmp_pat
             url=f"{ARTIFACT_URL_PREFIX}operator-copyable-link",
             title="Operator artifact",
             kind="page",
-            source="tophand:/var/lib/chitra/artifact.html",
+            source="host-b:/var/lib/chitra/artifact.html",
             brief=(
                 "What was built: An operator-facing artifact roster entry.\n"
                 "What it does: It exposes the full copyable artifact link.\n"
@@ -876,13 +876,13 @@ def test_concurrent_writers_adding_asks_to_the_same_lane_do_not_lose_each_other(
     upsert_goal(tmp_path, _record())
     ctx = multiprocessing.get_context("fork")
     asks = [f"{i}. Concurrent ask number {i}." for i in range(15)]
-    procs = [ctx.Process(target=_mp_add_ask, args=(str(tmp_path), "tophand:f2-77:0.0", ask)) for ask in asks]
+    procs = [ctx.Process(target=_mp_add_ask, args=(str(tmp_path), "host-b:f2-77:0.0", ask)) for ask in asks]
     for p in procs:
         p.start()
     for p in procs:
         p.join(timeout=30)
         assert p.exitcode == 0
 
-    stored = get_goal(tmp_path, "tophand:f2-77:0.0")
+    stored = get_goal(tmp_path, "host-b:f2-77:0.0")
     assert stored is not None
     assert set(stored.open_asks) == set(asks)

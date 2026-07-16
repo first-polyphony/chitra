@@ -50,7 +50,7 @@ def _artifact(
         url=f"{ARTIFACT_URL_PREFIX}{suffix}",
         title=title,
         kind="page",
-        source="tophand:/var/lib/chitra/artifact.html",
+        source="host-b:/var/lib/chitra/artifact.html",
         published_at=published_at,
         updated_at=published_at,
         review_status=review_status,

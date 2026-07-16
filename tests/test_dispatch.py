@@ -816,7 +816,7 @@ def test_dispatch_to_tmux_delivers_to_a_fresh_session_showing_a_dim_placeholder(
 
 def test_dispatch_to_tmux_sends_a_clean_order_to_a_remote_host() -> None:
     """End-to-end: chitra's real deployment dispatches FROM one host (e.g.
-    trailhead) and delivers over ssh into another (e.g. otherhost). Every step
+    host-a) and delivers over ssh into another (e.g. otherhost). Every step
     -- copy-mode check, paste, and transcript verification -- must run
     against the remote host, never the local one, for a remote target to
     ever legitimately reach SENT."""

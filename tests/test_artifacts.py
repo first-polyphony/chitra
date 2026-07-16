@@ -33,7 +33,7 @@ def _record(**changes: str) -> ArtifactRecord:
         "url": f"{ARTIFACT_URL_PREFIX}example-001",
         "title": "Operator interview notes",
         "kind": "interview",
-        "source": "tophand:/var/lib/chitra/artifact.html",
+        "source": "host-b:/var/lib/chitra/artifact.html",
     }
     values.update(changes)
     return ArtifactRecord(
@@ -120,11 +120,11 @@ def test_upsert_resets_review_state_for_republished_content(tmp_path: Path) -> N
     first = upsert_artifact(tmp_path, _record())
     reviewed = mark_reviewed(tmp_path, first.url, response='{"status":"accepted"}')
 
-    republished = upsert_artifact(tmp_path, _record(title="Revised interview notes", source="tophand:/tmp/revised.html"))
+    republished = upsert_artifact(tmp_path, _record(title="Revised interview notes", source="host-b:/tmp/revised.html"))
 
     assert republished.published_at == first.published_at
     assert republished.title == "Revised interview notes"
-    assert republished.source == "tophand:/tmp/revised.html"
+    assert republished.source == "host-b:/tmp/revised.html"
     assert reviewed.review_status == "reviewed"
     assert republished.review_status == "unreviewed"
     assert republished.reviewed_at == ""
@@ -202,7 +202,7 @@ def _bypassed_record(brief: str, *, review_status: str = "reviewed") -> dict[str
         "url": f"{ARTIFACT_URL_PREFIX}bypass-001",
         "title": "Directly-written record",
         "kind": "page",
-        "source": "tophand:/tmp/direct.md",
+        "source": "host-b:/tmp/direct.md",
         "brief": brief,
         "published_at": "2026-07-14T00:30:00+00:00",
         "updated_at": "2026-07-14T00:30:00+00:00",

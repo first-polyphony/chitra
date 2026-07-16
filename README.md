@@ -1,6 +1,6 @@
 # chitra
 
-Deterministic, systemd-supervised relay and dedup daemons for delivering text into `tmux`-hosted AI-agent sessions and watching their state. Built for fleets of Claude Code sessions; the tmux-level mechanics are agent-agnostic.
+Deterministic, systemd-supervised relay and message-dedup daemons for delivering text into `tmux`-hosted AI-agent sessions and watching their state — so long-running coding-agent sessions can run unattended instead of being babysat pane by pane. Built for fleets of [Claude Code](https://claude.com/claude-code) sessions (several hosts, each running multiple agent sessions); the tmux-level mechanics are agent-agnostic.
 
 **Scope:** chitra delivers messages to, and observes the state of, LLM-driven sessions in tmux. Delivery, queueing, evidence checks, and state transitions remain deterministic. The single bounded reasoning boundary is goal enforcement: when a watched lane ends a turn with a completion claim, `chitra.goal_enforcement` launches independent `claude -p` reviewer processes to compare that lane's direction, questions, and completion posture with its frozen goal. Reviewers never draft Chitra's response, and their identifiers, counts, and verdicts are retained only in Chitra's own logs—never pasted into the monitored lane.
 
@@ -10,7 +10,9 @@ Deterministic, systemd-supervised relay and dedup daemons for delivering text in
 pip install git+https://github.com/first-polyphony/chitra.git@<tag>
 ```
 
-Requires Python 3.12+ and `tmux` on the host. See [Install](#install) for local development setup and [Configuration](#configuration) for the environment variables `chitra.dispatch` reads.
+Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
+
+Requires Python 3.12+ and `tmux` on the host. See [Install](#install) for local development setup and [Configuration](#configuration) for the environment variables `chitra.dispatch` reads. For a concrete, local walkthrough of what chitra actually does to a tmux pane, see [Tmux injection recipe](#tmux-injection-recipe).
 
 ## Why "chitra"
 
@@ -33,7 +35,7 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs the deterministic completion audit, while only a completion claim launches isolated watched-session reviewers on a bounded worker pool. In-flight review is `turn-finished-unverified` (yellow), a turn without a completion claim stays unverified, and a disputed claim becomes `completion-disputed`, so none can render idle-green.
 - **`chitra.account_registry`** — a freshness-bounded fact table of which account each tracked lane was last observed under. Used by `chitra.rate_limit_guard` to surface a missing usage snapshot or a mid-session account change as an operator escalation, instead of silently ignoring it or silently merging it with an unrelated lane.
 - **`chitra.rate_limit_state`** — the durable transaction outbox behind `chitra.rate_limit_guard`'s pause/resume state machine (see below). A crash between sweeps, or between any two phases, is never a data-loss event: the next sweep re-reads the transaction and continues from wherever it stopped.
-- **`chitra.rate_limit_guard`** (`chitra-rate-limit-guard`, `default_enabled: true`) — advances the shared durable pause/resume transaction for provider limits and host load through `pause_requested → checkpoint_sent → stop_sent → awaiting_quiescence → held → resume_requested → resume_sent`. Claude lanes retain the checkpoint plus deterministic `/goal clear` sequence. Codex lanes receive a fixed checkpoint-and-stop order and prove the stop through Watchd's backend-neutral pane-quiescence signal; no unverifiable Codex-internal stop API is assumed. Provider-limit resumes are selected by `session_ref` ascending, at most one new resume per sweep, and each later sweep rechecks fresh usage. Load pressure is sampled from `MemAvailable` and Linux memory/CPU PSI, activated or cleared only after two consecutive sweeps, and narrows the running-lane cap from 8 to 6/4/2 at L1/L2/L3. Load holds use the distinct `load-shed:<host>:<level>` prefix and resume last-shed-first, one lane per sweep, after the clear hysteresis. Every waiting phase remains bounded and graceful; L3 shortens deadlines but never kills a lane. When a lane reaches `held`, an append-preserving recovery ledger records why it stopped, its transcript pointer, its goal-derived resume note, and its reset time; see [`docs/pause-recovery.md`](docs/pause-recovery.md).
+- **`chitra.rate_limit_guard`** (`chitra-rate-limit-guard`, `default_enabled: true`) — advances the shared durable pause/resume transaction for provider limits and host load through `pause_requested → checkpoint_sent → stop_sent → awaiting_quiescence → held → resume_requested → resume_sent`. Claude lanes retain the checkpoint plus deterministic `/goal clear` sequence. Codex lanes receive a fixed checkpoint-and-stop order and prove the stop through Watchd's backend-neutral pane-quiescence signal; no unverifiable Codex-internal stop API is assumed. Provider-limit resumes are selected by `session_ref` ascending, at most one new resume per sweep, and each later sweep rechecks fresh usage. Load pressure is sampled from `MemAvailable` and Linux memory/CPU PSI (Pressure Stall Information), activated or cleared only after two consecutive sweeps, and narrows the running-lane cap from 8 to 6/4/2 at L1/L2/L3. Load holds use the distinct `load-shed:<host>:<level>` prefix and resume last-shed-first, one lane per sweep, after the clear hysteresis. Every waiting phase remains bounded and graceful; L3 shortens deadlines but never kills a lane. When a lane reaches `held`, an append-preserving recovery ledger records why it stopped, its transcript pointer, its goal-derived resume note, and its reset time; see [`docs/pause-recovery.md`](docs/pause-recovery.md).
 - **`chitra.ownership`** (`chitra-ownership`) — a read-only Watchtower-facing query over the Sweepd tracked-lane state. Given a host and one or more resolved `session_ref` values, it reports whether any belongs to a currently tracked `working` lane. It never dispatches, pauses, or kills. This repository has no clean descendant-PID-to-tmux mapping, so Watchtower resolves a PID to `session_ref` before invoking the query.
 - **`chitra.sweepd`** — publishes the compact fleet-state delta consumed by downstream monitors. Its snapshot and digest include the current `load_level` keyed by host and the durable shed-lane list; each lane also carries its host's level and whether its hold is a load shed.
 
@@ -44,7 +46,7 @@ chitra delivers to and observes LLM-driven sessions from the outside. Its relay 
 - **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
 - **`chitra.board`** — the deterministic, operator-facing terminal roster renderer. It renders stored goals and artifact records as cards, a box table, or Markdown while surfacing every open operator ask.
 - **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so a reader with the signing key can verify an exact recorded delivery. Absence is only conventional evidence; see "Message tag and delivery authentication" below.
-- **`chitra.convlog`** — a deterministic operator-brief validator, BLUF renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
+- **`chitra.convlog`** — a deterministic operator-brief validator, BLUF (bottom-line-up-front) renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
 
 ### Watchd reviewer configuration
 
@@ -174,6 +176,8 @@ Requires Python 3.12+ and `tmux` on the host (chitra shells out to the `tmux` bi
 pip install git+https://github.com/first-polyphony/chitra.git@<tag>
 ```
 
+Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
+
 Not yet on PyPI — see `docs/DESIGN.md` for the packaging rationale.
 
 For local development:
@@ -237,6 +241,10 @@ All configuration is via CLI flags (see `--help` on each entrypoint) or a small 
 ## A note on the observer pattern
 
 Internally, chitra is paired with a read-only observer that consumes its event and state output for learning and reflection; it never writes back into chitra's queues, locks, or state. That coupling is not shipped here. Instead, chitra exposes plain, documented file and queue formats: JSON orders and results (`chitra.dispatch`'s `DispatchOrder`/`DispatchResult` models), the `<ISO8601> <LANE_ID> <TEXT>` events-log line format documented in `chitra.triaged`'s module docstring, and the JSON triage log it emits. Any read-only consumer — an internal tool, a dashboard, another open-source project — can be built against these formats without chitra needing to know it exists. For such a consumer, the module docstrings are the complete contract.
+
+## Getting help
+
+Questions and bug reports: [open an issue](https://github.com/first-polyphony/chitra/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a nontrivial PR; security reports go through [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 

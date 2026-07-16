@@ -6,7 +6,7 @@ This document was previously titled "v1.1" and framed as a wishlist. It's retitl
 
 ## Status (2026-07-10)
 
-Fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](https://github.com/first-polyphony/chitra/pull/24)), the CodeQL-nightly fixes on both this repo ([PR #25](https://github.com/first-polyphony/chitra/pull/25)) and the monorepo ([PR #1975](https://github.com/first-polyphony/polyphony/pull/1975)), the Temporal-workflow-manager decision above ([PR #26](https://github.com/first-polyphony/chitra/pull/26)), the internal adapter — internal loop self-tuning loop, predecessor monitor reconciliation feed, internal pipeline promotion pipeline — on the monorepo ([PR #1965](https://github.com/first-polyphony/polyphony/pull/1965)), the mirror-sync porting the new config surface into the flat-layout monorepo mirror ([first-polyphony/polyphony#1984](https://github.com/first-polyphony/polyphony/pull/1984)), and two systemd-unit path fixes caught while bringing the service up for the first time ([#1995](https://github.com/first-polyphony/polyphony/pull/1995), [#1998](https://github.com/first-polyphony/polyphony/pull/1998)).
+Fully closed out. Landed and merged: the config/self-tuning surface ([PR #24](https://github.com/first-polyphony/chitra/pull/24)), the CodeQL-nightly fixes on both this repo ([PR #25](https://github.com/first-polyphony/chitra/pull/25)) and the monorepo ([PR #1975](https://github.com/first-polyphony/polyphony/pull/1975)), the Temporal-workflow-manager decision above ([PR #26](https://github.com/first-polyphony/chitra/pull/26)), the internal adapter on the monorepo ([PR #1965](https://github.com/first-polyphony/polyphony/pull/1965)), the mirror-sync porting the new config surface into the flat-layout monorepo mirror ([first-polyphony/polyphony#1984](https://github.com/first-polyphony/polyphony/pull/1984)), and two systemd-unit path fixes caught while bringing the service up for the first time ([#1995](https://github.com/first-polyphony/polyphony/pull/1995), [#1998](https://github.com/first-polyphony/polyphony/pull/1998)).
 
 `polyphony-chitra-dispatchd` and `polyphony-chitra-triaged` are now installed, enabled, and running live on hub-host for the first time, reading the new self-tuning `policy.yaml`, verified via clean startup logs.
 
@@ -26,20 +26,21 @@ caller to opt in. The gate never auto-closes a lane.
 
 ## v1.1
 
-### Deferred: capabilities from the retired predecessor monitor session-monitor
+### Deferred: capabilities from the retired predecessor session-monitor
 
-When predecessor monitor's fleet-nudging role was decommissioned in favour of chitra, an audit found two capabilities that lived in
-predecessor monitor's monitor but had no equivalent in chitra. One of the two — session↔goal
+When the predecessor fleet-nudging monitor was decommissioned in favour of
+chitra, an audit found two capabilities that lived in
+that monitor but had no equivalent in chitra. One of the two — session↔goal
 binding — has since been built (see below); crash recovery / checkpointing is
 the one that remains deferred, and it still must clear chitra's own scope test
 before it lands, because it adds persistent per-lane state to what is otherwise
 a thin relay:
 
-- **Crash recovery / checkpointing (still deferred)** — predecessor monitor's `checkpoint` /
-  `checkpoint-restore` / `recovery-list` / `recovery-resume` /
-  `manual-takeover` subcommands let a watcher snapshot a lane and resume it
-  after a crash. This is the most distinctive thing predecessor monitor's monitor did that
-  chitra doesn't. It adds persistent per-lane state, so by this document's own
+- **Crash recovery / checkpointing (still deferred)** — the predecessor
+  monitor's `checkpoint` / `checkpoint-restore` / `recovery-list` /
+  `recovery-resume` / `manual-takeover` subcommands let a watcher snapshot a
+  lane and resume it after a crash. This is the most distinctive thing that
+  monitor did that chitra doesn't. It adds persistent per-lane state, so by this document's own
   rule it likely belongs in a **consumer** of chitra's ledger/feed, not in the
   core daemons. Recorded here as a candidate, **not committed**.
 
@@ -50,7 +51,8 @@ roster), [#39](https://github.com/first-polyphony/chitra/pull/39) (persist open
 asks, full-transcript read) and [#40](https://github.com/first-polyphony/chitra/pull/40)
 (roster color legend / `Needs` column). A per-lane goal record now binds a
 session to an explicit goal, completion condition, and status — the equivalent
-of predecessor monitor's `enroll` / `list-goals` / `revise-goal` / `close-goal`. This stays
+of the predecessor monitor's `enroll` / `list-goals` / `revise-goal` /
+`close-goal`. This stays
 inside chitra's scope test because the store is deterministic with no LLM call
 in its own code path (it records the monitor's stated goal; it does not
 generate or reason about one).

@@ -29,7 +29,7 @@ from chitra.convlog import (
 
 def _payload(**changes: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "session_ref": "tophand:feeds:0.0",
+        "session_ref": "host-b:feeds:0.0",
         "program": "Feeds digest redesign (F2)",
         "subject": "Feeds digest compiler",
         "progress": "implementation-ready; final interface choice pending",
@@ -79,7 +79,7 @@ def test_v1_entry_loads_with_empty_grounding_fields(tmp_path: Path) -> None:
         "seq": 1,
         "kind": "operator_brief",
         "at": "2026-07-11T12:00:00+00:00",
-        "session_ref": "tophand:feeds:0.0",
+        "session_ref": "host-b:feeds:0.0",
         "payload": {"brief": legacy_brief, "rendered": "legacy rendered brief"},
     }
     path.write_text(json.dumps(legacy_entry) + "\n", encoding="utf-8")
@@ -90,10 +90,10 @@ def test_v1_entry_loads_with_empty_grounding_fields(tmp_path: Path) -> None:
     loaded_brief = validate_brief(entries[0].payload["brief"])
     assert loaded_brief.subject == ""
     assert loaded_brief.progress == ""
-    assert render_brief(loaded_brief).splitlines()[0] == "This is Feeds digest redesign (F2) (tophand:feeds:0.0)."
+    assert render_brief(loaded_brief).splitlines()[0] == "This is Feeds digest redesign (F2) (host-b:feeds:0.0)."
 
 
-@pytest.mark.parametrize("program", ["F2", "fix-6", "1-109", "tophand:F2:1"])
+@pytest.mark.parametrize("program", ["F2", "fix-6", "1-109", "host-b:F2:1"])
 def test_program_rejects_bare_codenames_and_session_refs(program: str) -> None:
     with pytest.raises(BriefValidationError, match="plain-language program"):
         validate_brief(_payload(program=program))
@@ -129,9 +129,9 @@ def test_category_decision_requires_decision_but_milestone_may_ask() -> None:
 
 def test_render_snapshots() -> None:
     assert render_brief(_brief()) == (
-        "This is Feeds digest redesign (F2) (tophand:feeds:0.0) working on Feeds digest compiler: "
+        "This is Feeds digest redesign (F2) (host-b:feeds:0.0) working on Feeds digest compiler: "
         "implementation-ready; final interface choice pending.\n"
-        "🔴 Feeds digest redesign (F2) (tophand:feeds:0.0) — needs you: Should the digest ship as one combined feed?\n"
+        "🔴 Feeds digest redesign (F2) (host-b:feeds:0.0) — needs you: Should the digest ship as one combined feed?\n"
         "Stage: The implementation is ready for the final interface choice.\n"
         "Recommendation: Ship one combined feed because the tested readers preferred it.\n"
         "Options (reply by number):\n"
@@ -143,9 +143,9 @@ def test_render_snapshots() -> None:
     )
     fyi = _brief(category="fyi", decision=None, recommendation="", options=[])
     assert render_brief(fyi) == (
-        "This is Feeds digest redesign (F2) (tophand:feeds:0.0) working on Feeds digest compiler: "
+        "This is Feeds digest redesign (F2) (host-b:feeds:0.0) working on Feeds digest compiler: "
         "implementation-ready; final interface choice pending.\n"
-        "🟦 Feeds digest redesign (F2) (tophand:feeds:0.0) — fyi; nothing to answer yet.\n"
+        "🟦 Feeds digest redesign (F2) (host-b:feeds:0.0) — fyi; nothing to answer yet.\n"
         "Stage: The implementation is ready for the final interface choice.\n"
         "— from the session, verbatim —\n"
         "> The combined prototype passed the reader test.\n"
@@ -164,7 +164,7 @@ def test_decisionless_brief_says_nothing_is_ready_to_answer() -> None:
 
 def test_render_group_numbers_briefs(tmp_path: Path) -> None:
     first = _brief()
-    second = _brief(session_ref="tophand:other:0.0", program="Other program (F3)")
+    second = _brief(session_ref="host-b:other:0.0", program="Other program (F3)")
     first_thread = open_thread(tmp_path / "conversation.jsonl", brief=first, raw_text="first")
     second_thread = open_thread(tmp_path / "conversation.jsonl", brief=second, raw_text="second")
     grouped = render_group(pending_threads(tmp_path / "conversation.jsonl"), now=datetime.now(UTC))
@@ -180,7 +180,7 @@ def test_cli_four_rung_lifecycle_show_list_and_pending(tmp_path: Path, capsys: p
     path = tmp_path / "conversation.jsonl"
     json_path = tmp_path / "brief.json"
     json_path.write_text(json.dumps(_payload()), encoding="utf-8")
-    assert main(["brief", "--convlog-path", str(path), "--session-ref", "tophand:feeds:0.0", "--json", str(json_path), "--raw", "raw"]) == 0
+    assert main(["brief", "--convlog-path", str(path), "--session-ref", "host-b:feeds:0.0", "--json", str(json_path), "--raw", "raw"]) == 0
     captured = capsys.readouterr()
     assert captured.out.startswith("This is")
     thread_id = captured.err.strip().removeprefix("thread=")
@@ -206,7 +206,7 @@ def test_cli_four_rung_lifecycle_show_list_and_pending(tmp_path: Path, capsys: p
 def test_batch_rule_and_revision_make_latest_brief_authoritative(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "conversation.jsonl"
     first = open_thread(path, brief=_brief(), raw_text="first")
-    second = open_thread(path, brief=_brief(session_ref="tophand:second:0.0", program="Second program (F3)"), raw_text="second")
+    second = open_thread(path, brief=_brief(session_ref="host-b:second:0.0", program="Second program (F3)"), raw_text="second")
 
     assert main(["rule", "--convlog-path", str(path), "--thread", first, "--thread", second, "--text", "Proceed.", "--via", "slack"]) == 0
     assert pending_threads(path) == []
@@ -238,9 +238,9 @@ def test_batch_rule_and_revision_make_latest_brief_authoritative(tmp_path: Path,
 def test_malformed_lines_are_skipped_and_sequence_is_monotonic(tmp_path: Path) -> None:
     path = tmp_path / "conversation.jsonl"
     thread_id = "abc123"
-    append_session_message(path, thread_id=thread_id, session_ref="tophand:f:0", text="raw", source_ref="source")
+    append_session_message(path, thread_id=thread_id, session_ref="host-b:f:0", text="raw", source_ref="source")
     path.write_text(path.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
-    append_entry(path, thread_id=thread_id, kind="operator_ruling", session_ref="tophand:f:0", payload={"text": "ok", "via": "chat"})
+    append_entry(path, thread_id=thread_id, kind="operator_ruling", session_ref="host-b:f:0", payload={"text": "ok", "via": "chat"})
 
     assert [entry.seq for entry in read_entries(path)] == [1, 2]
 

@@ -90,7 +90,7 @@ logger = structlog.get_logger(__name__)
 
 DISPATCH_CAPTURE_LINES: int = 12
 # Claude Code writes the submitted user turn to its JSONL transcript
-# asynchronously. A live Trailhead delivery took about 13 seconds to appear,
+# asynchronously. A live production delivery took about 13 seconds to appear,
 # so the former one-second allowance produced a FAILED result after the nudge
 # had actually been accepted. Keep the wait bounded while covering that
 # observed flush delay before declaring a delivery unverified.

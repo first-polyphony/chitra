@@ -321,7 +321,7 @@ def test_ledger_write_failure_does_not_prevent_completion_or_cause_redelivery(tm
 # --- rate-limit freeze / durable deferred subqueue (SOL findings #1, #7) ---
 
 
-def _tracked_goal(session_ref: str = "tophand:feeds-111:0.0") -> GoalRecord:
+def _tracked_goal(session_ref: str = "host-b:feeds-111:0.0") -> GoalRecord:
     return GoalRecord(
         session_ref=session_ref,
         goal="Ship the tested feature to production safely.",
@@ -347,10 +347,10 @@ def test_rate_limit_held_session_is_deferred_not_discarded(tmp_path: Path, monke
 
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
 
     queue_dir = tmp_path / "queue"
-    order = DispatchOrder(order_id="ord-frozen", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    order = DispatchOrder(order_id="ord-frozen", session_ref="host-b:feeds-111:0.0", nudge="new work")
     _write_order(queue_dir / "orders", order)
 
     results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
@@ -380,10 +380,10 @@ def test_deferred_order_is_requeued_and_delivered_exactly_once_after_resume(tmp_
 
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
 
     queue_dir = tmp_path / "queue"
-    order = DispatchOrder(order_id="ord-later", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    order = DispatchOrder(order_id="ord-later", session_ref="host-b:feeds-111:0.0", nudge="new work")
     _write_order(queue_dir / "orders", order)
 
     deferred_pass = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
@@ -394,8 +394,8 @@ def test_deferred_order_is_requeued_and_delivered_exactly_once_after_resume(tmp_
     # chitra.rate_limit_guard.apply_resume) returns the backlog to orders/.
     from chitra.goals import resume_goal
 
-    resume_goal(goals_root, "tophand:feeds-111:0.0")
-    requeued = requeue_deferred_for_session(queue_dir, "tophand:feeds-111:0.0")
+    resume_goal(goals_root, "host-b:feeds-111:0.0")
+    requeued = requeue_deferred_for_session(queue_dir, "host-b:feeds-111:0.0")
     assert requeued == ["ord-later"]
     assert not (queue_dir / "deferred" / "ord-later.json").exists()
     assert (queue_dir / "orders" / "ord-later.json").exists()
@@ -423,10 +423,10 @@ def test_hold_for_non_rate_limit_reason_does_not_freeze_dispatch(tmp_path: Path,
 
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="operator")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="operator")
 
     queue_dir = tmp_path / "queue"
-    order = DispatchOrder(order_id="ord-not-frozen", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    order = DispatchOrder(order_id="ord-not-frozen", session_ref="host-b:feeds-111:0.0", nudge="new work")
     _write_order(queue_dir / "orders", order)
 
     results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl", goals_root=goals_root)
@@ -449,12 +449,12 @@ def test_bypass_flag_alone_does_not_escape_the_freeze_without_a_sealed_task_type
 
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
 
     queue_dir = tmp_path / "queue"
     order = DispatchOrder(
         order_id="ord-fake-bypass",
-        session_ref="tophand:feeds-111:0.0",
+        session_ref="host-b:feeds-111:0.0",
         nudge="not really a checkpoint",
         bypass_rate_limit_freeze=True,
         task_type="anything-else",
@@ -481,12 +481,12 @@ def test_sealed_task_type_bypass_is_delivered_despite_the_hold(tmp_path: Path, m
 
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
 
     queue_dir = tmp_path / "queue"
     order = DispatchOrder(
         order_id="ord-checkpoint",
-        session_ref="tophand:feeds-111:0.0",
+        session_ref="host-b:feeds-111:0.0",
         nudge="checkpoint now",
         bypass_rate_limit_freeze=True,
         task_type="rate-limit-checkpoint",
@@ -509,17 +509,17 @@ def test_load_shed_hold_defers_ordinary_work_but_allows_guard_checkpoint(tmp_pat
     monkeypatch.setattr(dispatchd_mod, "dispatch_to_tmux", fake_dispatch)
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="load-shed:tophand:2")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="load-shed:host-b:2")
     queue_dir = tmp_path / "queue"
     _write_order(
         queue_dir / "orders",
-        DispatchOrder(order_id="ordinary", session_ref="tophand:feeds-111:0.0", nudge="new work"),
+        DispatchOrder(order_id="ordinary", session_ref="host-b:feeds-111:0.0", nudge="new work"),
     )
     _write_order(
         queue_dir / "orders",
         DispatchOrder(
             order_id="load-checkpoint",
-            session_ref="tophand:feeds-111:0.0",
+            session_ref="host-b:feeds-111:0.0",
             nudge="checkpoint now",
             task_type="load-shed-checkpoint",
             bypass_rate_limit_freeze=True,
@@ -544,7 +544,7 @@ def test_no_goals_root_configured_leaves_dispatch_unaffected(tmp_path: Path, mon
     monkeypatch.setenv("CHITRA_STATE_DIR", str(tmp_path / "no-such-state-dir"))
 
     queue_dir = tmp_path / "queue"
-    order = DispatchOrder(order_id="ord-default", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    order = DispatchOrder(order_id="ord-default", session_ref="host-b:feeds-111:0.0", nudge="new work")
     _write_order(queue_dir / "orders", order)
 
     results = run_once(queue_dir, lock_dir=tmp_path / "locks", ledger_path=tmp_path / "ledger.jsonl")
@@ -568,10 +568,10 @@ def test_goals_root_is_wired_through_the_cli_entrypoint(tmp_path: Path, monkeypa
 
     goals_root = tmp_path / "goals"
     upsert_goal(goals_root, _tracked_goal())
-    hold_goal(goals_root, "tophand:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
+    hold_goal(goals_root, "host-b:feeds-111:0.0", reason="rate-limit:5h", resume_at="2026-07-12T12:00:00+00:00")
 
     queue_dir = tmp_path / "queue"
-    order = DispatchOrder(order_id="ord-cli", session_ref="tophand:feeds-111:0.0", nudge="new work")
+    order = DispatchOrder(order_id="ord-cli", session_ref="host-b:feeds-111:0.0", nudge="new work")
     _write_order(queue_dir / "orders", order)
 
     exit_code = main(
