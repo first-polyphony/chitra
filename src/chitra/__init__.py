@@ -10,7 +10,7 @@ path — it is deterministic plumbing only.
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("chitra")
+    __version__ = version("chitra-monitor")
 except PackageNotFoundError:  # pragma: no cover - source tree without installed dist
     __version__ = "0.0.0.dev0"
 

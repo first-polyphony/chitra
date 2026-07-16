@@ -81,7 +81,7 @@ These PRs implement decisions this program already made. As of this consolidatio
 
 ## PyPI migration — gated checklist
 
-Full mechanics research: see `internal/publishing-research-readout.md` and `internal/license-history.md`, added by [PR #7](https://github.com/first-polyphony/chitra/pull/7) (merged; these files exist on `main`). Summary of the key findings and a concrete, ordered gate list follows — each gate should be satisfied in order before the next, and none skipped, before `pip install chitra-monitor` becomes a real, supportable path.
+Full mechanics research: see the publishing-research readout and license-history notes (maintainer-only), added by [PR #7](https://github.com/first-polyphony/chitra/pull/7) (merged; these files exist on `main`). Summary of the key findings and a concrete, ordered gate list follows — each gate should be satisfied in order before the next, and none skipped, before `pip install chitra-monitor` becomes a real, supportable path.
 
 **Gate 1 — License question: decided.** `pyproject.toml` declares `license = "MIT"`, copyright held by Reticle Works (Trey Herr) — the final license decision, confirmed by the operator and merged via PR #4. This gate is closed.
 

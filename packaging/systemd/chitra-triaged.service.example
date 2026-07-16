@@ -10,7 +10,7 @@ User=chitra
 Group=chitra
 # systemd creates and owns this directory (mode 0750) for the unit's lifetime.
 StateDirectory=chitra
-# Fill in the venv path where `pip install chitra` (or `pip install -e .`) was run.
+# Fill in the venv path where `pip install chitra-monitor` (or `pip install -e .`) was run.
 ExecStart=/path/to/venv/bin/triaged --events-log /var/lib/chitra/events.log --state-file /var/lib/chitra/triaged-state.json --triage-log /var/lib/chitra/triaged.log
 Restart=always
 RestartSec=10
