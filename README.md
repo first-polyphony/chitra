@@ -2,7 +2,7 @@
 
 chitra is a set of deterministic, systemd-supervised daemons that deliver text into `tmux`-hosted AI-agent sessions and watch their state. It lets long-running coding-agent sessions run unattended instead of being babysat pane by pane.
 
-It was built for fleets of [Claude Code](https://claude.com/claude-code) sessions spread across several hosts, but the tmux-level mechanics are agent-agnostic.
+It was built to manage large parallel sessions with LLMs, allowing the user to do more while chitra manages clearly defined goals and nudges agents forward.
 
 ## Scope
 
