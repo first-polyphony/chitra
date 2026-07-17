@@ -118,8 +118,8 @@ Questions and bug reports: [open an issue](https://github.com/first-polyphony/ch
 
 ## Authors
 
-**Trey Herr** ([Reticle Works](https://reticle-works.com)) — design and direction. Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI) as development tools under human direction; see [`NOTICE`](NOTICE).
+**Trey Herr** (Reticle Works) — design and direction. Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI) as development tools under human direction.
 
 ## License
 
-MIT © 2026 Reticle Works. See [LICENSE](LICENSE) for the full text and [NOTICE](NOTICE) for attribution.
+MIT © 2026 Reticle Works. See [LICENSE](LICENSE) for the full text.
