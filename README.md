@@ -22,7 +22,9 @@ Requires Python 3.12+ and `tmux` on the host. See [Install](#install) for local 
 
 ## Why "chitra"
 
-The name is short for *Chitragupta*, a figure from Hindu tradition described as a divine registrar who keeps an accurate ledger of deeds — one who records, verifies, and reports, but does not act on the decision-maker's behalf. That is chitra's contract: it observes, verifies, gates release, and relays, without doing a session's work for it.
+The name is a short form of *Chitragupta*, a figure from Hindu tradition described as the divine registrar and keeper of a complete, accurate ledger of deeds — one who records, verifies what is recorded, and reports to the decision-maker, but does not act on that decision-maker's behalf. That remains this package's contract: it observes, verifies against frozen goals and cited artifacts, gates release, and relays without doing an agent session's work for it. The name is used respectfully as a functional reference, not as religious imagery.
+
+BrowserStack's `chitragupta-node` and `chitragupta-rails` are open-source SDKs that use the same name for structured JSON (JavaScript Object Notation) logging — attaching metadata to log lines rather than relaying or signing them. Different tool, same naming logic: the name attaches to something that records and structures what happened, not something that decides what should happen.
 
 ## What's in this repo
 
