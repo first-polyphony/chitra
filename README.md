@@ -7,7 +7,7 @@ Deterministic, systemd-supervised relay and message-dedup daemons for delivering
 ## Quickstart
 
 ```bash
-pip install git+https://github.com/first-polyphony/chitra.git@<tag>
+pip install chitra-monitor  # or: pip install git+https://github.com/first-polyphony/chitra.git@<tag>
 ```
 
 Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
@@ -173,7 +173,7 @@ The keys/values above are illustrative only. Chitra ships no default content or 
 Requires Python 3.12+ and `tmux` on the host (chitra shells out to the `tmux` binary; there is no Python tmux dependency to install).
 
 ```bash
-pip install git+https://github.com/first-polyphony/chitra.git@<tag>
+pip install chitra-monitor  # or: pip install git+https://github.com/first-polyphony/chitra.git@<tag>
 ```
 
 Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
