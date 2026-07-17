@@ -147,9 +147,10 @@ def test_plan_pauses_selects_a_non_chitra_session(tmp_path: Path) -> None:
     assert skipped == []
 
 
-def test_plan_pauses_never_selects_chitra_monitor_or_boomtown(tmp_path: Path) -> None:
-    upsert_goal(tmp_path, _goal("trailhead:monitor:0.0"))
-    upsert_goal(tmp_path, _goal("trailhead:boomtown:0.0"))
+def test_plan_pauses_never_selects_configured_never_pause_prefixes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHITRA_NEVER_PAUSE_SESSION_PREFIXES", "host-a:monitor:,host-a:harness:")
+    upsert_goal(tmp_path, _goal("host-a:monitor:0.0"))
+    upsert_goal(tmp_path, _goal("host-a:harness:0.0"))
     verdicts = [
         AccountedVerdict(
             session_id=f"chitra-{tmux_session}",
@@ -162,10 +163,10 @@ def test_plan_pauses_never_selects_chitra_monitor_or_boomtown(tmp_path: Path) ->
             self_fresh=True,
             account_attributed=False,
         )
-        for tmux_session, binding_window in (("monitor", "5h"), ("boomtown", "7d"))
+        for tmux_session, binding_window in (("monitor", "5h"), ("harness", "7d"))
     ]
 
-    to_pause, skipped = plan_pauses(verdicts, host="trailhead", goals_root=tmp_path)
+    to_pause, skipped = plan_pauses(verdicts, host="host-a", goals_root=tmp_path)
 
     assert to_pause == []
     assert len(skipped) == 2

@@ -98,6 +98,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
@@ -229,7 +230,12 @@ def _pause_strategy(backend: PauseBackend) -> LanePauseStrategy:
     return CodexLanePauseStrategy() if backend == "codex" else ClaudeLanePauseStrategy()
 
 
-NEVER_PAUSE_SESSION_PREFIXES = ("trailhead:monitor:", "trailhead:boomtown:")
+def _never_pause_session_prefixes() -> tuple[str, ...]:
+    """Session-ref prefixes the guard must never pause (e.g. the monitor's own
+    sessions), from the comma-separated ``CHITRA_NEVER_PAUSE_SESSION_PREFIXES``
+    env var. Empty by default: no session is exempt unless the deployment says so."""
+    raw = os.environ.get("CHITRA_NEVER_PAUSE_SESSION_PREFIXES", "")
+    return tuple(prefix for prefix in (part.strip() for part in raw.split(",")) if prefix)
 
 
 def _resume_nudge(record: GoalRecord) -> str:
@@ -428,7 +434,8 @@ def plan_pauses(verdicts: list[AccountedVerdict], *, host: str, goals_root: Path
         if session_ref is None:
             skipped.append(f"{verdict.session_id}: no tmux_session on this snapshot -- cannot resolve a dispatch target")
             continue
-        if session_ref.startswith(NEVER_PAUSE_SESSION_PREFIXES):
+        never_pause = _never_pause_session_prefixes()
+        if never_pause and session_ref.startswith(never_pause):
             skipped.append(f"{session_ref}: Chitra's own monitor/harness session is never paused")
             continue
         existing = get_goal(goals_root, session_ref)

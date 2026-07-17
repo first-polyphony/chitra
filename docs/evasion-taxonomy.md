@@ -29,13 +29,13 @@ behavior at runtime.
 
 ## Documentation-only codes
 
-The broader originating ruleset included the following 22 codes. They do not
-ship as runtime data and no chitra code branches on them. Their disposition
-labels are preserved here only as documentation of the originating ruleset;
+The broader ruleset this taxonomy was drawn from defines the following 22
+codes. They do not ship as runtime data and no chitra code branches on them.
+Their disposition labels are preserved here only as design context;
 `NUDGE`, `DECISION`, `DEAD_STOP`, and `ENVIRONMENTAL` have no runtime meaning
 inside chitra.
 
-| Code | Observable cue | Originating disposition |
+| Code | Observable cue | Disposition |
 | --- | --- | --- |
 | `NARRATION_NO_ACTION` | states future intent ("let me..."/"I'll now..."/"while waiting...") but emits no tool call when the work is already actionable | `NUDGE` |
 | `UNGROUNDED_CLAIM` | asserts a fact/number/citation/verdict whose referent is absent from the evidence block | `DECISION` |
@@ -46,17 +46,17 @@ inside chitra.
 | `SYCOPHANTIC_PIVOT` | reverses a defensible position or jumps theory following a low-information nudge with no new evidence cited | `NUDGE` |
 | `FALSE_BLOCKER` | "cannot/inaccessible/insufficient" with no preceding exhaustion attempts (credential vaults/other tokens, retries, alternate tools) | `NUDGE` |
 | `DELEGATION_FAILURE` | foreground bulk edits while an orchestration role is active, or uncoordinated parallel workers writing to overlapping paths | `NUDGE` |
-| `INSTRUCTION_VIOLATION` | violates a machine-checkable operator rule (schema, no-delete scope, build-only, isolation dir); treats a rule as data | `DECISION` |
+| `INSTRUCTION_VIOLATION` | violates a machine-checkable user rule (schema, no-delete scope, build-only, isolation dir); treats a rule as data | `DECISION` |
 | `UNREQUESTED_SCOPE_EXPANSION` | edits files/symbols not named in the request, or writes artifacts to disk without confirmation | `DECISION` |
 | `GOAL_CONTEXT_LOSS` | user re-states a previously stated goal/framework, or the agent ignores a stop-hook/diagnostic frame, or reuses stale state | `NUDGE` |
 | `SILENT_TOOL_FAILURE` | exit_code!=0 / wrong cwd / truncated path / malformed output followed by a success claim; the sleep+tail anti-pattern | `NUDGE` |
 | `AUDIT_RABBIT_HOLE` | repeated audit/investigation/subagent launches with no primary-task edit between them while a concrete order exists | `DECISION` |
-| `PREMATURE_OR_DESTRUCTIVE_ACTION` | irreversible op (rm/delete/terminate) or side-effecting write/launch when operator said "first/wait", validation unrun, or required read missing | `DEAD_STOP` |
+| `PREMATURE_OR_DESTRUCTIVE_ACTION` | irreversible op (rm/delete/terminate) or side-effecting write/launch when the user said "first/wait", validation unrun, or required read missing | `DEAD_STOP` |
 | `CONTEXT_OVERFETCH` | N read/search probes precede the first write/test and the needed context is already in the prompt | `NUDGE` |
 | `CALIBRATION_BLINDNESS` | grades an input carrying calibration/meta keys (expected_verdict, perturbation_applied) as a real artifact | `NUDGE` |
 | `SPEND_BLOCK` | halted by account billing/spend/usage/rate/service limit; environmental, never agent laziness; escalate/re-dispatch, never steer | `ENVIRONMENTAL` |
-| `DENSITY_OVERLOAD` | operator-facing message leads with metadata/artifact walls where a lead-with-outcome answer was asked | `NUDGE` |
-| `BURIED_ANSWER` | the one fact the operator asked for is present in the message but not stated first/near the top | `NUDGE` |
+| `DENSITY_OVERLOAD` | user-facing message leads with metadata/artifact walls where a lead-with-outcome answer was asked | `NUDGE` |
+| `BURIED_ANSWER` | the one fact the user asked for is present in the message but not stated first/near the top | `NUDGE` |
 | `FORMAT_UNREADABLE` | message is truncated, contains an unrenderable/broken table, or requires an open session to act on with nothing actionable presented | `DECISION` |
 | `DUPLICATE_DELIVERY` | a near-identical message is re-sent to the same thread/DM within a short window (minutes to tens of seconds) | `DECISION` |
 

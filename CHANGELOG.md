@@ -4,6 +4,12 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Changed
+- The rate-limit guard's never-pause session prefixes are now configured via
+  the comma-separated `CHITRA_NEVER_PAUSE_SESSION_PREFIXES` env var instead of
+  a hardcoded `NEVER_PAUSE_SESSION_PREFIXES` constant. The default is empty:
+  no session is exempt from pausing unless the deployment sets the variable.
+
 ## [0.8.2.6] - 2026-07-16
 
 ### Fixed
@@ -15,24 +21,21 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 ### Removed
 - Removed the local HTML-file board output path and the `chitra-board`
   entrypoint. The roster renderer and validated board-facts plumbing are
-  unchanged; downstream now renders the operator board as a claude.ai
-  artifact.
+  unchanged; consumers can render the roster output however they choose.
 
 ## [0.8.2.3] - 2026-07-15
 
 ### Added
 - A durable per-pause recovery ledger records the held session, reason,
   existing transcript pointer, goal-derived resume note, and reset time.
-  Attached operator sessions remain pausable; only Chitra's own hub-host
-  `monitor` and harness sessions are excluded (see
-  `NEVER_PAUSE_SESSION_PREFIXES`).
+  Attached sessions remain pausable; only session refs matching the
+  configured never-pause prefixes are excluded.
 - Close-time inventory diffing for `chitra-goals close`, which blocks when
-  caller-stated delivered items do not satisfy the operator-stated
-  `done_when` or when a required item is relabeled as follow-on/out of scope/
-  deferred/future work without an operator-recorded descope or explicit
-  acknowledgement. `chitra-goals set` now also surfaces a persistent operator
-  flag for missing or vague aggregate done conditions while storing the input
-  unchanged. Chitra consumes done conditions; it never enumerates, proposes,
+  caller-stated delivered items do not satisfy the enrolled `done_when` or
+  when a required item is relabeled as follow-on/out of scope/deferred/future
+  work without a recorded descope or explicit acknowledgement. `chitra-goals
+  set` now also surfaces a persistent flag for missing or vague aggregate
+  done conditions while storing the input unchanged. Chitra consumes done conditions; it never enumerates, proposes,
   authors, derives, annotates, or rewrites them.
 - Forced completion review at every detected lane turn-end. `watchd` now
   distinguishes an ordinary finished turn from a completion claim, requires
@@ -101,7 +104,7 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 ## [0.8.1] - 2026-07-12
 
 A hardening patch, not a feature release. An independent adversarial review
-(`docs/SOL-ADVERSARIAL-REVIEW.md`) of the two open feature PRs this
+of the two open feature PRs this
 consolidates (#54 board-table-colors, #55 graceful-session-pause-resume)
 found two BLOCKER-severity defects and five HIGH-severity defects across
 dispatch delivery, pause/resume durability, and account-identity handling.
@@ -176,9 +179,9 @@ happy path) — see the PR description for the full per-finding table.
   Needs cell no longer produces a wider physical line than its column.
   Overlong unbroken tokens are hard-split by display width, never by code
   points. The `cards`/`box` default is **unchanged** (still `cards`) —
-  which format the operator wants by default remains an open decision; it
-  is now a single named constant (`board.ROSTER_DEFAULT_FORMAT`) so
-  resolving that decision later is a one-line change.
+  the default format remains an open decision; it is now a single named
+  constant (`board.ROSTER_DEFAULT_FORMAT`) so resolving that decision
+  later is a one-line change.
 
 ### Changed
 - Version escalation is frozen at the `0.8.x` line. Six minor-version
@@ -189,7 +192,7 @@ happy path) — see the PR description for the full per-finding table.
   rewritten. Only `0.8.x` hardening patches ship until transactionality,
   idempotence, and evidence-backed status are demonstrated with the kind of
   fault-injection tests this release adds — no `0.9` without an explicit
-  operator go-ahead.
+  maintainer decision.
 
 ## [0.8.0] - 2026-07-11
 
