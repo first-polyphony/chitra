@@ -22,9 +22,9 @@ task outcome, judge score, human override, or `task_type`. Since `routing.yaml`
 maps `task_type` to `routing_hint`, the ledger cannot justify a specific config
 change by itself.
 
-The script keeps the same conservative posture as the fleet routing feedback
-loop: it enforces a freshness window, a minimum sample count, a maximum dominant
-hint share, and a maximum changed-line budget. Because the available telemetry
+The script takes a conservative posture: it enforces a freshness window, a
+minimum sample count, a maximum dominant hint share, and a maximum
+changed-line budget. Because the available telemetry
 is delivery/frequency only, those gates can only decide whether the usage report
 is meaningful; they cannot produce a success-based routing recommendation.
 

@@ -1,8 +1,14 @@
 # chitra
 
-Deterministic, systemd-supervised relay and message-dedup daemons for delivering text into `tmux`-hosted AI-agent sessions and watching their state — so long-running coding-agent sessions can run unattended instead of being babysat pane by pane. Built for fleets of [Claude Code](https://claude.com/claude-code) sessions (several hosts, each running multiple agent sessions); the tmux-level mechanics are agent-agnostic.
+chitra is a set of deterministic, systemd-supervised daemons that deliver text into `tmux`-hosted AI-agent sessions and watch their state. It lets long-running coding-agent sessions run unattended instead of being babysat pane by pane.
 
-**Scope:** chitra delivers messages to, and observes the state of, LLM-driven sessions in tmux. Delivery, queueing, evidence checks, and state transitions remain deterministic. The single bounded reasoning boundary is goal enforcement: when a watched lane ends a turn with a completion claim, `chitra.goal_enforcement` launches independent `claude -p` reviewer processes to compare that lane's direction, questions, and completion posture with its frozen goal. Reviewers never draft Chitra's response, and their identifiers, counts, and verdicts are retained only in Chitra's own logs—never pasted into the monitored lane.
+It was built for fleets of [Claude Code](https://claude.com/claude-code) sessions spread across several hosts, but the tmux-level mechanics are agent-agnostic.
+
+## Scope
+
+chitra delivers messages to LLM-driven sessions in tmux and observes their state. Everything on the delivery, queueing, evidence-check, and state-tracking path is deterministic — no model decides what to send or when.
+
+The one deliberate exception is **goal enforcement**. When a watched session ends a turn claiming it is done, `chitra.goal_enforcement` launches independent `claude -p` reviewer processes to check that claim against the session's frozen goal. The reviewers never draft chitra's messages, and their verdicts stay in chitra's own logs — they are never pasted back into the watched session.
 
 ## Quickstart
 
@@ -12,173 +18,90 @@ pip install chitra-monitor  # or: pip install git+https://github.com/first-polyp
 
 Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
 
-Requires Python 3.12+ and `tmux` on the host. See [Install](#install) for local development setup and [Configuration](#configuration) for the environment variables `chitra.dispatch` reads. For a concrete, local walkthrough of what chitra actually does to a tmux pane, see [Tmux injection recipe](#tmux-injection-recipe).
+Requires Python 3.12+ and `tmux` on the host. See [Install](#install) for local development setup, [Configuration](#configuration) for environment variables, and [Delivering into a tmux pane](#delivering-into-a-tmux-pane) for what chitra actually does to a pane.
 
 ## Why "chitra"
 
-The name is a short form of *Chitragupta*, a figure from Hindu tradition described as the divine registrar and keeper of a complete, accurate ledger of deeds — one who records, verifies what is recorded, and reports to the decision-maker, but does not act on that decision-maker's behalf. That remains this package's contract: it observes, verifies against frozen goals and cited artifacts, gates release, and relays without doing an agent session's work for it. The name is used respectfully as a functional reference, not as religious imagery.
-
-BrowserStack's `chitragupta-node` and `chitragupta-rails` are open-source SDKs that use the same name for structured JSON (JavaScript Object Notation) logging — attaching metadata to log lines rather than relaying or signing them. Different tool, same naming logic: the name attaches to something that records and structures what happened, not something that decides what should happen. No other project surfaced in a search that uses the name specifically for a delivery/relay or ledger-signing role.
+The name is short for *Chitragupta*, a figure from Hindu tradition described as a divine registrar who keeps an accurate ledger of deeds — one who records, verifies, and reports, but does not act on the decision-maker's behalf. That is chitra's contract: it observes, verifies, gates release, and relays, without doing a session's work for it.
 
 ## What's in this repo
 
-chitra delivers to and observes LLM-driven sessions from the outside. Its relay and storage paths are deterministic; the isolated watched-session reviewers above are the deliberately narrow exception.
+chitra installs eleven command-line entrypoints backed by a set of small, single-purpose modules. `dispatchd` and `triaged` are the always-on daemons; the rest are periodic or ad-hoc tools.
 
-### Session-management primitives
+**Delivery**
+- `chitra.dispatch` / `chitra.dispatchd` — drain a JSON order queue and deliver each message into a tmux session via bracketed paste, confirming delivery by grepping the session's own transcript. One writer per session (`LaneLock`); idempotent and crash-safe (see [Delivery guarantees](#delivery-guarantees)).
+- `chitra.ledger` — an append-only, HMAC-signed log of every delivered message.
 
-- **`chitra.usage`** — strict reader for Claude statusline sidecar and Codex account usage snapshots, plus pure rate-limit threshold evaluation. Usage is attributed to the account; `evaluate` emits each session's account-level verdict so callers can pause stale siblings with an over-limit account. A session with no known account identity is never merged with another unknown-identity session — each is its own isolated group. It reports facts (`ok`, `approaching`, `pause`, or stale/unknown) and never pauses a lane or chooses an action.
-- **`chitra.goals`** — a deterministic per-lane goal store. The first write anchors `enrolled_done_when` and `enrolled_at` permanently at the single record writer, while `lane_id` binds the open goal to the durable session name rather than its host or volatile instance suffix. Strategic fields (`goal`, `done_when`, `intent`, `scope`, and `source`) can only be revised with a reasoned `redirect`; routine tactical updates remain available through `now`, while `check` applies a stricter specification threshold and `guidance` resolves the configured canonical-decisions document. `set` surfaces a persistent operator flag when the supplied `done_when` is missing or uses vague aggregate language, but never rewrites it. `update_now` cannot create a `done-*` state; Watchd records `done-pending-close` only through its completion-audit and frozen-goal review path. `close` blocks until caller-supplied delivered items balance the enrolled conditions plus explicit acknowledgements and recorded descopes. Its `hold`, `resume`, and `due` subcommands record the monitor's hold bookkeeping while preserving the stated goal; the caller decides whether and how to act on a due record. Every read-modify-write helper serializes its full transaction with a `flock`-protected critical section, so concurrent writers cannot silently lose each other's updates.
-- **`chitra.goal_enforcement`** — freezes the watched session's current goal, launches each adversarial reviewer in a separate process, requires unanimous acceptance, rejects stale or tampered bindings, and automatically restarts a redirected review with one reviewer while recording the restart in goal history. Spend, credentials, irreversible actions, and strategy redirects remain operator-gated even after unanimous acceptance.
-- **`chitra.reasoning`** — goal-first decision triangulation whose public dispatch record is the immutable `DecisionAttestation`. The attestation binds exact approved text, frozen-goal and corpus lineage, the watched-session review signal, and the operator-gate outcome. `dispatchd` logs it to Chitra's private `attestations.jsonl`; only the approved text is pasted.
-- **`chitra.close_gate`** — pure close-time inventory parsing and diffing over immutable `enrolled_done_when`, the current condition, explicit delivered-item/evidence bindings, close notes, recorded goal revisions, and explicit operator acknowledgements. It never infers delivery from close prose.
-- **`chitra.completion_gate`** — citation-bearing completion review. Deploy and live-verification claims must retain concrete SHA, path, or probe citations, completed todo items need per-item proof, and completion disputes stay on evidence and posture grounds only.
-- **`chitra.watchd`** — tmux pane-change emitter and forced turn-end boundary. Every detected finished turn runs the deterministic completion audit, while only a completion claim launches isolated watched-session reviewers on a bounded worker pool. In-flight review is `turn-finished-unverified` (yellow), a turn without a completion claim stays unverified, and a disputed claim becomes `completion-disputed`, so none can render idle-green.
-- **`chitra.account_registry`** — a freshness-bounded fact table of which account each tracked lane was last observed under. Used by `chitra.rate_limit_guard` to surface a missing usage snapshot or a mid-session account change as an operator escalation, instead of silently ignoring it or silently merging it with an unrelated lane.
-- **`chitra.rate_limit_state`** — the durable transaction outbox behind `chitra.rate_limit_guard`'s pause/resume state machine (see below). A crash between sweeps, or between any two phases, is never a data-loss event: the next sweep re-reads the transaction and continues from wherever it stopped.
-- **`chitra.rate_limit_guard`** (`chitra-rate-limit-guard`, `default_enabled: true`) — advances the shared durable pause/resume transaction for provider limits and host load through `pause_requested → checkpoint_sent → stop_sent → awaiting_quiescence → held → resume_requested → resume_sent`. Claude lanes retain the checkpoint plus deterministic `/goal clear` sequence. Codex lanes receive a fixed checkpoint-and-stop order and prove the stop through Watchd's backend-neutral pane-quiescence signal; no unverifiable Codex-internal stop API is assumed. Provider-limit resumes are selected by `session_ref` ascending, at most one new resume per sweep, and each later sweep rechecks fresh usage. Load pressure is sampled from `MemAvailable` and Linux memory/CPU PSI (Pressure Stall Information), activated or cleared only after two consecutive sweeps, and narrows the running-lane cap from 8 to 6/4/2 at L1/L2/L3. Load holds use the distinct `load-shed:<host>:<level>` prefix and resume last-shed-first, one lane per sweep, after the clear hysteresis. Every waiting phase remains bounded and graceful; L3 shortens deadlines but never kills a lane. When a lane reaches `held`, an append-preserving recovery ledger records why it stopped, its transcript pointer, its goal-derived resume note, and its reset time; see [`docs/pause-recovery.md`](docs/pause-recovery.md).
-- **`chitra.ownership`** (`chitra-ownership`) — a read-only Watchtower-facing query over the Sweepd tracked-lane state. Given a host and one or more resolved `session_ref` values, it reports whether any belongs to a currently tracked `working` lane. It never dispatches, pauses, or kills. This repository has no clean descendant-PID-to-tmux mapping, so Watchtower resolves a PID to `session_ref` before invoking the query.
-- **`chitra.sweepd`** — publishes the compact fleet-state delta consumed by downstream monitors. Its snapshot and digest include the current `load_level` keyed by host and the durable shed-lane list; each lane also carries its host's level and whether its hold is a load shed.
+**Monitoring**
+- `chitra.watchd` — emits tmux pane-change and turn-end events and runs a completion audit on each finished turn.
+- `chitra.triaged` / `chitra.sweepd` — deduplicated state-change events and a compact fleet-state feed for downstream monitors.
+- `chitra.draft_scanner` — flags unsubmitted drafts left sitting in a tmux input box.
 
-- **`chitra.dispatch`** — a tmux dispatch library. It checks for tmux copy-mode and cancels it, uses `paste-buffer -p` for a proper bracketed-paste wrapper, then confirms delivery by grepping the target session's own transcript rather than trusting a pane screenshot. Includes `LaneLock`, a file-based single-writer lock: only one writer delivers to a given session id at a time.
-- **`chitra.dispatchd`** — a daemon that drains a JSON order queue (`queue/orders/*.json`), atomically claims each order (renamed into `queue/in_flight/*.json`) before any delivery attempt, delivers it via `chitra.dispatch` under a `LaneLock`, writes a result JSON, and moves the processed order aside. Once a result file exists for an order, it is never redispatched; a crash between the paste actually happening and the result file being written is reconciled on the next pass via a send-nonce marker plus the same transcript-grep evidence `dispatch_to_tmux` itself uses, rather than blindly redispatching — see "Crash-safety" below. A session held by `chitra.rate_limit_guard` for a rate-limit or load-shed reason gets its ordinary orders durably deferred (`queue/deferred/*.json`, no result written) rather than discarded — `requeue_deferred_for_session` returns them to `orders/` FIFO once the hold clears.
-- **`chitra.triaged`** — a daemon that tails an events log and emits a triage event only when a session's state signature changes, not on every repeated poll. Its receiving compatibility artifacts are `queue.tsv`, deduplicated critical `flags.log`, and `stats.json`.
-- **`chitra.draft_scanner`** — a periodic scan of `host:session:pane` targets for an unsubmitted draft sitting in the tmux input box. Flags only; never submits or discards anything.
-- **`chitra.board_updater`** — a deterministic, validated writer for a small JSON "board" document: it backs up the existing file, validates the new one against caller-supplied constraints, writes, and rolls back if validation fails.
-- **`chitra.board`** — the deterministic, operator-facing terminal roster renderer. It renders stored goals and artifact records as cards, a box table, or Markdown while surfacing every open operator ask.
-- **`chitra.ledger`** — an append-only delivery ledger signed with HMAC (hash-based message authentication code). Every successfully delivered message is signed and logged, so a reader with the signing key can verify an exact recorded delivery. Absence is only conventional evidence; see "Message tag and delivery authentication" below.
-- **`chitra.convlog`** — a deterministic operator-brief validator, BLUF (bottom-line-up-front) renderer, and append-only conversation log. It validates, renders, and logs briefs the caller composed; it never composes or judges their content.
+**Goals and completion**
+- `chitra.goals` — a per-lane goal store with a write-once enrolled done-condition, guarded by `flock`.
+- `chitra.goal_enforcement` / `chitra.completion_gate` / `chitra.close_gate` — review a session's completion claim against its frozen goal and cited evidence; spend, credentials, and irreversible actions stay operator-gated.
 
-### Watchd reviewer configuration
+**Rate limiting**
+- `chitra.usage` / `chitra.rate_limit_guard` / `chitra.account_registry` — read account usage and pause/resume lanes on provider limits or host load pressure, over a durable, crash-safe transaction. See [`docs/pause-recovery.md`](docs/pause-recovery.md).
 
-The normal completion-claim review round uses two isolated reviewers running
-the ambient monitor model (ruling 3A: same model as the monitor, different
-context). Operators can pin a cheaper model, tune the round down to one
-reviewer, or point it at a credential wrapper without changing code:
+**Rendering**
+- `chitra.board` / `chitra.convlog` — a terminal roster of goals and open asks, and an append-only operator-brief conversation log.
 
-- `CHITRA_WATCHD_REVIEWER_MODEL` / `--reviewer-model` — reviewer model
-  (default: the ambient monitor model).
-- `CHITRA_WATCHD_REVIEWER_COUNT` / `--reviewer-count` — normal-round reviewer
-  count, which must be at least 1 (default 2). A goal redirect still restarts
-  with exactly one reviewer.
-- `CHITRA_WATCHD_REVIEWER_COMMAND` / `--reviewer-command` — subprocess command
-  (default `claude`).
+## Delivering into a tmux pane
 
-The subprocess inherits the watchd service environment, including `HOME` and
-`CLAUDE_CONFIG_DIR`; provisioning that credential path belongs to deployment.
-`watchd` runs at most two lane reviews concurrently. It never waits for those
-reviews in `poll_once`; later polls collect completed verdicts and apply final
-lane status. Daemon shutdown waits for running reviews and collects their
-results so reviewer threads and subprocesses are not abandoned.
+Delivery into a live tmux session follows one path:
 
-Lane completion claims are audited on evidence grounds only: todo residue,
-deferral language, evidence gaps, invalid or missing per-item evidence, and
-posture mismatches remain disputing. Delivery-brief content is validated only
-at `chitra-artifacts record --brief`, where it lints the sidecar-authored brief
-instead of lane pane text.
+1. `tmux display-message -p -t <target> '#{pane_in_mode}'` — if `1`, the pane is in copy-mode (which silently swallows input); run `tmux send-keys -X cancel` and wait briefly.
+2. `printf '%s' "$text" | tmux load-buffer -b <name> -`
+3. `tmux paste-buffer -p -b <name> -t <target>` — the `-p` flag is mandatory; without it, newlines act as Enter keypresses and the message can self-submit early.
+4. `tmux send-keys -t <target> Enter`
+5. Confirm delivery by grepping the target session's transcript for the delivered text. "Looks sent" is not evidence.
 
-## Operator brief conversation log
+For a remote target, each command is the same, ssh-wrapped to run on the actual target host. Checking the local tmux server's state, or grepping local transcripts, when the target is remote reports on the wrong host.
 
-`chitra-convo` records one four-state exchange in a plain JSONL conversation log: the full raw upward session message, the caller-composed and chitra-rendered operator brief, the operator's explicit ruling, and the lane directive sent down (optionally linked to its dispatch ledger order id). The caller, normally the monitor harness LLM, owns interpretation and composition; chitra only validates the declared schema, renders the fixed bottom-line-up-front layout, and records exact text.
+## Delivery guarantees
 
-A thread is pending exactly when its latest operator brief contains a decision and no later operator ruling exists. Brief revisions are allowed, and the latest revision is authoritative; silence never retires a pending ask. `chitra-convo pending` renders all such threads as one numbered message, oldest first.
+- **Single writer.** `dispatchd` holds a `LaneLock` per session id across each delivery, so two writers can't race to paste into the same session and corrupt its next turn.
+- **Idempotent.** Once a result file exists for an order, it is never redispatched, even across a restart. A crash between paste and result is reconciled with a send-nonce marker plus the same transcript-grep check, not a blind second paste.
+- **Authenticated.** Every successful delivery appends an HMAC-SHA256-signed record to an append-only JSONL ledger; a reader with the signing key can prove a given message was delivered. This is a trusted-host model — anyone who can write to the ledger file can rewrite it — so treat "not in the ledger" as a strong signal, not tamper-proof evidence. See `chitra.ledger.verify_delivery`.
 
-## Operator-stated done conditions and close inventory
+## Running the daemons
 
-Chitra consumes done conditions supplied by the operator or enrollment material. It does **not** enumerate, derive, propose, author, annotate, or rewrite a lane's `done_when`. Interactive enrollment-time elicitation is not part of this release.
-
-At `chitra-goals set`, a deterministic lint checks only for missing conditions and uncounted aggregate language such as `representative consumers`, `some clients`, or bare deliverable plurals. A finding adds the fixed message “This session's done conditions are missing or vague — flag for the operator.” to the lane's persistent `open_asks`, which the roster renders under `AWAITING RULING`. The set still succeeds and the supplied `done_when` is stored unchanged. No corrected wording or candidate enumeration is produced.
-
-At first enrollment, Chitra stores the supplied condition in the write-once `enrolled_done_when` field and records `enrolled_at`. Every later mutation carries those values forward; a conflicting non-empty anchor is rejected. Legacy records are normalized in memory from their current `done_when` and creation/document timestamp, then persist that one-time backfill on their next write. Their stable `lane_id` is similarly backfilled from the session name. A second open record with the same lane id is rejected even when its host or instance suffix differs, so a fresh version-1 record cannot replace an open lane's enrollment anchor.
-
-At `chitra-goals close`, the caller must state each delivered item with a repeated `--delivered-item`. Chitra deterministically reads explicit conjunctions, lists, and counts from `enrolled_done_when`, then balances delivery against explicit acknowledgements and recorded descopes. Repeated `--close-note` values are checked for a required item being reclassified as `follow-on`, `out of scope`, `out-of-scope`, `deferred`, or `future work`. A real operator descope uses `chitra-goals redirect --done-when ... --reason ...`, which preserves the prior condition in `goal_history` and increments `goal_version`; the enrolled-to-current delta remains visible as `dropping: ...` in operator-facing goal summaries. An exact operator exception can instead be supplied with `--operator-acknowledged-item`. These are records of operator direction, not Chitra-authored conditions.
+`dispatchd` and `triaged` run continuously. `chitra-rate-limit-guard` is a one-shot CLI meant to run on a timer. Example systemd units, with placeholder paths and service user, live under [`packaging/systemd/`](packaging/systemd/):
 
 ```bash
-chitra-goals close \
-  --session-ref host:lane:0.0 \
-  --delivered-item "X client" \
-  --delivered-item "Y client" \
-  --close-note "Both clients passed live validation."
+sudo cp packaging/systemd/chitra-rate-limit-guard.service.example /etc/systemd/system/chitra-rate-limit-guard.service
+sudo cp packaging/systemd/chitra-rate-limit-guard.timer.example /etc/systemd/system/chitra-rate-limit-guard.timer
+sudoedit /etc/systemd/system/chitra-rate-limit-guard.service   # fill in placeholders
+sudo systemctl daemon-reload
+sudo systemctl enable --now chitra-rate-limit-guard.timer
 ```
 
-The Python API also accepts `CompletionEvidence` records, but counts one as delivered only when its caller supplied an explicit `todo_item` binding. Citation prose is never interpreted as a delivered item.
+## Configuration
 
-## Tmux injection recipe
+Each entrypoint is configured with CLI flags (`--help` on any command lists them) and a small set of environment variables. The most common:
 
-Delivery into a **live** tmux session follows one path:
+| Env var | Default | Notes |
+|---|---|---|
+| `CHITRA_STATE_DIR` | `/var/lib/chitra` | Base directory for the queue, ledger, and ledger key |
+| `REMOTE_DISPATCH_HOSTS` | *(empty)* | Comma-separated allowlist of hosts dispatch may target over ssh |
+| `CHITRA_CLAUDE_PROJECTS` | `~/.claude/projects` | Root searched for transcript-grep delivery verification |
+| `CHITRA_ROUTING_CONFIG` | *(unset)* | Optional `task_type` → routing-hint config; see [`docs/routing.yaml.example`](docs/routing.yaml.example) |
+| `CHITRA_POLICY_CONFIG` | *(unset)* | Optional completion-gate and dispatch policy; see [`docs/policy.yaml.example`](docs/policy.yaml.example) |
 
-1. `tmux display-message -p -t <target> '#{pane_in_mode}'` — if `1` (the pane is in copy-mode, which silently swallows input), run `tmux send-keys -X cancel` and wait briefly.
-2. `printf '%s' "$text" | tmux load-buffer -b <name> -`
-3. `tmux paste-buffer -p -b <name> -t <target>` — the `-p` flag is mandatory; without it, newlines in multi-line text act as real Enter keypresses and the message can self-submit early.
-4. `tmux send-keys -t <target> Enter`
-5. Confirm delivery by grepping the target session's own transcript file for the delivered text. A pane screenshot or "looks sent" heuristic is not evidence that delivery happened.
+The full set — ssh options, triage log paths, transcript globs — is documented per-command via `--help`.
 
-Every step above runs against the **actual target host** — a plain local `tmux`/filesystem call for a local target, or the identical command ssh-wrapped for a remote one (chitra's real deployment shape: it typically runs from one host, e.g. hub-host, and dispatches over ssh into another, e.g. worker-host). This matters for steps 1 and 5 in particular: checking the *local* tmux server's copy-mode state, or grepping the *local* filesystem's transcripts, when the target is remote reports on the wrong host entirely and can never confirm a genuine remote delivery.
-
-## Single-writer rule
-
-`dispatchd` acquires a `LaneLock` per session id before any delivery attempt and releases it after: one writer per session id. Acquiring a lock for an already-locked session id fails or blocks rather than silently proceeding. This prevents two writers racing to deliver to the same session at once — an out-of-band delivery racing a live session's own process can silently corrupt its next turn.
-
-## Crash-safety
-
-`dispatchd` guards against redelivery using a result file: before dispatching, it checks whether a result file already exists for an order id, and if so treats the order as already processed. This means **once a result file exists for an order, it is never redispatched**, even across a daemon restart.
-
-Before a paste attempt, `dispatchd` writes a send-nonce beside the claimed order in `in_flight/`. If the worker crashes after the paste but before the result is written, the next pass sees that nonce and checks the target transcript before doing any second paste. A confirmed prior delivery produces a synthesized `SENT` result; only an unconfirmed attempt is dispatched again. Existing result files remain the final idempotency guard.
-
-## Message tag and delivery authentication
-
-Every dispatched message carries a `tag` (default `"[C]"`) marking it as a chitra relay delivery. An operator typing directly into a pane needs no tag and no authentication; the pane is that operator's own channel. `DispatchOrder`/`DispatchResult` also carry an optional `routing_hint` (default `None`) — an opaque string recording a routing/model-preference decision the calling system already made; chitra never reads, validates, or acts on its contents, only passes it through unchanged into the result and the signed ledger entry for audit purposes.
-
-Without the ledger, a receiving session cannot distinguish "chitra genuinely delivered this" from an unauthenticated claim. On every **successful** delivery — never on blocked or failed attempts — `dispatchd` appends a signed record to an append-only JSON Lines (JSONL) ledger. The current `sig_v4` HMAC-SHA256 payload covers `(timestamp, session_ref, tag, message_hash, routing_hint, task_type, resolved_zdr)`; the verifier retains the versioned v1/v2/v3 field sets for older entries. The signing key lives in the state directory and is generated on first use. This adds no extra step to a normal send.
-
-This is a trusted-host threat model: the ledger assumes whoever can write to the state directory is trusted (systemd-supervised `dispatchd`, plus the host's own root/admin). It is not designed to resist a malicious actor with filesystem write access to `ledger.jsonl`.
-
-Within that model, the ledger proves one thing cryptographically, and one thing only by convention:
-- **Positive (cryptographic)**: "chitra delivered this exact message to this session at this time" — recompute the HMAC over a given ledger entry and compare; if you have that entry, its authenticity is provable.
-- **Absence (convention, not cryptographic)**: `dispatchd` only ever appends to `ledger.jsonl`, so under normal operation a message's absence suggests no such delivery happened. But append-only-ness here is enforced by convention and file permissions, not by a hash chain or monotonic counter linking entries — there is nothing in the file format that would let a reader detect a wholesale truncation or edit. Anyone with write access to the ledger file can rewrite or shorten it undetected. Treat "not in the ledger" as a strong signal under the trusted-host assumption, not as tamper-proof evidence.
-
-See `chitra.ledger.verify_delivery` for the check as a function call, or read `ledger.jsonl` directly (a plain, documented JSONL format) if the verifying reader doesn't have chitra installed.
-
-## Routing config (`task_type` -> default `routing_hint`)
-
-`DispatchOrder` also carries an optional `task_type` — a separate, caller-supplied classification string (e.g. `"code-review"`, `"design-judgment"`). Chitra does not decide what a task type IS or evaluate any content to classify one; the caller states it. `task_type` is carried through onto `DispatchResult` and the signed ledger entry for audit.
-
-If a caller sets `task_type` but leaves `routing_hint` unset, `dispatchd` consults an operator-populated YAML config keyed by `task_type`. This is still config-driven substitution — like a `.gitattributes` or `nginx.conf` mapping file, not a smart router — and it is skipped entirely whenever the caller already supplied an explicit `routing_hint` (**explicit `routing_hint` always wins**). The config supports two shapes:
-
-- **`defaults` (opaque hint)** — a flat `task_type -> routing_hint` map. Chitra fills in the opaque `routing_hint` string but never acts on it. Unchanged; existing configs keep working.
-- **`routes` (active model/harness selection)** — a structured `task_type -> {model, harness, zdr?}` map. Chitra **resolves** the model+harness at dispatch into a `model@harness[+zdr]` `routing_hint` and records the ZDR setting. When both a `routes` and a `defaults` entry exist for the same `task_type`, the structured route wins.
-
-Point `dispatchd` at a config file via the `CHITRA_ROUTING_CONFIG` env var (or its `--routing-config-path` flag). If unset, `dispatchd` runs with no routing config — a normal no-op, not an error. If the env var/flag IS set but the file is missing or fails to parse, that's a real configuration error and `dispatchd` raises rather than silently ignoring it. An example template ships at `docs/routing.yaml.example`:
-
-```yaml
-# chitra routing preferences, keyed by task_type.
-# defaults: opaque routing_hint chitra carries but never acts on.
-defaults:
-  heartbeat: sonnet
-  quorum: haiku
-# routes: structured model+harness (+zdr) chitra RESOLVES and records.
-routes:
-  design-judgment:
-    model: opus-4.8
-    harness: claude-code
-    zdr: true
-  code-fix:
-    model: gpt-5.6-sol
-    harness: codex-cli
-```
-
-The keys/values above are illustrative only. Chitra ships no default content or opinions about what task types or routing targets (model names, harnesses) mean in any given deployment — this is a file each operator populates for their own fleet. For real-world naming precedent (not a prescription), see [`docs/workflow-pattern-catalog.md`](docs/workflow-pattern-catalog.md), a catalog of named orchestration loop patterns some deployments' `task_type` values may correspond to.
+**Routing.** A caller can tag a `DispatchOrder` with an opaque `task_type`. If a routing config is set, `dispatchd` maps that to a `routing_hint` (a model/harness preference the caller's system uses); an explicit `routing_hint` always wins, and chitra carries the hint through to the ledger but never acts on it.
 
 ## Install
 
-Requires Python 3.12+ and `tmux` on the host (chitra shells out to the `tmux` binary; there is no Python tmux dependency to install).
+Requires Python 3.12+ and `tmux` (chitra shells out to the `tmux` binary; there is no Python tmux dependency).
 
 ```bash
 pip install chitra-monitor  # or: pip install git+https://github.com/first-polyphony/chitra.git@<tag>
 ```
 
-Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
-
-Not yet on PyPI — see `docs/DESIGN.md` for the packaging rationale.
+Not yet on PyPI — see [`docs/DESIGN.md`](docs/DESIGN.md) for the packaging rationale.
 
 For local development:
 
@@ -189,71 +112,14 @@ pip install -e '.[test]'
 pytest
 ```
 
-## Running the daemons
-
-Eleven command-line interface (CLI) entrypoints are installed. `dispatchd` and `triaged` are the always-on daemons. Periodic or ad-hoc tools are `draft-scanner`, `chitra-goals`, `chitra-artifacts`, `chitra-usage`, `chitra-rate-limit-guard`, `chitra-ownership`, `chitra-sweepd`, `chitra-convo`, and `chitra-capabilities`. Example systemd units — with placeholder paths and a placeholder service user you must fill in — live under `packaging/systemd/`.
-
-The guard remains a one-shot CLI. To schedule its two-minute sweep, copy the example service and timer, edit every placeholder for the target host, then enable the timer:
-
-```bash
-sudo cp packaging/systemd/chitra-rate-limit-guard.service.example /etc/systemd/system/chitra-rate-limit-guard.service
-sudo cp packaging/systemd/chitra-rate-limit-guard.timer.example /etc/systemd/system/chitra-rate-limit-guard.timer
-sudoedit /etc/systemd/system/chitra-rate-limit-guard.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now chitra-rate-limit-guard.timer
-```
-
-Watchtower's read-only ownership check uses its already-resolved session references:
-
-```bash
-chitra-ownership --host worker-host \
-  --session-ref worker-host:lane-a:0.0 \
-  --session-ref worker-host:lane-b:0.0
-```
-
-## Configuration
-
-All configuration is via CLI flags (see `--help` on each entrypoint) or a small number of environment variables read by `chitra.dispatch`:
-
-| Env var | Default | Read by | Notes |
-|---|---|---|---|
-| `REMOTE_DISPATCH_HOSTS` | *(empty — local delivery only)* | `chitra.dispatch` | Comma-separated allowlist of remote hostnames dispatch is allowed to target over ssh |
-| `CHITRA_LOCAL_HOST` | *(unset)* | `chitra.dispatch` | Override for this host's own name, for local-vs-remote detection in tests/unusual setups |
-| `CHITRA_LANE_LOCK_DIR` | a `chitra-locks` dir under the system temp dir | `chitra.dispatch` | Directory for `LaneLock` lock files |
-| `CHITRA_CLAUDE_PROJECTS` | `~/.claude/projects` | `chitra.dispatch` | Root directory searched locally for transcript-grep verification of a local target |
-| `CHITRA_REMOTE_CLAUDE_PROJECTS` | `~/.claude/projects` | `chitra.dispatch` | Root directory searched **on the remote host** (over ssh) for transcript-grep verification of a remote target |
-| `CHITRA_TRANSCRIPT_GLOB` | `*/*.jsonl` | `chitra.dispatch` | Relative transcript pattern beneath each configured transcript root |
-| `CHITRA_SSH_CONFIG` | *(unset)* | `chitra.dispatch` | Optional `ssh -F <path>` config file for remote dispatch |
-| `CHITRA_SSH_IDENTITY` | *(unset)* | `chitra.dispatch` | Optional `ssh -i <path>` identity file for remote dispatch |
-| `CHITRA_SSH_KNOWN_HOSTS` | *(unset)* | `chitra.dispatch` | Optional `UserKnownHostsFile` for remote dispatch |
-| `CHITRA_SSH_STRICT_HOST_KEY_CHECKING` | `accept-new` | `chitra.dispatch` | Value passed to ssh's `StrictHostKeyChecking` option |
-| `CHITRA_SSH_CONNECT_TIMEOUT_SECONDS` | `4` | `chitra.dispatch` | Positive integer passed to ssh's `ConnectTimeout` option |
-| `CHITRA_STATE_DIR` | `/var/lib/chitra` | `chitra.dispatchd`, `chitra.ledger` | Base directory for the default queue, ledger, and ledger key |
-| `CHITRA_POLICY_CONFIG` | *(unset — shipped defaults)* | `chitra.dispatchd` | Optional one-file completion-gate and dispatch policy; see [`docs/policy.yaml.example`](docs/policy.yaml.example) |
-| `CHITRA_TRIAGE_EVENTS_LOG` | `/var/lib/chitra/events.log` | `chitra.triaged` | Events log to consume when no CLI flag is supplied |
-| `CHITRA_TRIAGE_STATE_FILE` | `/var/lib/chitra/triaged-state.json` | `chitra.triaged` | Persistent transition-dedup state |
-| `CHITRA_TRIAGE_LOG` | `/var/lib/chitra/triaged.log` | `chitra.triaged` | JSONL transition log |
-| `CHITRA_TRIAGE_QUEUE_FILE` / `CHITRA_TRIAGE_FLAGS_FILE` / `CHITRA_TRIAGE_STATS_FILE` | alongside the state file | `chitra.triaged` | Receiving compatibility artifacts: queue, interrupt-only flags, and counters |
-| `CHITRA_TRIAGE_ALERT_STATE_FILE` | alongside the state file | `chitra.triaged` | Persistent 15-minute `(lane, rule, statement)` critical-flag dedup state |
-
-`dispatchd` also accepts `--policy-config-path`, `--invalid-orders-dir`, `--capture-lines`, `--post-paste-wait-seconds`, `--transcript-recency-seconds`, `--lane-lock-timeout-seconds`, and `--goals-root` (the state root consulted for the guard freeze/defer check; default: `CHITRA_STATE_DIR`); see `dispatchd --help`. `chitra-rate-limit-guard` accepts `--usage-dir`, `--host` (required), `--codex`, `--goals-root`, `--queue-dir`, and `--policy-config`; see `chitra-rate-limit-guard --help`. `chitra-ownership` accepts `--host`, repeatable `--session-ref`, and `--state-dir`. The generic replay evaluator and fixture workflow are documented in [`docs/self-tuning.md`](docs/self-tuning.md).
-
-## A note on the observer pattern
-
-Internally, chitra is paired with a read-only observer that consumes its event and state output for learning and reflection; it never writes back into chitra's queues, locks, or state. That coupling is not shipped here. Instead, chitra exposes plain, documented file and queue formats: JSON orders and results (`chitra.dispatch`'s `DispatchOrder`/`DispatchResult` models), the `<ISO8601> <LANE_ID> <TEXT>` events-log line format documented in `chitra.triaged`'s module docstring, and the JSON triage log it emits. Any read-only consumer — an internal tool, a dashboard, another open-source project — can be built against these formats without chitra needing to know it exists. For such a consumer, the module docstrings are the complete contract.
-
 ## Getting help
 
 Questions and bug reports: [open an issue](https://github.com/first-polyphony/chitra/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a nontrivial PR; security reports go through [SECURITY.md](SECURITY.md).
 
-## Roadmap
-
-See `docs/ROADMAP.md` for the v1.1 plan.
-
 ## Authors
 
-Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI), orchestrated by its maintainers.
+**Trey Herr** ([Reticle Works](https://reticle-works.com)) — design and direction. Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI) as development tools under human direction; see [`NOTICE`](NOTICE).
 
 ## License
 
-MIT License — see `LICENSE`.
+MIT © 2026 Reticle Works. See [LICENSE](LICENSE) for the full text and [NOTICE](NOTICE) for attribution.
