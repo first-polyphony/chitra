@@ -2,7 +2,7 @@
 
 ## Origin
 
-chitra began as an internal extraction: a tmux dispatch function that had two real, silently-triggering bugs (documented in `src/chitra/dispatch.py`'s module docstring), pulled out into its own hardened, tested library alongside a small set of daemons that turn "occasionally invoke this function from an interactive AI session" into "always-on, deterministic, systemd-supervised background service."
+chitra grew out of a tmux dispatch function that had two real, silently-triggering bugs (documented in `src/chitra/dispatch.py`'s module docstring). It was pulled out into its own hardened, tested library alongside a small set of daemons that turn "occasionally invoke this function from an interactive AI session" into "always-on, deterministic, systemd-supervised background service."
 
 ## Bounded reasoning boundary
 
@@ -14,7 +14,7 @@ General-purpose agent orchestration, task decomposition, and response generation
 
 Done conditions belong to the operator and the material used to enroll a session. Chitra never enumerates, derives, proposes, authors, annotates, or rewrites `done_when`; post-hoc authorship would let the system fit the condition to whatever already exists. The first record write copies that condition into write-once `enrolled_done_when`/`enrolled_at` anchors, and every later write is checked at the single `_upsert_goal_locked` boundary. A stable `lane_id`, derived from the session name without host or instance suffix, prevents an open lane from being re-enrolled under a fresh volatile `session_ref`. Legacy records with no anchors are backfilled in memory from their current condition and stored timestamps, then persist the normalization on their next write. Enrollment-time interactive elicitation requires a separate operator-interaction channel and is outside this release.
 
-`chitra.close_gate` therefore has a deliberately narrower role. It deterministically reads explicit items and counts from `enrolled_done_when`, computes enrolled-minus-current and history-derived descopes, compares the remaining inventory with caller-supplied delivered items or explicit `CompletionEvidence.todo_item` bindings, and blocks `chitra-goals close` before state deletion when the inventory is short. It also treats follow-on/out-of-scope/deferred/future-work language over a still-required item as the F8 close tell unless a recorded operator redirect removed that condition or the caller supplies an explicit operator acknowledgement. Operator-facing core summaries render a reduced current condition together with its `dropping: ...` delta; adapters that render goal conditions must use `descope_delta(record)` to do the same.
+`chitra.close_gate` therefore has a deliberately narrower role. It deterministically reads explicit items and counts from `enrolled_done_when`, computes enrolled-minus-current and history-derived descopes, compares the remaining inventory with caller-supplied delivered items or explicit `CompletionEvidence.todo_item` bindings, and blocks `chitra-goals close` before state deletion when the inventory is short. It also treats follow-on/out-of-scope/deferred/future-work language over a still-required item as a silent-descope tell unless a recorded operator redirect removed that condition or the caller supplies an explicit operator acknowledgement. Operator-facing core summaries render a reduced current condition together with its `dropping: ...` delta; adapters that render goal conditions must use `descope_delta(record)` to do the same.
 
 The companion done-condition lint is surfacing-only. At `chitra-goals set`, missing or vague aggregate conditions add one fixed persistent `open_asks` flag for the board's `AWAITING RULING` section. Enrollment is not blocked, the supplied value is unchanged, and Chitra emits no replacement or suggested enumeration.
 
@@ -22,7 +22,7 @@ The companion done-condition lint is surfacing-only. At `chitra-goals set`, miss
 
 - **Distribution:** git-installable (`pip install git+https://...@<tag>`) for now, not yet on PyPI. chitra's current consumers install a pinned revision onto systemd hosts they provision themselves — PyPI's advantages (name-based discovery, version-range resolution for downstream packagers) don't apply yet. The build backend (hatchling, standards-based `pyproject.toml`) keeps a future PyPI release a small, mechanical step rather than a rewrite.
 - **Layout:** `src/chitra/` (src-layout), not a flat top-level package. This ensures `import chitra` always resolves to the installed wheel, never to a loose working-directory copy — important for a package whose main job is running as an installed systemd service.
-- **Versioning:** plain SemVer starting in the 0.x range (currently 0.2.0). SemVer reserves 0.y.z for "anything may change" — appropriate before there's a real external consumer depending on a stable interface. 1.0.0 is reserved for the day this repo is public and the maintainers are willing to promise CLI/API stability; a "v1.1" *milestone* label in an issue tracker is a separate thing from the released package version.
+- **Versioning:** plain SemVer in the 0.x range. SemVer reserves 0.y.z for "anything may change" — appropriate before there's a real external consumer depending on a stable interface. 1.0.0 is reserved for the day the maintainers are willing to promise CLI/API stability.
 
 ## Single-writer rule (why `LaneLock` exists)
 
@@ -34,6 +34,6 @@ The tmux-injection recipe (documented in the README) is the only channel this re
 
 No reconciliation or drift-detection path exists in chitra. If one is added, it must use a valid signed delivery-ledger entry to establish that chitra originated a task. It may add tasks or reorder chitra-originated tasks, but a task without matching delivery proof is presumed operator-authored and must never be removed, held, or corrected away. A growing task list is not drift.
 
-## Build/CI history
+## Extensibility without coupling
 
-This repo was extracted from a private monorepo where it was originally developed, tested (lint/typecheck/full test suite green before extraction), and used internally. The extraction process stripped internal deployment specifics (hostnames, internal service names, internal wiki/documentation references) that don't belong in a public tool's source or docs, replacing hardcoded internal defaults with generic, empty-by-default configuration. See the README's "note on the observer pattern" for how an internal read-only consumer stays decoupled from this repo without needing to be described here.
+chitra exposes plain, documented file and queue formats: JSON orders and results (`chitra.dispatch`'s `DispatchOrder`/`DispatchResult` models), the `<ISO8601> <LANE_ID> <TEXT>` events-log line format documented in `chitra.triaged`'s module docstring, and the JSON triage log it emits. Any read-only consumer — a dashboard, a learning loop, another project — can be built against these formats without chitra needing to know it exists. For such a consumer, the module docstrings are the complete contract.

@@ -114,7 +114,7 @@ pytest
 
 ## Getting help
 
-Questions and bug reports: [open an issue](https://github.com/first-polyphony/chitra/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a nontrivial PR; security reports go through [SECURITY.md](SECURITY.md). The v1.1 plan is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Questions and bug reports: [open an issue](https://github.com/first-polyphony/chitra/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a nontrivial PR; security reports go through [SECURITY.md](SECURITY.md).
 
 ## Authors
 
