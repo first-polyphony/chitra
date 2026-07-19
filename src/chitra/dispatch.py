@@ -475,7 +475,11 @@ def pane_input_check(
         normalized_draft = draft.strip()
         if not normalized_draft:
             return PaneInputCheck(True, "idle: Codex TUI input row has no draft input", current_hash, input_line)
-        if normalized_draft in _CODEX_TUI_PLACEHOLDER_HINTS and _input_row_draft_is_all_dim(raw_line, prompt_marker="›"):
+        # Either condition alone is sufficient evidence of a placeholder, not a real draft:
+        # an exact match against a known hint (a real draft identical to a rotating hint
+        # text is not plausible content worth protecting) or an all-dim row (sufficient even
+        # when the hint text is new to the list, since Codex adds hints across releases).
+        if normalized_draft in _CODEX_TUI_PLACEHOLDER_HINTS or _input_row_draft_is_all_dim(raw_line, prompt_marker="›"):
             return PaneInputCheck(True, "idle: Codex TUI input row shows only a placeholder hint", current_hash, input_line)
         return PaneInputCheck(False, "blocked: unsubmitted operator draft detected", current_hash, input_line)
     last_line = strip_terminal_controls(str(captured_lines[-1]))
