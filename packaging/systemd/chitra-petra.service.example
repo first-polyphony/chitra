@@ -1,0 +1,33 @@
+[Unit]
+Description=Petra observe-only pressure authority (dark launch)
+Documentation=https://github.com/first-polyphony/chitra
+After=chitra-ownership-provider.service
+Requires=chitra-ownership-provider.service
+
+[Service]
+Type=simple
+# Provision a static, dedicated `petra` service UID and `chitra-petra`
+# primary group. Add the Watchtower service UID to `chitra-petra`: the
+# runtime directory is 0750 and atomically published health.json is 0640.
+# `chitra-authority` grants Petra read/write access only to the provider UDS.
+User=petra
+Group=chitra-petra
+SupplementaryGroups=chitra-authority
+Environment=PETRA_HOST_UUID=replace-with-stable-host-id
+StateDirectory=chitra-petra
+StateDirectoryMode=0750
+RuntimeDirectory=chitra-petra
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStart=/path/to/venv/bin/python -m chitra.petra --socket-path /run/chitra-petra/petra.sock --ownership-socket-path /run/chitra-ownership/provider.sock --ownership-peer-user chitra --ledger-path /var/lib/chitra-petra/decision-outbox.sqlite3 --health-path /run/chitra-petra/health.json --host-uuid ${PETRA_HOST_UUID}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/chitra-petra /var/lib/chitra-petra
+
+[Install]
+WantedBy=multi-user.target
