@@ -120,7 +120,7 @@ Questions and bug reports: [open an issue](https://github.com/ReticleWorks/chitr
 
 ## Authors
 
-**Trey Herr** (Reticle Works) — design and direction. Built with [Claude](https://claude.com/claude-code) (Anthropic) and [Codex](https://openai.com/index/introducing-codex/) (OpenAI) as development tools under human direction.
+Trey (Reticle Works) with Claude and Codex.
 
 ## License
 
