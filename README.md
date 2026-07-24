@@ -28,7 +28,7 @@ BrowserStack's `chitragupta-node` and `chitragupta-rails` are open-source SDKs t
 
 ## What's in this repo
 
-chitra installs eleven command-line entrypoints backed by a set of small, single-purpose modules. `dispatchd` and `triaged` are the always-on daemons; the rest are periodic or ad-hoc tools.
+chitra installs twelve command-line entrypoints backed by a set of small, single-purpose modules. `dispatchd` and `triaged` are the always-on daemons; the rest are periodic or ad-hoc tools.
 
 **Delivery**
 - `chitra.dispatch` / `chitra.dispatchd` — drain a JSON order queue and deliver each message into a tmux session via bracketed paste, confirming delivery by grepping the session's own transcript. One writer per session (`LaneLock`); idempotent and crash-safe (see [Delivery guarantees](#delivery-guarantees)).
@@ -38,6 +38,9 @@ chitra installs eleven command-line entrypoints backed by a set of small, single
 - `chitra.watchd` — emits tmux pane-change and turn-end events and runs a completion audit on each finished turn.
 - `chitra.triaged` / `chitra.sweepd` — deduplicated state-change events and a compact fleet-state feed for downstream monitors.
 - `chitra.draft_scanner` — flags unsubmitted drafts left sitting in a tmux input box.
+
+**PR review**
+- `chitra.pr_review` / `chitra.pr_reviewd` (`chitra-pr-review`) — deterministic blast-radius/diff-size pre-checks plus an isolated multi-reviewer security pass over one pull request's diff, logged to a signed ledger and reported as a plain PR comment. Never merges, approves, requests changes, or fails a required check by default; see the `pr_reviewd` module docstring and `PRReviewPolicy.block_on_findings`. Stock trigger: `.github/workflows/pr-security-review.yml`.
 
 **Goals and completion**
 - `chitra.goals` — a per-lane goal store with a write-once enrolled done-condition, guarded by `flock`.

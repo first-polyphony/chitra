@@ -39,6 +39,7 @@ chitra-ownership = "chitra.ownership:main"
 chitra-sweepd = "chitra.sweepd:main"
 chitra-convo = "chitra.convlog:main"
 chitra-capabilities = "chitra.capabilities:main"
+chitra-pr-review = "chitra.pr_reviewd:main"
 
 [project.urls]
 Repository = "https://github.com/ReticleWorks/chitra"

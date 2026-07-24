@@ -4,6 +4,17 @@ All notable changes to this project are documented here, in the [Keep a Changelo
 
 ## [Unreleased]
 
+### Added
+- A PR security review gate, `chitra.pr_review` / `chitra.pr_reviewd` (new `chitra-pr-review`
+  entrypoint). Fetches one pull request via `gh`, runs deterministic blast-radius/diff-size
+  pre-checks, then an isolated multi-reviewer `claude -p` security pass over the diff
+  (hardcoded secrets, injection classes, auth bypass, insecure deserialization, dependency
+  risk, prompt injection). Findings are logged to a signed, deduplicated `pr_reviews.jsonl`
+  ledger and reported as one plain PR comment. Conservative default: never merges, approves,
+  requests changes, or fails a required check; `PRReviewPolicy.block_on_findings` (default
+  `false`) is the explicit, off-by-default opt-in for a blocking posture. Ships with a stock
+  `.github/workflows/pr-security-review.yml` trigger on `pull_request` events.
+
 ### Changed
 - The rate-limit guard's never-pause session prefixes are now configured via
   the comma-separated `CHITRA_NEVER_PAUSE_SESSION_PREFIXES` env var instead of

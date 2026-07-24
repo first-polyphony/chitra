@@ -180,6 +180,49 @@ class LoadPolicy(BaseModel):
         return self
 
 
+class PRReviewPolicy(BaseModel):
+    """Configurable deterministic pre-checks and reviewer wiring for the PR review gate.
+
+    ``block_on_findings`` defaults to ``False``: the gate reports findings (ledger entry
+    plus a PR comment) but never blocks a merge on its own. Nothing in ``chitra.pr_review``
+    flips this default; an operator who wants a blocking posture must opt in explicitly.
+    """
+
+    blast_radius_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "auth",
+            "secret",
+            "credential",
+            "password",
+            "token",
+            "key",
+            "billing",
+            "payment",
+            "public_api",
+            "webhook",
+            "permission",
+            "admin",
+        ]
+    )
+    max_diff_lines: int = 500
+    max_diff_files: int = 20
+    reviewer_count: int = 2
+    block_on_findings: bool = False
+
+    @model_validator(mode="after")
+    def validate_pr_review_policy(self) -> Self:
+        """Reject blank keywords or non-positive bounds at configuration load time."""
+        if any(not keyword.strip() for keyword in self.blast_radius_keywords):
+            raise ValueError("blast_radius_keywords entries must be non-empty strings")
+        if self.max_diff_lines < 1:
+            raise ValueError("max_diff_lines must be at least 1")
+        if self.max_diff_files < 1:
+            raise ValueError("max_diff_files must be at least 1")
+        if self.reviewer_count < 1:
+            raise ValueError("reviewer_count must be at least 1")
+        return self
+
+
 class PolicyConfig(BaseModel):
     """The complete optional policy.yaml schema."""
 
@@ -189,6 +232,7 @@ class PolicyConfig(BaseModel):
     guidance: GuidancePolicy = Field(default_factory=GuidancePolicy)
     pause: PausePolicy = Field(default_factory=PausePolicy)
     load: LoadPolicy = Field(default_factory=LoadPolicy)
+    pr_review: PRReviewPolicy = Field(default_factory=PRReviewPolicy)
 
 
 def resolve_guidance(config: PolicyConfig, cwd: Path) -> Path | None:

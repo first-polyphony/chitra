@@ -206,3 +206,28 @@ capabilities:
         argv: [chitra-ownership]
         params: []
         mutates: false
+
+  - name: pr-review
+    kind: tool
+    purpose: >-
+      Run deterministic blast-radius/diff-size pre-checks plus an isolated multi-reviewer
+      security pass over one pull request, then log and report the findings.
+    when_to_use: Run under an external trigger (a GitHub Actions pull_request step, or an operator/cron invocation) against one specific pull request.
+    authority:
+      level: act
+      grants:
+        - Read one pull request's metadata and diff via the gh CLI.
+        - Run isolated claude -p reviewer processes against that diff only, never against chitra's own prospective reply.
+        - Append a signed, deduplicated report to the local PR-review ledger.
+        - Post one plain gh pr comment reporting findings.
+      excludes:
+        - Merge, approve, or request changes on a pull request.
+        - Fail a required check or otherwise block a merge (block_on_findings defaults to false and is never flipped by this tool itself).
+        - Author or edit any code in the reviewed pull request.
+    default_enabled: true
+    commands:
+      - name: chitra-pr-review
+        description: Fetch one pull request, run the PR security review gate, and report findings as a non-blocking comment.
+        argv: [chitra-pr-review]
+        params: []
+        mutates: true

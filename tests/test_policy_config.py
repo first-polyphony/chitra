@@ -13,6 +13,7 @@ from chitra.policy_config import (
     GuidancePolicy,
     LoadPolicy,
     PolicyConfig,
+    PRReviewPolicy,
     UsagePolicy,
     load_policy_config,
     resolve_guidance,
@@ -43,6 +44,9 @@ def test_unconfigured_policy_is_the_current_shipped_behavior(monkeypatch: pytest
         "auto_resume": True,
     }
     assert policy.load == LoadPolicy()
+    assert policy.pr_review == PRReviewPolicy()
+    assert policy.pr_review.block_on_findings is False
+    assert policy.pr_review.reviewer_count == 2
 
 
 def test_usage_policy_loads_overrides_and_rejects_invalid_values(tmp_path: Path) -> None:
@@ -111,6 +115,29 @@ def test_load_policy_block_loads_overrides_and_rejects_inverted_ladders(tmp_path
         {"consecutive_sweeps": 0},
     ):
         path.write_text(yaml.safe_dump({"load": invalid}), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_policy_config(path)
+
+
+def test_pr_review_policy_loads_overrides_and_rejects_invalid_values(tmp_path: Path) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        yaml.safe_dump({"pr_review": {"max_diff_lines": 200, "max_diff_files": 5, "reviewer_count": 3, "block_on_findings": True}}),
+        encoding="utf-8",
+    )
+    loaded = load_policy_config(path).pr_review
+    assert loaded.max_diff_lines == 200
+    assert loaded.max_diff_files == 5
+    assert loaded.reviewer_count == 3
+    assert loaded.block_on_findings is True
+
+    for pr_review in (
+        {"max_diff_lines": 0},
+        {"max_diff_files": 0},
+        {"reviewer_count": 0},
+        {"blast_radius_keywords": ["auth", "  "]},
+    ):
+        path.write_text(yaml.safe_dump({"pr_review": pr_review}), encoding="utf-8")
         with pytest.raises(ValueError):
             load_policy_config(path)
 
