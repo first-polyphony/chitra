@@ -1,0 +1,31 @@
+[Unit]
+Description=Chitra fail-closed ownership provider (dark launch)
+Documentation=https://github.com/first-polyphony/chitra
+After=local-fs.target
+
+[Service]
+Type=simple
+# Provision the static chitra service user and chitra-authority socket group.
+User=chitra
+Group=chitra-authority
+Environment=CHITRA_HOST_ID=replace-with-stable-host-id
+RuntimeDirectory=chitra-ownership
+RuntimeDirectoryMode=0750
+StateDirectory=chitra-ownership
+StateDirectoryMode=0750
+UMask=0077
+# goals.managed.json must be written by the canonical goals manager. Until a
+# fresh digest-bound marker exists, every answer is non-authoritative unknown.
+ExecStart=/path/to/venv/bin/python -m chitra.ownership_provider --socket-path /run/chitra-ownership/provider.sock --state-dir /var/lib/chitra --marker-path /var/lib/chitra/goals.managed.json --generation-fence-path /var/lib/chitra-ownership/ownership-generation.json --state-owner-user chitra --host-id ${CHITRA_HOST_ID} --boot-id-file /proc/sys/kernel/random/boot_id
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/chitra-ownership /var/lib/chitra-ownership
+ReadOnlyPaths=-/var/lib/chitra/goals.json -/var/lib/chitra/goals.managed.json
+
+[Install]
+WantedBy=multi-user.target
