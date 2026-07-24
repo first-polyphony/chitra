@@ -41,8 +41,8 @@ chitra-convo = "chitra.convlog:main"
 chitra-capabilities = "chitra.capabilities:main"
 
 [project.urls]
-Repository = "https://github.com/first-polyphony/chitra"
-Issues = "https://github.com/first-polyphony/chitra/issues"
+Repository = "https://github.com/ReticleWorks/chitra"
+Issues = "https://github.com/ReticleWorks/chitra/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chitra"]

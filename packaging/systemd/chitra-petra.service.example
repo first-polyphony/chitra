@@ -1,6 +1,6 @@
 [Unit]
 Description=Petra observe-only pressure authority (dark launch)
-Documentation=https://github.com/first-polyphony/chitra
+Documentation=https://github.com/ReticleWorks/chitra
 After=chitra-ownership-provider.service
 Requires=chitra-ownership-provider.service
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=chitra rate-limit and host-load guard sweep
-Documentation=https://github.com/first-polyphony/chitra
+Documentation=https://github.com/ReticleWorks/chitra
 After=network-online.target
 
 [Service]

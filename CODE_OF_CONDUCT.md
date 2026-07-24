@@ -23,6 +23,6 @@ This applies to all project spaces (issues, PRs, discussions, and any other offi
 
 ## Enforcement
 
-This is a small, best-effort maintained project — there is no dedicated enforcement team and no SLA. Report violations the same way you'd report a security issue: via [GitHub's private vulnerability reporting](https://github.com/first-polyphony/chitra/security/advisories/new), which reaches the maintainers privately. We'll acknowledge reports within a week where possible.
+This is a small, best-effort maintained project — there is no dedicated enforcement team and no SLA. Report violations the same way you'd report a security issue: via [GitHub's private vulnerability reporting](https://github.com/ReticleWorks/chitra/security/advisories/new), which reaches the maintainers privately. We'll acknowledge reports within a week where possible.
 
 This document is a short-form adaptation of the [Contributor Covenant](https://www.contributor-covenant.org/).
