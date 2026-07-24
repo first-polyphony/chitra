@@ -1,6 +1,6 @@
 [Unit]
 Description=Run the chitra capacity and load-shed sweep every two minutes
-Documentation=https://github.com/first-polyphony/chitra
+Documentation=https://github.com/ReticleWorks/chitra
 
 [Timer]
 OnBootSec=2min

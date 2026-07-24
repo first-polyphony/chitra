@@ -18,7 +18,7 @@ logger = structlog.get_logger(__name__)
 _NUMBERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s+")
 _OPEN_ASK_HEADING_RE = re.compile(
     r"awaiting ruling|open (?:question|ask|decision)s?|decisions? (?:needed|for you)|"
-    r"need(?:s)? (?:you|operator|trey)|for (?:you|trey) to (?:decide|rule)",
+    r"need(?:s)? (?:you|operator)|for (?:you|operator) to (?:decide|rule)",
     re.IGNORECASE,
 )
 _NON_LIST_HEADING_RE = re.compile(r"^(?:#{1,6}\s+|(?:\*\*|__).*?(?:\*\*|__)\s*$|[^.!?]+:\s*$)")

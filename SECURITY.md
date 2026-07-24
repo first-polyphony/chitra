@@ -12,7 +12,7 @@ If your use case involves any of the above, treat that as out of scope and file 
 
 ## Reporting a Vulnerability
 
-Please report security issues via [GitHub's private vulnerability reporting](https://github.com/first-polyphony/chitra/security/advisories/new) rather than a public issue.
+Please report security issues via [GitHub's private vulnerability reporting](https://github.com/ReticleWorks/chitra/security/advisories/new) rather than a public issue.
 
 This is a small, best-effort maintained project — there is no dedicated security team and no SLA. We'll acknowledge reports within a week where possible and fix what's actionable, but we can't promise a fixed response time or CVE issuance.
 

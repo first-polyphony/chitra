@@ -1,6 +1,6 @@
 [Unit]
 Description=Chitra fail-closed ownership provider (dark launch)
-Documentation=https://github.com/first-polyphony/chitra
+Documentation=https://github.com/ReticleWorks/chitra
 After=local-fs.target
 
 [Service]

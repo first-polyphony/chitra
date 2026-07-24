@@ -13,10 +13,10 @@ The one deliberate exception is **goal enforcement**. When a watched session end
 ## Quickstart
 
 ```bash
-pip install chitra-monitor  # or: pip install git+https://github.com/first-polyphony/chitra.git@<tag>
+pip install chitra-monitor  # or: pip install git+https://github.com/ReticleWorks/chitra.git@<tag>
 ```
 
-Replace `<tag>` with a released version from the [tags page](https://github.com/first-polyphony/chitra/tags), or drop `@<tag>` to install from the default branch.
+Replace `<tag>` with a released version from the [tags page](https://github.com/ReticleWorks/chitra/tags), or drop `@<tag>` to install from the default branch.
 
 Requires Python 3.12+ and `tmux` on the host. See [Install](#install) for local development setup, [Configuration](#configuration) for environment variables, and [Delivering into a tmux pane](#delivering-into-a-tmux-pane) for what chitra actually does to a pane.
 
@@ -100,7 +100,7 @@ The full set — ssh options, triage log paths, transcript globs — is document
 Requires Python 3.12+ and `tmux` (chitra shells out to the `tmux` binary; there is no Python tmux dependency).
 
 ```bash
-pip install chitra-monitor  # or: pip install git+https://github.com/first-polyphony/chitra.git@<tag>
+pip install chitra-monitor  # or: pip install git+https://github.com/ReticleWorks/chitra.git@<tag>
 ```
 
 Not yet on PyPI — see [`docs/DESIGN.md`](docs/DESIGN.md) for the packaging rationale.
@@ -108,7 +108,7 @@ Not yet on PyPI — see [`docs/DESIGN.md`](docs/DESIGN.md) for the packaging rat
 For local development:
 
 ```bash
-git clone https://github.com/first-polyphony/chitra.git
+git clone https://github.com/ReticleWorks/chitra.git
 cd chitra
 pip install -e '.[test]'
 pytest
@@ -116,7 +116,7 @@ pytest
 
 ## Getting help
 
-Questions and bug reports: [open an issue](https://github.com/first-polyphony/chitra/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a nontrivial PR; security reports go through [SECURITY.md](SECURITY.md).
+Questions and bug reports: [open an issue](https://github.com/ReticleWorks/chitra/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a nontrivial PR; security reports go through [SECURITY.md](SECURITY.md).
 
 ## Authors
 

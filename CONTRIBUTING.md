@@ -13,7 +13,7 @@ Small, obvious fixes (typos, clear bugs with an included test) don't need a prio
 ## Dev setup
 
 ```bash
-git clone https://github.com/first-polyphony/chitra.git
+git clone https://github.com/ReticleWorks/chitra.git
 cd chitra
 pip install -e '.[test]'
 pytest

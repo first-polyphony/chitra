@@ -1,6 +1,6 @@
 [Unit]
 Description=chitra dispatchd (JSON-queued tmux dispatch daemon)
-Documentation=https://github.com/first-polyphony/chitra
+Documentation=https://github.com/ReticleWorks/chitra
 After=network-online.target
 
 [Service]

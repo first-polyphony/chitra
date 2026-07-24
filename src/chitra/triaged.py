@@ -50,7 +50,7 @@ CRITICAL_DEDUP_WINDOW_SECONDS = 900
 # matches over watchd's opaque state text; triaged never decides what a worker
 # should do in response.
 CRITICAL_RULES = (
-    ("needs_operator", re.compile(r"needs (you|trey|operator|input)|waiting on (you|trey)", re.I)),
+    ("needs_operator", re.compile(r"needs (you|operator|input)|waiting on (you|operator)", re.I)),
     ("merge_landed", re.compile(r'^\s*REVIEW_VERDICT: (CLEAN|ISSUES)\s*$|"state":\s*"MERGED"|\bMerged #\d|\bPR #?\d+ (was )?merged', re.I)),
     ("crash", re.compile(r"Traceback \(most recent call last\)|panic:|\bfatal(:| error)", re.I)),
     ("ci_red", re.compile(r"CI .*(failure|failed|red)|required check.*fail", re.I)),
