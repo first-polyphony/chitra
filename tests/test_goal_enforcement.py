@@ -164,7 +164,7 @@ def test_claude_reviewer_uses_a_fresh_process_and_only_watched_behavior_context(
     def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         prompt = command[2]
-        request = json.loads(prompt.split("INPUT=", 1)[1])
+        request = json.loads(prompt.split("<input>\n", 1)[1].rsplit("\n</input>", 1)[0])
         output = ReviewerVerdict(
             reviewer_id=request["reviewer_id"],
             goal_contract_id=request["frozen_goal"]["contract_id"],

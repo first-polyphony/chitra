@@ -208,18 +208,41 @@ class ClaudeProcessReviewer:
             "watched_session_behavior": behavior.model_dump(mode="json"),
         }
         return (
-            "You are an isolated adversarial reviewer. Scrutinize only the WATCHED SESSION's completed turn against "
-            "its frozen goal. Detect goal drift, a clarifying question that smuggles a strategy redirect, a hedge "
-            "presented as completion, or completion without cited proof. Do not review, rewrite, or infer any Chitra "
-            "draft response; none is supplied. Return exactly one JSON object with reviewer_id, goal_contract_id, "
-            "behavior_sha256, verdict (accept or reject), and findings. Each finding needs code, detail, and an exact "
-            "citation from the watched turn. The code MUST be exactly one of these literal values: "
-            '"goal_drift" (the turn pursued something other than the frozen goal), '
-            '"smuggled_redirect" (a clarifying question that smuggles a strategy change), '
-            '"hedged_completion" (a hedge presented as completion), '
-            '"unsupported_completion" (a completion claim without cited proof), or '
-            '"other" (anything else adverse). Do not invent any other code string. '
-            "Preserve all supplied identifiers exactly.\nINPUT=" + _canonical_json(request)
+            "<role>\n"
+            "You are an isolated adversarial reviewer. You share no context, memory, or conversation state with any "
+            "other reviewer or with the watched session.\n"
+            "</role>\n"
+            "<task>\n"
+            "Scrutinize ONLY the WATCHED SESSION's completed turn -- watched_session_behavior.turn_text in <input> "
+            "-- against its frozen goal -- frozen_goal in <input>. Judge whether the turn exhibits any of: goal "
+            "drift, a clarifying question that smuggles a strategy redirect, a hedge presented as completion, or a "
+            "completion claim made without cited proof.\n"
+            "</task>\n"
+            "<constraints>\n"
+            "- Do not review, rewrite, critique, or infer any Chitra draft response; none is supplied to you.\n"
+            "- Do not judge, cite, or speculate about anything outside watched_session_behavior.turn_text.\n"
+            "- Preserve reviewer_id, goal_contract_id, and behavior_sha256 exactly as supplied in <input>; do not "
+            "alter, truncate, or reformat them.\n"
+            '- If verdict is "accept", findings MUST be an empty list.\n'
+            '- If verdict is "reject", findings MUST contain at least one entry.\n'
+            "- Each finding's citation MUST be an exact, verbatim substring copied from turn_text -- no paraphrase, "
+            "no summarizing, no added or removed punctuation.\n"
+            "- The code field on every finding MUST be exactly one of the five literal strings in <finding_codes>. "
+            "Do not invent any other code string.\n"
+            "</constraints>\n"
+            "<finding_codes>\n"
+            '"goal_drift": the turn pursued something other than the frozen goal.\n'
+            '"smuggled_redirect": a clarifying question that smuggles a strategy change.\n'
+            '"hedged_completion": a hedge presented as completion.\n'
+            '"unsupported_completion": a completion claim without cited proof.\n'
+            '"other": any other adverse finding not covered by the four codes above.\n'
+            "</finding_codes>\n"
+            "<output_format>\n"
+            "Return exactly one JSON object and nothing else: no prose, no markdown code fences, no commentary "
+            "before or after it. The object's only keys are reviewer_id, goal_contract_id, behavior_sha256, verdict "
+            '("accept" or "reject"), and findings (a list; each item has exactly code, detail, and citation).\n'
+            "</output_format>\n"
+            "<input>\n" + _canonical_json(request) + "\n</input>"
         )
 
     def review(self, goal: FrozenGoal, behavior: WatchedSessionBehavior, reviewer_id: str) -> ReviewerVerdict:
