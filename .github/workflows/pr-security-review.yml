@@ -1,0 +1,37 @@
+name: PR security review (chitra, non-blocking)
+
+# Stock trigger for chitra.pr_reviewd: fires on every PR open/update and reports
+# findings as a plain comment. It never fails this job and never requests changes --
+# see chitra.pr_reviewd's module docstring for why blocking was left as an operator
+# opt-in (chitra.policy_config.PRReviewPolicy.block_on_findings).
+#
+# Requires an isolated reviewer credential in this repo's secrets (e.g. an
+# ANTHROPIC_API_KEY usable by the installed `claude` CLI) for the LLM security pass to
+# actually run. Without one, chitra-pr-review still runs its deterministic blast-radius
+# and diff-size pre-checks, then posts a comment noting the LLM pass was unavailable --
+# it does not fail the job either way.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-review:
+    runs-on: ubuntu-latest
+    continue-on-error: true # belt-and-suspenders: this workflow must never gate merge
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install chitra
+        run: pip install -e .
+      - name: Run chitra PR security review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chitra-pr-review --repo "${{ github.repository }}" --pr "${{ github.event.pull_request.number }}"
